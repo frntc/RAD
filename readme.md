@@ -50,7 +50,7 @@ There are two variants of the PCB: a larger one that fits the dimensions of the 
 
   
 
-Here you can find the BOM and assembly information for [RAD v0.1](https://htmlpreview.github.io/?https://github.com/frntc/RAD/blob/master/Gerber/ibom.html; both PCBs have exactly the same location of components, except for the buttons. Sourcing components: you can use LVC and LVX types for the 245, 257, and 573 ICs, you can use a 74LS30 or 74HCT30, make sure that you get the correct CBTD3861.
+Here you can find the BOM and assembly information for [RAD v0.1](https://htmlpreview.github.io/?https://github.com/frntc/RAD/blob/master/Gerber/ibom.html;) both PCBs have exactly the same location of components, except for the buttons. Sourcing components: you can use LVC and LVX types for the 245, 257, and 573 ICs, you can use a 74LS30 or 74HCT30, make sure that you get the correct CBTD3861.
 
   
 
