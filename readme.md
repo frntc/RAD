@@ -1,6 +1,5 @@
 
-<img  align="right"  width="280"  src="https://raw.githubusercontent.com/frntc/Sidekick64/master/Images/rad_logo.jpg">
-
+<img  align="right"  width="280"  src="https://raw.githubusercontent.com/frntc/Sidekick64/main/Images/rad_logo.jpg">
   
 
 The **RAD Expansion Unit** is a cartridge/expansion for the C64 and C128 using a Raspberry Pi 3A+, 3B+ or Zero 2 to implement the actual functionality. Currently it emulates a *RAM Expansion Unit* up to 16mb (compatible to CBM 1700/1750/1764 REU, CLD Super 1750 Clone, CMD 1750/1750XL) and a *GeoRAM/NeoRAM memory expansion* up to 4mb. It also features a menu to browse, manage and launch REU- and GeoRAM-images, NUVIEs, and PRGs. The RAD is designed to not only emulate existing extensions, other things that have already been tested (but not yet included here) are, for example, MOS 6510/8500 emulation (incl. turbo mode) or using the RAD as a (co-)processor (in fact the menu runs on the ARM CPU only).
@@ -15,9 +14,9 @@ RAD's functionality is entirely defined by software. The connecting circuitry is
 
   
 
-<img  src="https://raw.githubusercontent.com/frntc/RAD/master/Images/rad_menu.jpg"  height="200">
+<img  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/rad_menu.jpg"  height="200">
 
-<img  src="https://raw.githubusercontent.com/frntc/RAD/master/Images/rad_cartridge.jpg"  height="200">
+<img  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/rad_cartridge.jpg"  height="200">
 
   
 
@@ -33,7 +32,7 @@ RAD has been tested with various PAL-machines (C64s, C128, C128D) and NTSC-C64s.
 
   
 
-<img  align="right"  src="https://raw.githubusercontent.com/frntc/RAD/master/Images/rad_render.jpg"  height="200">
+<img  align="right"  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/rad_render.jpg"  height="200">
 
   
 
