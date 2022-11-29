@@ -1,0 +1,167 @@
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__   
+;              {_________         {______________		Expansion Unit
+;                     
+;      RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
+;      Copyright (c) 2022 Carsten Dachsbacher <frenetic@dachsbacher.de>
+;     
+;     
+;     This program is free software: you can redistribute it and/or modify
+;     it under the terms of the GNU General Public License as published by
+;     the Free Software Foundation, either version 3 of the License, or
+;     (at your option) any later version.
+;    
+;     This program is distributed in the hope that it will be useful,
+;     but WITHOUT ANY WARRANTY; without even the implied warranty of
+;     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;     GNU General Public License for more details.
+;     
+;     You should have received a copy of the GNU General Public License
+;     along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+* = $ff00
+    .byte 0, 0, 0, 0, 0, 0, 0, 0
+    .byte 0, 0, 0, 0, 0, 0, 0, 0
+
+* = $ff10
+
+    LDA #0
+    STA $D020
+    STA $D021 
+    LDX #$FF
+    SEI
+    TXS
+    CLD
+    STX $D016
+
+    ;init VIC
+    LDA #$03
+    STA $9A
+    LDA #$00
+    STA $99
+    LDX #$2F
+    - LDA TVIC,X
+    STA $CFFF,X
+    DEX
+    BNE -
+    
+    LDA #$7F
+    STA $DC0D
+    STA $DD0D
+    STA $DC00
+    LDA #$08
+    STA $DC0E
+    STA $DD0E
+    STA $DC0F
+    STA $DD0F
+    LDX #$00
+    STX $DC03
+    STX $DD03
+    STX $D418
+    DEX
+    STX $DC02
+    LDA #$07
+    STA $DD00
+    LDA #$3F
+    STA $DD02
+
+    LDA #$95
+    STA $DC04
+    LDA #$42
+    STA $DC05
+
+    LDA #$81
+    STA $DC0D
+    LDA $DC0E
+    AND #$80
+    ORA #$11
+    STA $DC0E
+
+    LDA $DD00
+    ORA #$10
+    STA $DD00
+
+    LDA #0
+    STA $d019
+    sta $d01a
+
+
+    ; LDA #$37 ; WITH KERNAL AND BASIC
+    LDA #$35 ; ONLY IO
+    STA $01
+    LDA #$2F
+    LDA #0
+    STA $00
+
+    LDA $FF0F
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    BLA2:
+    JMP BLA2
+
+
+TVIC
+.byte   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 ;SPRITES (0-16)
+.byte   $1B,0,0,0,0,$08,0,$14,0,0,0,0,0,0,0 ;DATA (17-31)
+.byte   14,6,1,2,3,4,0,1,2,3,4,5,6,7 ;32-46
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+* = $FFFC
+     .byte $10, $ff     ; reset routine, CPU jumps to this address after cold boot
+     .byte $00
+     .byte $00
+
+
