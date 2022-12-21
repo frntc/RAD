@@ -18,6 +18,8 @@ RAD's functionality is entirely defined by software. The connecting circuitry is
 
 <img  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/rad_cartridge.jpg"  height="200">
 
+<img  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/rad_case_bigby.jpg"  height="200">
+
   
 
 </p>
@@ -62,7 +64,8 @@ The first step when building the RAD is soldering the surface-mount components (
 
 ### 3D printed cases
 
-Remains to be done. The PCBs have the some format as the Sidekick64 PCBs -- in case anyone considers adapting the exiting models.
+bigby has designed a case for 3D printing for the RPi 3A+ RAD-PCB (see image above, courtesy of bigby). The files can be downloaded on [Thingyverse](https://www.thingiverse.com/thing:5733086) and [Printables](https://www.printables.com/model/345964-rad-expansion-unit-case).
+As the PCBs have the some format as the Sidekick64 PCBs, other cases might be easy to adapt.
 
   
 
