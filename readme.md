@@ -132,6 +132,7 @@ The *source code* is licensed under *GPLv3*.
 
 The *PCB* is work licensed under a *Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License*.
 
+The font of the RAD logo and cartridge labels build on/have been derived from Elemental End (https://www.dafont.com/elementalend.font) which is free for non-commercial use under the CC BY-NC-ND 3.0 license.
   
 
 ## Misc
