@@ -64,7 +64,7 @@ The first step when building the RAD is soldering the surface-mount components (
 
 ### 3D printed cases
 
-bigby has designed a case for 3D printing for the RPi 3A+ RAD-PCB (see image above, courtesy of bigby). The files can be downloaded on [Thingiverse](https://www.thingiverse.com/thing:5733086) and [Printables](https://www.printables.com/model/345964-rad-expansion-unit-case).
+bigby has designed a case for 3D printing for both the RPi 3A+ RAD-PCB (see image above, courtesy of bigby) and the Zero2 PCB. The files can be downloaded on [Thingiverse](https://www.thingiverse.com/thing:5733086) and [Printables](https://www.printables.com/model/345964-rad-expansion-unit-case).
 As the PCBs have the some format as the Sidekick64 PCBs, other cases might be easy to adapt.
 
   
