@@ -40,7 +40,7 @@ const char timingNames[TIMING_NAMES][32] = {
 	"WAIT_CYCLE_WRITEDATA_VIC2", 
 	"WAIT_CYCLE_MULTIPLEXER", 
 	"WAIT_CYCLE_MULTIPLEXER_VIC2", 
-	"WAIT_TRIGGER_DMA", 
+	"WAIT_TRIGGER_DMA_SK", 
 	"WAIT_RELEASE_DMA",
 	"WAIT_OFFSET_CBTD",
 	"WAIT_DATA_HOLD",
@@ -56,5 +56,6 @@ const char timingNames[TIMING_NAMES][32] = {
 };
 
 extern int readConfig( CLogger *logger, const char *DRIVE, const char *FILENAME );
+extern int changeTimingsInConfig( CLogger *logger, const char *DRIVE, const char *FILENAME, int *newTimingValues );
 
 #endif

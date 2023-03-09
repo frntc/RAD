@@ -49,6 +49,8 @@ u8 isRPiZero2 = 0;
 
 u8 justBooted = 0;
 char SIDKickVersion[ 32 ] = {0};
+u8 supportDAC = 0;
+ u32 hasSIDKick;
 
 extern void *pFIQ;
 extern void warmCache( void *fiqh );
@@ -300,7 +302,7 @@ u16 keyScanRasterLine = keyScanRasterLinePAL;
 static u16 osziPos = 0;
 static u8 oszi[ 320 ];
 
-const char keyTable[ 64 ] = 
+/*const char keyTable[ 64 ] = 
 {
 	0, '3', '5', '7', '9', '+', '?', '1',
 	0, 'W', 'R', 'Y', 'I', 'P', '*', 95,
@@ -310,13 +312,26 @@ const char keyTable[ 64 ] =
 	0, 'S', 'F', 'H', 'K', ':', '=', VK_COMMODORE, 
 	0, 'E', 'T', 'U', 'O', '@', '^', 'Q',
 	0, 0, 'X', 'V', 'N', ',', '/', 0, 
+};*/
+const unsigned char keyTable[ 64 ] = 
+{
+	VK_DELETE, '3',        '5', '7', '9', '+', '?', '1',
+	VK_RETURN, 'W',        'R', 'Y', 'I', 'P', '*', 95,
+	VK_RIGHT,  'A',        'D', 'G', 'J', 'L', ';', 0,
+	VK_F7,     '4',        '6', '8', '0', '-', VK_HOME, '2',
+	VK_F1,     'Z',        'C', 'B', 'M', '.', VK_SHIFT_R, VK_SPACE,
+	VK_F3,     'S',        'F', 'H', 'K', ':', '=', VK_COMMODORE,
+	VK_F5,     'E',        'T', 'U', 'O', '@', '^', 'Q',
+	VK_DOWN,   VK_SHIFT_L, 'X', 'V', 'N', ',', '/', 0, 
 };
+
 
 int meType = 0; // 0 = REU, 1 = GEORAM, 2 = NONE
 int meSize0 = 3, meSize1 = 0;
 const char *meSizeStr[ 9 ] = { "64 KB ", "128 KB", "256 KB", "512 KB", "1 MB  ", "2 MB  ", "4 MB  ", "8 MB  ", "16 MB " };
 
 const char DEFAULT_NUVIE_PLAYER[] = "SD:RAD/nuvieplayer.prg";
+static const char FILENAME_CONFIG[] = "SD:RAD/rad.cfg";
 
 bool radLaunchPRG = false;
 bool radLaunchPRG_NORUN_128 = false;
@@ -929,6 +944,8 @@ const u8 *mahoneyLUT;
 
 static u8 fadeToHelp = 0;
 static u8 showHelp = 0;
+static u8 fadeToTimings = 0;
+static u8 showTimings = 0;
 
 void printHelpScreen( int fade )
 {
@@ -942,26 +959,29 @@ void printHelpScreen( int fade )
 
 	printC64( xp, ++yp, "                                      ", 0, 0, 0, 39 );
 	printC64( xp, ++yp, "Keyboard Commands                   ", c1, 0, 0, 39 );
-	printC64( xp, ++yp, "T,+,-  change expansion type/size   ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "CURSOR navigate in browser          ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "F1/F3  page up/down                 ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "HOME   first entry                  ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "DEL    go one directory up          ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "RETURN start PRG or select image,   ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "       2x autostart NUVIE/GeoRAM    ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "U      unmount REU/GeoRAM image     ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "N      name&save modified image     ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "T,+,-    change expansion type/size ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "CURSOR   navigate in browser        ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "F1/F3    page up/down               ", c2, 0, 0, 39 );
+//	printC64( xp, ++yp, "HOME   first entry                  ", c2, 0, 0, 39 );
+//	printC64( xp, ++yp, "DEL    go one directory up          ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "HOME/DEL first entry, directory up  ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "RETURN   start PRG/select image,    ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "         2x autostart NUVIE/GeoRAM  ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "U        unmount REU/GeoRAM image   ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "N        name&save modified image   ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "\x5c        adjust bus timings         ", c2, 0, 0, 39 );
 
 	yp = 10;
 	printC64( xp, ++yp, "T,+,-", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "CURSOR", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "F1/F3", c3, 0, 0, 39 );
-	printC64( xp, ++yp, "HOME", c3, 0, 0, 39 );
-	printC64( xp, ++yp, "DEL", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "HOME/DEL", c3, 0, 0, 39 );
+	//printC64( xp, ++yp, "DEL", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "RETURN", c3, 0, 0, 39 );
 	++yp;
 	printC64( xp, ++yp, "U", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "N", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "\x5c", c3, 0, 1, 39 );
 
 	{
 		extern u32 temperature;
@@ -974,17 +994,116 @@ void printHelpScreen( int fade )
 			bb[ 10-3 ] = '/';
 			bb[ 11-3 ] = 0;
 		} 
-		if ( SIDType == 0 )
-			sprintf( b, "SID-type n/a", bb ); else
+		extern u8 supportDAC;
+		if ( SIDKickVersion[ 0 ] && supportDAC )
 		{
-			if ( SIDType == ( 6581 & 255 ) )
-				sprintf( b, "%s6581", bb ); else
-				sprintf( b, "%s8580", bb );
+			sprintf( b, "%sDAC", bb );
+		} else
+		{
+			if ( SIDType == 0 )
+				sprintf( b, "SID-type n/a", bb ); else
+			{
+				if ( SIDType == ( 6581 & 255 ) )
+					sprintf( b, "%s6581", bb ); else
+					sprintf( b, "%s8580", bb );
+			}
 		}
 		sprintf( bb, "%s %dC, %s/%s, %s", isRPiZero2 ? "RPi0" : "RPi3", temperature, isC128 ? "C128" : "C64", isNTSC ? "NTSC" : "PAL", b );
 		printC64( xp, ++yp, bb, c4, 0, 0, 39 );
 	}
 
+}
+
+void transferTimingValues( int *timingValues )
+{
+	timingValues[ 0 ] = reu.WAIT_FOR_SIGNALS;
+	timingValues[ 1 ] = reu.WAIT_CYCLE_READ;
+	timingValues[ 2 ] = reu.WAIT_CYCLE_WRITEDATA;
+	//timingValues[ 3 ] = reu.WAIT_CYCLE_READ_BADLINE;
+	timingValues[ 4 ] = reu.WAIT_CYCLE_READ_VIC2;
+	timingValues[ 5 ] = reu.WAIT_CYCLE_WRITEDATA_VIC2;
+	timingValues[ 6 ] = reu.WAIT_CYCLE_MULTIPLEXER;
+	timingValues[ 7 ] = reu.WAIT_CYCLE_MULTIPLEXER_VIC2;
+	timingValues[ 8 ] = reu.WAIT_TRIGGER_DMA;
+	timingValues[ 9 ] = reu.WAIT_RELEASE_DMA;
+	timingValues[ 10 ] = reu.TIMING_OFFSET_CBTD;
+	timingValues[ 11 ] = reu.TIMING_DATA_HOLD;
+	timingValues[ 12 ] = reu.TIMING_TRIGGER_DMA;
+	timingValues[ 13 ] = reu.TIMING_ENABLE_ADDRLATCH;
+	timingValues[ 14 ] = reu.TIMING_READ_BA_WRITING;
+	timingValues[ 15 ] = reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING;
+	timingValues[ 16 ] = reu.TIMING_ENABLE_DATA_WRITING;
+	timingValues[ 17 ] = reu.TIMING_BA_SIGNAL_AVAIL;
+	timingValues[ 18 ] = reu.CACHING_L1_WINDOW_KB / 1024;
+	timingValues[ 19 ] = reu.CACHING_L2_OFFSET_KB / 1024;
+	timingValues[ 20 ] = reu.CACHING_L2_PRELOADS_PER_CYCLE;
+
+	WAIT_FOR_SIGNALS = reu.WAIT_FOR_SIGNALS;
+	WAIT_CYCLE_MULTIPLEXER = reu.WAIT_CYCLE_MULTIPLEXER;
+	WAIT_CYCLE_READ = reu.WAIT_CYCLE_READ;
+	WAIT_CYCLE_WRITEDATA = reu.WAIT_CYCLE_WRITEDATA;
+	WAIT_CYCLE_READ_VIC2 = reu.WAIT_CYCLE_READ_VIC2;
+	WAIT_CYCLE_WRITEDATA_VIC2 = reu.WAIT_CYCLE_WRITEDATA_VIC2;
+	WAIT_CYCLE_MULTIPLEXER_VIC2 = reu.WAIT_CYCLE_MULTIPLEXER_VIC2;
+	WAIT_TRIGGER_DMA = reu.WAIT_TRIGGER_DMA;
+	WAIT_RELEASE_DMA = reu.WAIT_RELEASE_DMA;
+	TIMING_OFFSET_CBTD = reu.TIMING_OFFSET_CBTD;
+	TIMING_DATA_HOLD = reu.TIMING_DATA_HOLD;
+	TIMING_TRIGGER_DMA = reu.TIMING_TRIGGER_DMA;
+	TIMING_ENABLE_ADDRLATCH = reu.TIMING_ENABLE_ADDRLATCH;
+	TIMING_READ_BA_WRITING = reu.TIMING_READ_BA_WRITING;
+	TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING = reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING;
+	TIMING_ENABLE_DATA_WRITING = reu.TIMING_ENABLE_DATA_WRITING;
+	TIMING_BA_SIGNAL_AVAIL = reu.TIMING_BA_SIGNAL_AVAIL;
+}
+
+void printTimingsScreen( int fade )
+{
+	u8 xp = 4;
+	u8 yp = 8;
+
+	const u8 c1 = fadeTabStep[ 1 ][ fade ];
+	const u8 c2 = fadeTabStep[ 3 ][ fade ];
+	const u8 c3 = fadeTabStep[ 13 ][ fade ];
+	const u8 c4 = fadeTabStep[ 12 ][ fade ];
+
+	printC64( xp, ++yp, "                                      ", 0, 0, 0, 39 );
+	printC64( xp, ++yp, "Bus Timing Adjustments                ", c1, 0, 0, 39 );
+
+	char bb[ 64 ];
+	xp = 9;
+	sprintf( bb, "TRIGGER DMA:         %3d", reu.TIMING_TRIGGER_DMA );
+	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+	sprintf( bb, "DATA HOLD:           %3d", reu.TIMING_DATA_HOLD );
+	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+	sprintf( bb, "ENABLE ADDRESS:      %3d", reu.TIMING_ENABLE_ADDRLATCH );
+	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+	sprintf( bb, "TIMING OFFSET:       %3d", reu.TIMING_OFFSET_CBTD );
+	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+
+	sprintf( bb, "READ BA/DMA WRITE:   %3d", reu.TIMING_READ_BA_WRITING );
+	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+	sprintf( bb, "READ BA/DMA READ:    %3d", reu.TIMING_BA_SIGNAL_AVAIL );
+	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+
+	sprintf( bb, "ENABLE RW+ADDR:      %3d", reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING );
+	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+	sprintf( bb, "ENABLE DATA:         %3d", reu.TIMING_ENABLE_DATA_WRITING );
+	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+
+	yp = 10;
+	xp = 4;
+	printC64( xp, ++yp, "A/Q", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "S/W", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "D/E", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "F/R", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "G/T", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "H/Y", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "J/U", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "K/I", c3, 0, 0, 39 );
+
+	yp += 2;
+	printC64( xp, yp, "B Back, P Keep Permanently", c4, 0, 0, 39 );
 }
 
 
@@ -1055,11 +1174,51 @@ u32 readKeyRenderMenu( int fade )
 			repKey ++;
 		if ( k && ( k != lastKey || repKey > 4 ) )
 		{
+			if ( showTimings && fadeToTimings == 0 )
+			{
+				if ( k == 'B' || k == '?' ) 
+				{ 
+					int newTimingValues[ 21 ];
+					transferTimingValues( newTimingValues );
+					extern void temporaryTimingsUpdate( int *newTimingValues );
+					temporaryTimingsUpdate( newTimingValues );
+					fadeToTimings = 128 + 10;
+				}
+				if ( k == 'P' ) return SAVE_CONFIG;
+
+				if ( k == 'A' ) reu.TIMING_TRIGGER_DMA = max( 0, reu.TIMING_TRIGGER_DMA - 5 );
+				if ( k == 'Q' ) reu.TIMING_TRIGGER_DMA += 5;
+				if ( k == 'S' ) reu.TIMING_DATA_HOLD = max( 0, reu.TIMING_DATA_HOLD - 5 );
+				if ( k == 'W' ) reu.TIMING_DATA_HOLD += 5;
+				if ( k == 'D' ) reu.TIMING_ENABLE_ADDRLATCH = max( 0, reu.TIMING_ENABLE_ADDRLATCH - 5 );
+				if ( k == 'E' ) reu.TIMING_ENABLE_ADDRLATCH += 5;
+				if ( k == 'F' ) reu.TIMING_OFFSET_CBTD = max( 0, reu.TIMING_OFFSET_CBTD - 5 );
+				if ( k == 'R' ) reu.TIMING_OFFSET_CBTD += 5;
+				if ( k == 'G' ) reu.TIMING_READ_BA_WRITING = max( 0, reu.TIMING_READ_BA_WRITING - 5 );
+				if ( k == 'T' ) reu.TIMING_READ_BA_WRITING += 5;
+				if ( k == 'H' ) reu.TIMING_BA_SIGNAL_AVAIL = max( 0, reu.TIMING_BA_SIGNAL_AVAIL - 5 );
+				if ( k == 'Y' ) reu.TIMING_BA_SIGNAL_AVAIL += 5;
+				if ( k == 'J' ) reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING = max( 0, reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING - 5 );
+				if ( k == 'U' ) reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING += 5;
+				if ( k == 'K' ) reu.TIMING_ENABLE_DATA_WRITING = max( 0, reu.TIMING_ENABLE_DATA_WRITING - 5 );
+				if ( k == 'I' ) reu.TIMING_ENABLE_DATA_WRITING += 5;
+
+				k = 0;
+			}
+
 			if ( ( k == 'H' || showHelp ) && fadeToHelp == 0 )
 			{
 				if ( showHelp )
 					fadeToHelp = 128 + 10; else
 					fadeToHelp = 10;
+				k = 0;	
+			}
+
+			if ( k == '?' && fadeToTimings == 0 )
+			{
+				if ( showTimings )
+					fadeToTimings = 128 + 10; else
+					fadeToTimings = 10;
 				k = 0;
 			}
 
@@ -1295,6 +1454,25 @@ u32 readKeyRenderMenu( int fade )
 test:
 
 	u8 fadeBetween = 0;
+	#define FADE_TO_OTHER_SCREEN( f, s )									\
+		if ( f ) {															\
+			f --;															\
+			if ( f < 128 ) { /* fading from browser to other screen */		\
+				if ( f > 5 ) 												\
+					fadeBetween = 11 - f; else								\
+					fadeBetween = f; 										\
+				if ( f == 5 ) s = 1;										\
+			} else {														\
+				if ( f > 128 + 5 ) 											\
+					fadeBetween = 128 + 11 - f; else						\
+					fadeBetween = f - 128; 									\
+				if ( f == 128 + 5 ) s = 0;									\
+				if ( f == 128 ) f = 0;										\
+		}	}
+
+	FADE_TO_OTHER_SCREEN( fadeToHelp, showHelp )
+	FADE_TO_OTHER_SCREEN( fadeToTimings, showTimings )
+#if 0
 	if ( fadeToHelp )
 	{
 		fadeToHelp --;
@@ -1314,9 +1492,12 @@ test:
 			if ( fadeToHelp == 128 ) fadeToHelp = 0;
 		}
 	}
+#endif
 	u8 curFade = min( 5, max( fadeBetween, fade ) );
+	if ( showTimings )	
+		printTimingsScreen( curFade ); else
 	if ( showHelp )
-		printHelpScreen( curFade ); else	
+		printHelpScreen( curFade ); else
 		printBrowser( curFade );
 
 	const u32 oo = 1;
@@ -1370,8 +1551,9 @@ test:
 		printC64( kx, 5+oo, "(+/-)", 15, 0, 0, 39 );
 	} else
 	{
-		printC64( kx, 4+oo, "(T)", 15, 0, 0, 39 );
+		printC64( kx, 4+oo, "(T/EXIT)", 15, 0, 0, 39 );
 		printC64( kx+1, 4+oo, "T", 19, 0, 0, 39 );
+		printC64( kx+4, 4+oo, "X", 20, 0, 0, 39 );
 		printC64( kx, 5+oo, "(+/-)", meType == 2 ? 11 : 15, 0, 0, 39 );
 		printC64( px, 7+oo, radImageSelectedPrint, meType == 2 ? 14 : 3, 0, 0, 39 );
 		if ( radImageSelectedFile[ 0 ] != 0 || reu.isModified == meType + 1 )
@@ -1379,16 +1561,16 @@ test:
 			printC64( kx, 6+oo, "           ", meType == 2 ? 11 : 15, 0, 0, 39 );
 		if ( meType != 2 )
 		{
-			printC64( kx + 1, 5+oo, "+", 20, 0, 0, 39 );
-			printC64( kx + 3, 5+oo, "-", 21, 0, 0, 39 );
+			printC64( kx + 1, 5+oo, "+", 21, 0, 0, 39 );
+			printC64( kx + 3, 5+oo, "-", 22, 0, 0, 39 );
 			if ( radImageSelectedFile[ 0 ] != 0 || reu.isModified == meType + 1 )
-				printC64( kx+1, 6+oo, "U", 22, 0, 0, 39 );
+				printC64( kx+1, 6+oo, "U", 23, 0, 0, 39 );
 		}
 		printC64( kx, 7+oo, "           ", 15, 0, 0, 39 );
 		if ( reu.isModified == meType + 1 )
 		{
 			printC64( kx - 1, 7+oo, " (Name&Save)", 15, 0, 0, 39 );
-			printC64( kx + 1, 7+oo, "N", 23, 0, 0, 39 );
+			printC64( kx + 1, 7+oo, "N", 24, 0, 0, 39 );
 		}
 	}
 	screenUpdated = true;
@@ -1459,6 +1641,8 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 	}
 
 	u8 s;
+	if ( supportDAC )
+		s = raw; else
 	if ( SIDType )
 		s = mahoneyLUT[ raw ]; else
 		s = raw >> 4; // 4-bit digi playing
@@ -1722,8 +1906,6 @@ restartHijacking:
 	setStatusMessage( &statusMsg[ 80 ], " " );
 #endif
 
-	SIDKickVersion[ 0 ] = 0;
-
 	memset( oszi, 0, 320 );
 	memset( c64ScreenRAM, 32, 1024 );
 	memset( c64ColorRAM, 2, 1024 );
@@ -1787,52 +1969,92 @@ restartHijacking:
 	SPOKE( 0xdd00, 0b11000000 | ( ( SCREEN1 >> 14 ) ^ 0x03 ) );
 	SPOKE( 0xd018, PAGE1_LOWERCASE );
 
-	#ifdef PLAY_MUSIC
-	for ( int i = 0; i < 16; i++ )
+	// init SID
+	BUS_RESYNC
+	for ( int i = 0; i < 32; i++ )
+		SPOKE( 0xd400 + i, 0 );
+
+
+	static u8 detectSIDOnce = 1;
+
+	if ( detectSIDOnce )
 	{
-		POKE( 0xd41f, 0xff );
-		for ( int i = 0; i < 16; i++ )
+		detectSIDOnce = 0;
+
+		SIDKickVersion[ 0 ] = 0;
+		supportDAC = hasSIDKick = 0;
+
+		int j = 0; 
+		while ( j++ < 16 && SIDType == 0 )
 		{
-			POKE( 0xd41e, 224 + i );
-			PEEK( 0xd41d, *(u8*)&SIDKickVersion[ i ] );
-			BUS_RESYNC
-			BUS_RESYNC
-			BUS_RESYNC
-			BUS_RESYNC
-		}
-		if ( SIDKickVersion[ 0 ] == 0x53 &&
-			 SIDKickVersion[ 1 ] == 0x49 &&
-			 SIDKickVersion[ 2 ] == 0x44 &&
-			 SIDKickVersion[ 3 ] == 0x4b &&
-			 SIDKickVersion[ 4 ] == 0x09 &&
-			 SIDKickVersion[ 5 ] == 0x03 &&
-			 SIDKickVersion[ 6 ] == 0x0b )
-			 SIDKickVersion[ 16 ] = 0; else
-			 SIDKickVersion[ 0 ] = 0;
-
-		bool badline = false;
-
-		do {
-			u8 y;
-			PEEK( 0xd012, y );
-			u16 curRasterLine = y;
-			do
+			POKE( 0xd41f, 0xff );
+			for ( int i = 0; i < 16 + 16; i++ )
 			{
+				POKE( 0xd41e, 224 + i );
+				PEEK( 0xd41d, *(u8*)&SIDKickVersion[ i ] );
+				BUS_RESYNC
+				BUS_RESYNC
+				BUS_RESYNC
+				BUS_RESYNC
+			}
+
+			if ( SIDKickVersion[ 0 ] == 0x53 &&
+				SIDKickVersion[ 1 ] == 0x49 &&
+				SIDKickVersion[ 2 ] == 0x44 &&
+				SIDKickVersion[ 3 ] == 0x4b &&
+				SIDKickVersion[ 4 ] == 0x09 &&
+				SIDKickVersion[ 5 ] == 0x03 &&
+				SIDKickVersion[ 6 ] == 0x0b )
+				{
+					// found SIDKick!
+					SIDKickVersion[ 16 ] = 0; 
+					hasSIDKick = 1;
+
+					// let's see if it's version 0.21 (supporting direct DAC)
+					const unsigned char VERSION_STR_ext[10] = { 0x53, 0x49, 0x44, 0x4b, 0x09, 0x03, 0x0b, 0x00, 0, 21 };
+
+					supportDAC = 1;
+					// check for signature
+					for ( int i = 0; i < 8; i++ )
+						if ( SIDKickVersion[ i + 20 ] != VERSION_STR_ext[ i ] )
+							supportDAC = 0;
+					
+					if ( supportDAC )
+					{
+						int version = SIDKickVersion[ 20 + 8 ] * 100 + SIDKickVersion[ 20 + 9 ];
+						if ( version < 21 )
+							supportDAC = 0;
+					}
+
+					if ( supportDAC && SIDKickVersion[ 20 + 10 ] == 0 )
+						supportDAC = 0;
+
+				} else
+				SIDKickVersion[ 0 ] = 0;
+
+			bool badline = false;
+
+			do {
+				u8 y;
 				PEEK( 0xd012, y );
-			} while ( y == curRasterLine );
+				u16 curRasterLine = y;
+				do
+				{
+					PEEK( 0xd012, y );
+				} while ( y == curRasterLine );
 
-			badline = ( curRasterLine & 7 ) == 3;
-		} while ( badline );
+				badline = ( curRasterLine & 7 ) == 3;
+			} while ( badline );
 
-		u8 a1 = detectSID();
-		u8 a2 = detectSID();
-		u8 a3 = detectSID();
+			u8 a1 = detectSID();
+			u8 a2 = detectSID();
+			u8 a3 = detectSID();
 
-		if ( a1 == a2 && a2 == a3 )
-			SIDType = a1; else		// detection succesful: 6581 or 8580
-			SIDType = 0;			// no success => maybe SwinSID
+			if ( a1 == a2 && a2 == a3 )
+				SIDType = a1; else		// detection succesful: 6581 or 8580
+				SIDType = 0;			// no success => maybe SwinSID
+		}
 	}
-	#endif
 
 	u16 addr = 0x4000;
 	for ( int i = 0; i < 6; i++ )
@@ -1929,6 +2151,11 @@ restartHijacking:
 		SPOKE( 0xd415, 0xff );
 		SPOKE( 0xd416, 0xff );
 		SPOKE( 0xd417, 0x03 );
+
+		// use SIDKick's pure DAC mode if supported
+		if ( supportDAC )
+			SPOKE( 0xd41f, 0xfc );
+
 	}
 
 	mahoneyLUT = ( SIDType == (6581 & 255) ) ? lookup6581 : lookup8580;
@@ -2040,6 +2267,21 @@ restartHijacking:
 				
 			reu.isModified  = false;
 			scanDirectoriesRAD( (char*)DRIVE );
+
+			// fade in 
+			for ( i = 1024 * 6; i >= 0; i -- )
+				handleOneRasterLine( i >> 2, 0 );
+			break;
+		case SAVE_CONFIG:
+			// fade out
+			for ( i = 4; i < 1024 * 6; i ++ )
+				handleOneRasterLine( i >> 2, 1 );
+
+			int timingValues[ 21 ];
+			transferTimingValues( timingValues );
+
+			extern int changeTimingsInConfig( CLogger *logger, const char *DRIVE, const char *FILENAME, int *newTimingValues );
+			changeTimingsInConfig( logger, DRIVE, FILENAME_CONFIG, timingValues );
 
 			// fade in 
 			for ( i = 1024 * 6; i >= 0; i -- )

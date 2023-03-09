@@ -53,12 +53,12 @@
 #define VK_HOME   19
 #define VK_S	  83
 
-#define SHIFT_L  1
+#define VK_SHIFT_L  1
 #define VK_STOP  2
 #define VK_CMD  3
 #define VK_COMMODORE  4
 #define VK_SPACE  32
-#define SHIFT_R  6
+#define VK_SHIFT_R  6
 #define VK_CTRL  7 
 #define VK_BACK  8
 

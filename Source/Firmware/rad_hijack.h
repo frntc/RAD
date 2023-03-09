@@ -52,6 +52,7 @@
 #define RUN_MEMEXP	    0x020000
 #define SAVE_IMAGE	    0x030000
 #define RESET_DETECTED  0x040000
+#define SAVE_CONFIG     0x050000
 
 extern u8 isC128;
 extern int meType; // 0 = REU, 1 = GEORAM, 2 = NONE

@@ -148,3 +148,68 @@ int readConfig( CLogger *logger, const char *DRIVE, const char *FILENAME )
 	return 1;
 }
 
+void temporaryTimingsUpdate( int *newTimingValues )
+{
+	// this value is not present in the REU emulation data structure!
+	for ( int i = 0; i < TIMING_NAMES; i++ )
+		if ( i != 3 )
+			timingValues[ i ] = newTimingValues[ i ];
+}
+
+int changeTimingsInConfig( CLogger *logger, const char *DRIVE, const char *FILENAME, int *newTimingValues )
+{
+	u32 cfgBytes;
+	memset( cfg, 0, 65536 );
+
+	u8 cfgnew[ 65536 ];
+	memset( cfgnew, 0, 65536 );
+	u32 ofs = 0;
+
+	// this value is not present in the REU emulation data structure!
+	newTimingValues[ 3 ] = timingValues[ 3 ];
+
+	if ( !readFile( logger, DRIVE, FILENAME, (u8*)cfg, &cfgBytes ) )
+		return 0;
+
+	cfgPos = cfg;
+
+		while ( *cfgPos != 0 )
+		{
+			char origLine[ 2048 ];
+
+			if ( *cfgPos == 0x0d )
+			{
+				cfgnew[ ofs++ ] = 0x0d;
+				cfgnew[ ofs++ ] = 0x0a;
+			}
+
+			if ( getNextLine() && curLine[ 0 ] )
+			{
+				memcpy( origLine, curLine, 2048 );
+
+				char *rest = NULL;
+				char *ptr = strtok_r( curLine, " \t", &rest );
+
+				if ( ptr )
+				{
+					for ( int i = 0; i < TIMING_NAMES; i++ )
+						if ( strcmp( ptr, timingNames[ i ] ) == 0 && ( ptr = strtok_r( NULL, "\"", &rest ) ) )
+						{
+							sprintf( origLine, "%s %d", timingNames[ i ], newTimingValues[ i ] );
+							break;
+						}
+
+					memcpy( &cfgnew[ ofs ], origLine, strlen( origLine ) );
+					ofs += strlen( origLine );
+					cfgnew[ ofs++ ] = 0x0d;
+					cfgnew[ ofs++ ] = 0x0a;
+				} 
+			}
+		}
+
+	if ( !writeFile( logger, DRIVE, FILENAME, (u8*)&cfgnew[ 0 ], ofs + 4 ) )
+		return 0;
+
+	return 1;
+}
+
