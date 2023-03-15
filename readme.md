@@ -126,6 +126,17 @@ Set up your Circle44.3 and gcc-arm environment, then you can compile RAD almost 
 Be careful not to damage your RPi or 8-bit computer, or anything attached to it. I am not responsible if you or your hardware gets damaged. In principle, you can attach the RPi and other cartridges at the same time, as long as they do not conflict (e.g. in IO ranges or driving signals). I recommend to NOT do this. Again, I'm not taking any responsibility -- if you don't know what you're doing, better don't... use everything at your own risk.
 
   
+## Where did you get your RAD? How to get one?
+
+You've built it yourself? Cool, this project is for tinkerers!
+
+If you have questions about assembling one, don't hesitate to ask!
+
+If you can't build one yourself, there are official sellers of Sidekick64/RAD/SIDKick: www.restore-store.de (all three projects), [www.retro-updates.com](http://www.retro-updates.com) (Sidekick64).
+
+*It is also perfectly fine and appreciated* if someone sells spare PCBs (populated or not) of a PCB-order or manufactures a small batch and offers them on a forum, but I expect the price tag to be lower than that of the aforementioned official sellers.
+
+If you bought a Sidekick64/RAD/SIDKick for the same price or even more, this clearly is a violation of the license and you should ask the seller why they are not respecting open source/CC developers' licenses.   
 
   
 
