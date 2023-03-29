@@ -52,7 +52,7 @@ There are two variants of the PCB: a larger one that fits the dimensions of the 
 
   
 
-Here you can find the BOM and assembly information for [RAD v0.1](https://htmlpreview.github.io/?https://github.com/frntc/RAD/blob/master/Gerber/ibom.html); both PCBs have exactly the same location of components, except for the buttons. Sourcing components: you can use LVC and LVX types for the 245, 257, and 573 ICs, you can use a 74LS30 or 74HCT30, make sure that you get the correct CBTD3861.
+Here you can find the BOM and assembly information for [RAD v0.1](https://htmlpreview.github.io/?https://github.com/frntc/RAD/blob/master/Gerber/ibom.html); both PCBs have exactly the same location of components, except for the buttons. Sourcing components: you can use LVC and LVX types for the 245, 257, and 573 ICs, you can use a 74LS30 or 74HCT30, make sure that you get the correct CBTD3861. The tactile switches, socket and ICs cost about 4 to 6 EUR/USD/CAD from reknown vendors such as Mouser, Digikey, TME if you buy components to 10 RADs (add about 20% if you only buy for one). Including the PCB the costs easily stay below 7 to 9 EUR/USD/CAD. (everything without shipping.)
 
   
 
