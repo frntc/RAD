@@ -209,7 +209,7 @@ bool ListDirectoryContents( const char *sDir, REUDIRENTRY *d, u32 *n, u32 *nElem
 				nAdditionalEntries ++;
 			} else
 			{
-				if ( strstr( FileInfo.fname, ".reu" ) > 0 || strstr( FileInfo.fname, ".REU" ) > 0 )
+				if ( strstr( FileInfo.fname, ".reu" ) || strstr( FileInfo.fname, ".REU" ) )
 				{
 					strcpy( (char*)sort[sortCur].path, sDir );
 					strcpy( (char*)sort[sortCur].filename, FileInfo.fname );
@@ -217,7 +217,7 @@ bool ListDirectoryContents( const char *sDir, REUDIRENTRY *d, u32 *n, u32 *nElem
 					sort[ sortCur++ ].f = REUDIR_REUIMAGE;
 					nAdditionalEntries ++;
 				}
-				if ( strstr( FileInfo.fname, ".georam" ) > 0 || strstr( FileInfo.fname, ".GEORAM" ) > 0 )
+				if ( strstr( FileInfo.fname, ".georam" ) || strstr( FileInfo.fname, ".GEORAM" ) )
 				{
 					strcpy( (char*)sort[sortCur].path, sDir );
 					strcpy( (char*)sort[sortCur].filename, FileInfo.fname );
@@ -225,7 +225,7 @@ bool ListDirectoryContents( const char *sDir, REUDIRENTRY *d, u32 *n, u32 *nElem
 					sort[ sortCur++ ].f = REUDIR_GEOIMAGE;
 					nAdditionalEntries ++;
 				}
-				if ( strstr( FileInfo.fname, ".prg" ) > 0 || strstr( FileInfo.fname, ".PRG" ) > 0 )
+				if ( strstr( FileInfo.fname, ".prg" ) || strstr( FileInfo.fname, ".PRG" ) )
 				{
 					strcpy( (char*)sort[sortCur].path, sDir );
 					strcpy( (char*)sort[sortCur].filename, FileInfo.fname );
