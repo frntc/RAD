@@ -99,6 +99,7 @@ typedef struct
 	u16 length;
 	u8  IRQmask;
 	u8  addrREUCtrl;
+//	15
 	u8  padding1[ 5 + 16 ];
 
 	u16 shadow_addrC64;
@@ -110,7 +111,7 @@ typedef struct
 	u32 wrapAround;
 	u32 wrapAroundDRAM;
 	u32 wrapStoring;
-
+//56
 	u8  irqTriggered;
 	u8  irqCustomTriggerActive;
 	u8  reuWaitForFF00;
@@ -125,9 +126,9 @@ typedef struct
 	u8  isSpecial, isModified;
 	u32 contiguousWrite, contiguousVerify;
 	u32 contiguous1ByteWrites;
-
+// 70
 	u16 pl, pl2, pl3;
-
+// 76
 	// a copy of the timing values (to have all in one L1-block)
 	u16 WAIT_FOR_SIGNALS,
 		WAIT_CYCLE_MULTIPLEXER,
@@ -149,9 +150,11 @@ typedef struct
 		TIMING_BA_SIGNAL_AVAIL, 
 		CACHING_L1_WINDOW_KB,
 		CACHING_L2_OFFSET_KB,
-		CACHING_L2_PRELOADS_PER_CYCLE;
-		
-	u8 padding;
+		CACHING_L2_PRELOADS_PER_CYCLE,
+		TIMING_RW_BEFORE_ADDR,
+		TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING_MINUS_RW_BEFORE_ADDR;
+// 122		
+	u8 padding[ 6 ];
 } __attribute__((packed)) REUSTATE;
 #pragma pack(pop)
 

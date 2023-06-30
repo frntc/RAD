@@ -96,6 +96,7 @@ __attribute__( ( always_inline ) ) inline u8 flipByte( u8 x )
 	return *(u8*)&t;
 }
 
+
 #define DISABLE_ADDRESS_LATCH_AND_BUSTRANSCEIVER( releaseDMA )								\
 	SET_GPIO( bLATCH_A_OE | bGAME_OUT | bOE_Dx | bRW_OUT | (releaseDMA ? bDMA_OUT : 0) );	\
 	INP_GPIO_RW();																			\
@@ -139,7 +140,20 @@ __attribute__( ( always_inline ) ) inline u8 flipByte( u8 x )
 		} while ( !(g2 & bBA) );							\
 	}								
 
+#define HANDLE_BUS_AVAILABLE \
+	WAIT_UP_TO_CYCLE( reu.TIMING_READ_BA_WRITING );			\
+	/*g2 = read32( ARM_GPIO_GPLEV0 );						*/	\
+	if ( VIC_BA ) {											\
+		do {												\
+			WAIT_FOR_CPU_HALFCYCLE							\
+			WAIT_FOR_VIC_HALFCYCLE							\
+			RESTART_CYCLE_COUNTER							\
+			WAIT_UP_TO_CYCLE( reu.TIMING_READ_BA_WRITING );	\
+			g2 = read32( ARM_GPIO_GPLEV0 );					\
+		} while ( !(g2 & bBA) );							\
+	}								
 
+#if 0
 #define HANDLE_BUS_AVAILABLE \
 	WAIT_UP_TO_CYCLE( reu.TIMING_READ_BA_WRITING );			\
 	/*g2 = read32( ARM_GPIO_GPLEV0 );*/						\
@@ -149,7 +163,7 @@ __attribute__( ( always_inline ) ) inline u8 flipByte( u8 x )
 		RESTART_CYCLE_COUNTER								\
 		WAIT_UP_TO_CYCLE( reu.TIMING_READ_BA_WRITING );		\
 		g2 = read32( ARM_GPIO_GPLEV0 ); }
-
+#endif
 
 __attribute__( ( always_inline ) ) inline 
 void emuReadByteREU_p1( register u32 &g2, u16 addr )
@@ -204,26 +218,30 @@ void emuReadByteREU_p3( register u32 &g2, register u8 &x, bool releaseDMA )
 __attribute__( ( always_inline ) ) inline  
 void emuWriteByteREU_p1( register u32 &g2, u16 addr, u8 data )
 {
-	register u32 DD = flipByte( ( addr ) & 255 ) << D0;
+	register u32 A asm ("r3" ) = addr;
+	register u32 DD asm ("r4" );
+	asm volatile( "rbit %w0, %w1" : "=r" ( A ) : "r" ( A ) );	// flip all bits in 32-bit-DWORD
+	DD = ( A & 0x00ff0000 ) << ( D0 - 16 );
+
 	SET_GPIO( bLATCH_A0 | bLATCH_A8 | DD );
 	CLR_GPIO( bDMA_OUT | ( D_FLAG & ( ~DD ) ) );
-	DD = flipByte( ( ( addr ) >> 8 ) & 255 ) << D0;
-	CLR_GPIO( bDIR_Dx | bRW_OUT | bLATCH_A0 );
+	DD = ( A & 0xff000000 ) >> ( 24 - D0 );
+
+	CLR_GPIO( bDIR_Dx | bRW_OUT | bLATCH_A8 );
 	SET_GPIO( DD );
 	CLR_GPIO( ( D_FLAG & ( ~DD ) ) );
-	DD = ( ( data ) & 255 ) << D0;
-	CLR_GPIO( bLATCH_A8 );
+	DD = data << D0;
+	CLR_GPIO( bLATCH_A0 );
+
 	SET_GPIO( DD );
 	CLR_GPIO( ( D_FLAG & ( ~DD ) ) );
 
 	HANDLE_BUS_AVAILABLE
 
-	// this RW_OUT a bit before A_OE and DIR_Dx is important for old VICs,
-	// and took me quite a while to figure out...
-	WAIT_UP_TO_CYCLE(reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING - 40 );
+	WAIT_UP_TO_CYCLE(reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING_MINUS_RW_BEFORE_ADDR );
 	OUT_GPIO( RW_OUT );
 	WAIT_UP_TO_CYCLE( reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING + 0 );
-	CLR_GPIO( bLATCH_A_OE | bDIR_Dx );
+	CLR_GPIO( bLATCH_A_OE );
 
 	WAIT_UP_TO_CYCLE( reu.TIMING_ENABLE_DATA_WRITING );
 	CLR_GPIO( bOE_Dx );

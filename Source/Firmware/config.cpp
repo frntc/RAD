@@ -33,7 +33,7 @@
 #include "helpers.h"
 #include "linux/kernel.h"
 
-u32 radStartup = 0, radStartupSize = 0;
+u32 radStartup = 0, radStartupSize = 0, radSilentMode = 0, radWaitCycles = 200000;
 
 int atoi( char* str )
 {
@@ -86,6 +86,21 @@ int readConfig( CLogger *logger, const char *DRIVE, const char *FILENAME )
 
 			if ( ptr )
 			{
+				if ( strcmp( ptr, "BOOT_DELAY" ) == 0 && ( ptr = strtok_r( NULL, "\"", &rest ) )  )
+				{
+					s32 delay = atoi( ptr );
+					while ( *ptr == '\t' || *ptr == ' ' ) ptr++;
+					if ( delay < 200 ) delay = 200;
+					radWaitCycles = delay * 1000;
+				}
+
+				if ( strcmp( ptr, "VERBOSITY" ) == 0 )
+				{
+					ptr = strtok_r( NULL, " \t", &rest );
+					if ( strcmp( ptr, "NORMAL" ) == 0 ) radSilentMode = 0;
+					if ( strcmp( ptr, "SILENT" ) == 0 ) radSilentMode = 0xffffffff; 
+				}
+
 				if ( strcmp( ptr, "STARTUP" ) == 0 )
 				{
 					ptr = strtok_r( NULL, " \t", &rest );
@@ -144,6 +159,8 @@ int readConfig( CLogger *logger, const char *DRIVE, const char *FILENAME )
 	if ( timingValues[ 18 ] ) CACHING_L1_WINDOW_KB = timingValues[ 18 ];
 	if ( timingValues[ 19 ] ) CACHING_L2_OFFSET_KB = timingValues[ 19 ];
 	if ( timingValues[ 20 ] ) CACHING_L2_PRELOADS_PER_CYCLE = timingValues[ 20 ];
+
+	if ( timingValues[ 21 ] ) TIMING_RW_BEFORE_ADDR = timingValues[ 21 ];
 
 	return 1;
 }

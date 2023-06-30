@@ -52,6 +52,8 @@ u32 CACHING_L1_WINDOW_KB = 0;
 u32 CACHING_L2_OFFSET_KB = 0;
 u32 CACHING_L2_PRELOADS_PER_CYCLE = 0;
 
+u32 TIMING_RW_BEFORE_ADDR = 40;
+
 // initialize what we need for the performance counters
 void initCycleCounter()
 {

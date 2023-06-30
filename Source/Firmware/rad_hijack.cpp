@@ -32,7 +32,6 @@
 #include <circle/machineinfo.h>
 
 //#define DEBUG_REBOOT_RPI_ON_R
-//#define DEBUG_MANUAL_TIMING_ADJUSTMENT
 
 #define PLAY_MUSIC
 
@@ -56,6 +55,8 @@ extern void *pFIQ;
 extern void warmCache( void *fiqh );
 
 #include "lowlevel_dma.h"
+
+static u8 refreshGraphic = 0;
 
 static u8 SIDType;
 #ifdef PLAY_MUSIC
@@ -649,9 +650,14 @@ void injectAndStartPRG( u8 *prg, u32 prgSize, bool holdDMA )
 		SPOKE( addr + i, d );
 	}
 
-	u8 bgColor;
+	u8 bgColor, cursorColor;
 	SPEEK( 0xd021, bgColor );
 	bgColor &= 15;
+
+	SPEEK( 0x0286, cursorColor );
+	cursorColor &= 15;
+
+	const u8 color2keycode[ 16 ] = { 0x90, 0x05, 0x1c, 0x9f, 0x9c, 0x1e, 0x1f, 0x9e, 0x81, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b };
 
 	if ( addr != 0x1c01 && addr != 0x0801 )
 	{
@@ -676,6 +682,7 @@ void injectAndStartPRG( u8 *prg, u32 prgSize, bool holdDMA )
 		SPOKE( kb++, 0x52 ); // r
 		SPOKE( kb++, 0xd5 ); // U
 		SPOKE( kb++, 0x3a ); // :
+		SPOKE( kb++, color2keycode[ cursorColor ] ); // color
 		SPOKE( kb++, 0x0d ); // [RETURN]
 		SPOKE( 0xd0, kb - 0x34a );
 
@@ -704,6 +711,7 @@ void injectAndStartPRG( u8 *prg, u32 prgSize, bool holdDMA )
 		SPOKE( kb++, 0x52 ); // r
 		SPOKE( kb++, 0xd5 ); // U
 		SPOKE( kb++, 0x3a ); // :
+		SPOKE( kb++, color2keycode[ cursorColor ] ); // color
 		SPOKE( kb++, 0x0d ); // [RETURN]
 		SPOKE( 0xc6, kb - 0x277 );
 
@@ -712,12 +720,16 @@ void injectAndStartPRG( u8 *prg, u32 prgSize, bool holdDMA )
 	}
 
 #ifdef STATUS_MESSAGES
-	for ( int j = 0; j < 40; j++ )
+	extern u32 radSilentMode;
+	if ( radSilentMode != 0xffffffff )
 	{
-		SPOKE( 0x0400 + 23 * 40 + j, PETSCII2ScreenCode( statusMsg[ j + 80 ] ) );
-		SPOKE( 0xd800 + 23 * 40 + j, 1 );
-		SPOKE( 0x0400 + 24 * 40 + j, PETSCII2ScreenCode( statusMsg[ j ] ) );
-		SPOKE( 0xd800 + 24 * 40 + j, 1 );
+		for ( int j = 0; j < 40; j++ )
+		{
+			SPOKE( 0x0400 + 23 * 40 + j, PETSCII2ScreenCode( statusMsg[ j + 80 ] ) );
+			SPOKE( 0xd800 + 23 * 40 + j, 1 );
+			SPOKE( 0x0400 + 24 * 40 + j, PETSCII2ScreenCode( statusMsg[ j ] ) );
+			SPOKE( 0xd800 + 24 * 40 + j, 1 );
+		}
 	}
 #endif
 
@@ -803,12 +815,16 @@ void injectKeyInput( const char *s, bool holdDMA )
 	SPOKE( 0x287, bgColor );
 
 #ifdef STATUS_MESSAGES
-	for ( int j = 0; j < 40; j++ )
+	extern u32 radSilentMode;
+	if ( radSilentMode != 0xffffffff )
 	{
-		SPOKE( 0x400 + 23 * 40 + j, PETSCII2ScreenCode( statusMsg[ j + 80 ] ) );
-		SPOKE( 0xd800 + 23 * 40 + j, 1 );
-		SPOKE( 0x400 + 24 * 40 + j, PETSCII2ScreenCode( statusMsg[ j ] ) );
-		SPOKE( 0xd800 + 24 * 40 + j, 1 );
+		for ( int j = 0; j < 40; j++ )
+		{
+			SPOKE( 0x400 + 23 * 40 + j, PETSCII2ScreenCode( statusMsg[ j + 80 ] ) );
+			SPOKE( 0xd800 + 23 * 40 + j, 1 );
+			SPOKE( 0x400 + 24 * 40 + j, PETSCII2ScreenCode( statusMsg[ j ] ) );
+			SPOKE( 0xd800 + 24 * 40 + j, 1 );
+		}
 	}
 #endif
 
@@ -825,6 +841,10 @@ void injectKeyInput( const char *s, bool holdDMA )
 void injectMessage( bool holdDMA )
 {
 	register u32 g2;
+
+	extern u32 radSilentMode;
+	if ( radSilentMode == 0xffffffff )
+		return;
 
 	waitAndHijack( g2 );
 
@@ -1037,6 +1057,7 @@ void transferTimingValues( int *timingValues )
 	timingValues[ 18 ] = reu.CACHING_L1_WINDOW_KB / 1024;
 	timingValues[ 19 ] = reu.CACHING_L2_OFFSET_KB / 1024;
 	timingValues[ 20 ] = reu.CACHING_L2_PRELOADS_PER_CYCLE;
+	timingValues[ 21 ] = reu.TIMING_RW_BEFORE_ADDR;
 
 	WAIT_FOR_SIGNALS = reu.WAIT_FOR_SIGNALS;
 	WAIT_CYCLE_MULTIPLEXER = reu.WAIT_CYCLE_MULTIPLEXER;
@@ -1055,6 +1076,7 @@ void transferTimingValues( int *timingValues )
 	TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING = reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING;
 	TIMING_ENABLE_DATA_WRITING = reu.TIMING_ENABLE_DATA_WRITING;
 	TIMING_BA_SIGNAL_AVAIL = reu.TIMING_BA_SIGNAL_AVAIL;
+	TIMING_RW_BEFORE_ADDR = reu.TIMING_RW_BEFORE_ADDR;
 }
 
 void printTimingsScreen( int fade )
@@ -1090,6 +1112,8 @@ void printTimingsScreen( int fade )
 	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
 	sprintf( bb, "ENABLE DATA:         %3d", reu.TIMING_ENABLE_DATA_WRITING );
 	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+	sprintf( bb, "RW BEFORE ADDR:      %3d", reu.TIMING_RW_BEFORE_ADDR );
+	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
 
 	yp = 10;
 	xp = 4;
@@ -1101,9 +1125,9 @@ void printTimingsScreen( int fade )
 	printC64( xp, ++yp, "H/Y", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "J/U", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "K/I", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "L/O", c3, 0, 0, 39 );
 
-	yp += 2;
-	printC64( xp, yp, "B Back, P Keep Permanently", c4, 0, 0, 39 );
+	printC64( xp, ++yp, "B Back, P Keep Permanently", c4, 0, 0, 39 );
 }
 
 
@@ -1186,22 +1210,45 @@ u32 readKeyRenderMenu( int fade )
 				}
 				if ( k == 'P' ) return SAVE_CONFIG;
 
-				if ( k == 'A' ) reu.TIMING_TRIGGER_DMA = max( 0, reu.TIMING_TRIGGER_DMA - 5 );
-				if ( k == 'Q' ) reu.TIMING_TRIGGER_DMA += 5;
-				if ( k == 'S' ) reu.TIMING_DATA_HOLD = max( 0, reu.TIMING_DATA_HOLD - 5 );
-				if ( k == 'W' ) reu.TIMING_DATA_HOLD += 5;
-				if ( k == 'D' ) reu.TIMING_ENABLE_ADDRLATCH = max( 0, reu.TIMING_ENABLE_ADDRLATCH - 5 );
-				if ( k == 'E' ) reu.TIMING_ENABLE_ADDRLATCH += 5;
-				if ( k == 'F' ) reu.TIMING_OFFSET_CBTD = max( 0, reu.TIMING_OFFSET_CBTD - 5 );
-				if ( k == 'R' ) reu.TIMING_OFFSET_CBTD += 5;
-				if ( k == 'G' ) reu.TIMING_READ_BA_WRITING = max( 0, reu.TIMING_READ_BA_WRITING - 5 );
-				if ( k == 'T' ) reu.TIMING_READ_BA_WRITING += 5;
-				if ( k == 'H' ) reu.TIMING_BA_SIGNAL_AVAIL = max( 0, reu.TIMING_BA_SIGNAL_AVAIL - 5 );
-				if ( k == 'Y' ) reu.TIMING_BA_SIGNAL_AVAIL += 5;
-				if ( k == 'J' ) reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING = max( 0, reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING - 5 );
-				if ( k == 'U' ) reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING += 5;
-				if ( k == 'K' ) reu.TIMING_ENABLE_DATA_WRITING = max( 0, reu.TIMING_ENABLE_DATA_WRITING - 5 );
-				if ( k == 'I' ) reu.TIMING_ENABLE_DATA_WRITING += 5;
+				const int step = 1;
+				if ( k == 'A' ) reu.TIMING_TRIGGER_DMA = max( 0, reu.TIMING_TRIGGER_DMA - step );
+				if ( k == 'Q' ) reu.TIMING_TRIGGER_DMA += step;
+				if ( k == 'S' ) reu.TIMING_DATA_HOLD = max( 0, reu.TIMING_DATA_HOLD - step );
+				if ( k == 'W' ) reu.TIMING_DATA_HOLD += step;
+				if ( k == 'D' ) reu.TIMING_ENABLE_ADDRLATCH = max( 0, reu.TIMING_ENABLE_ADDRLATCH - step );
+				if ( k == 'E' ) reu.TIMING_ENABLE_ADDRLATCH += step;
+				if ( k == 'F' ) reu.TIMING_OFFSET_CBTD = max( 0, reu.TIMING_OFFSET_CBTD - step );
+				if ( k == 'R' ) reu.TIMING_OFFSET_CBTD += step;
+				if ( k == 'G' ) reu.TIMING_READ_BA_WRITING = max( 0, reu.TIMING_READ_BA_WRITING - step );
+				if ( k == 'T' ) reu.TIMING_READ_BA_WRITING += step;
+				if ( k == 'H' ) reu.TIMING_BA_SIGNAL_AVAIL = max( 0, reu.TIMING_BA_SIGNAL_AVAIL - step );
+				if ( k == 'Y' ) reu.TIMING_BA_SIGNAL_AVAIL += step;
+				if ( k == 'J' ) reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING = max( 0, reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING - step );
+				if ( k == 'U' ) reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING += step;
+				if ( k == 'K' ) reu.TIMING_ENABLE_DATA_WRITING = max( 0, reu.TIMING_ENABLE_DATA_WRITING - step );
+				if ( k == 'I' ) reu.TIMING_ENABLE_DATA_WRITING += step;
+				if ( k == 'L' ) reu.TIMING_RW_BEFORE_ADDR = max( 0, reu.TIMING_RW_BEFORE_ADDR - step );
+				if ( k == 'O' ) reu.TIMING_RW_BEFORE_ADDR += step;
+
+				WAIT_FOR_SIGNALS = reu.WAIT_FOR_SIGNALS;
+				WAIT_CYCLE_MULTIPLEXER = reu.WAIT_CYCLE_MULTIPLEXER;
+				WAIT_CYCLE_READ = reu.WAIT_CYCLE_READ;
+				WAIT_CYCLE_WRITEDATA = reu.WAIT_CYCLE_WRITEDATA;
+				WAIT_CYCLE_READ_VIC2 = reu.WAIT_CYCLE_READ_VIC2;
+				WAIT_CYCLE_WRITEDATA_VIC2 = reu.WAIT_CYCLE_WRITEDATA_VIC2;
+				WAIT_CYCLE_MULTIPLEXER_VIC2 = reu.WAIT_CYCLE_MULTIPLEXER_VIC2;
+				WAIT_TRIGGER_DMA = reu.WAIT_TRIGGER_DMA;
+				WAIT_RELEASE_DMA = reu.WAIT_RELEASE_DMA;
+				TIMING_OFFSET_CBTD = reu.TIMING_OFFSET_CBTD;
+				TIMING_DATA_HOLD = reu.TIMING_DATA_HOLD;
+				TIMING_TRIGGER_DMA = reu.TIMING_TRIGGER_DMA;
+				TIMING_ENABLE_ADDRLATCH = reu.TIMING_ENABLE_ADDRLATCH;
+				TIMING_READ_BA_WRITING = reu.TIMING_READ_BA_WRITING;
+				TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING = reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING;
+				TIMING_ENABLE_DATA_WRITING = reu.TIMING_ENABLE_DATA_WRITING;
+				TIMING_BA_SIGNAL_AVAIL = reu.TIMING_BA_SIGNAL_AVAIL;
+				TIMING_RW_BEFORE_ADDR = reu.TIMING_RW_BEFORE_ADDR;
+				reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING_MINUS_RW_BEFORE_ADDR = TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING - TIMING_RW_BEFORE_ADDR;
 
 				k = 0;
 			}
@@ -1254,32 +1301,10 @@ u32 readKeyRenderMenu( int fade )
 			}
 
 
-		#ifdef DEBUG_MANUAL_TIMING_ADJUSTMENT
-			if ( k == 'A' ) reu.TIMING_DATA_HOLD = max( 0, reu.TIMING_DATA_HOLD - 5 );
-			if ( k == 'Q' ) reu.TIMING_DATA_HOLD += 5;
-			if ( k == 'S' ) reu.TIMING_TRIGGER_DMA = max( 0, reu.TIMING_TRIGGER_DMA - 5 );
-			if ( k == 'W' ) reu.TIMING_TRIGGER_DMA += 5;
-			if ( k == 'D' ) reu.TIMING_ENABLE_ADDRLATCH = max( 0, reu.TIMING_ENABLE_ADDRLATCH - 5 );
-			if ( k == 'E' ) reu.TIMING_ENABLE_ADDRLATCH += 5;
-			if ( k == 'F' ) reu.TIMING_READ_BA_WRITING = max( 0, reu.TIMING_READ_BA_WRITING - 5 );
-			if ( k == 'R' ) reu.TIMING_READ_BA_WRITING += 5;
-			if ( k == 'G' ) reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING = max( 0, reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING - 5 );
-			if ( k == 'T' ) reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING += 5;
-			if ( k == 'H' ) reu.TIMING_ENABLE_DATA_WRITING = max( 0, reu.TIMING_ENABLE_DATA_WRITING - 5 );
-			if ( k == 'Y' ) reu.TIMING_ENABLE_DATA_WRITING += 5;
-			if ( k == 'J' ) reu.TIMING_BA_SIGNAL_AVAIL = max( 0, reu.TIMING_BA_SIGNAL_AVAIL - 5 );
-			if ( k == 'U' ) reu.TIMING_BA_SIGNAL_AVAIL += 5;
-			if ( k == 'I' ) reu.TIMING_OFFSET_CBTD = max( 0, reu.TIMING_OFFSET_CBTD - 5 );
-			if ( k == 'K' ) reu.TIMING_OFFSET_CBTD += 5;
-	
-			if ( k == 'B' )
-				return RUN_REBOOT;
-		#else
 			#ifdef DEBUG_REBOOT_RPI_ON_R
 			if ( k == 'R' )
 				return RUN_REBOOT;
 			#endif
-		#endif
 
 			if ( k == 'N' && reu.isModified == meType + 1 )
 			{
@@ -1575,28 +1600,16 @@ test:
 	}
 	screenUpdated = true;
 
-#ifdef DEBUG_MANUAL_TIMING_ADJUSTMENT
-	char bb[ 64 ];
-	sprintf( bb, "HOLD: %d   ", reu.TIMING_DATA_HOLD );
-	printC64( 0, 5, bb, 1, 0, 0, 39 );
-	sprintf( bb, "TDMA: %d   ", reu.TIMING_TRIGGER_DMA );
-	printC64( 0, 6, bb, 1, 0, 0, 39 );
-	sprintf( bb, "ENAD: %d   ", reu.TIMING_ENABLE_ADDRLATCH );
-	printC64( 0, 7, bb, 1, 0, 0, 39 );
-	sprintf( bb, "RDBA: %d   ", reu.TIMING_READ_BA_WRITING );
-	printC64( 0, 8, bb, 1, 0, 0, 39 );
-	sprintf( bb, "ENWR: %d   ", reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING );
-	printC64( 0, 9, bb, 1, 0, 0, 39 );
-	sprintf( bb, "ENDA: %d   ", reu.TIMING_ENABLE_DATA_WRITING );
-	printC64( 0, 10, bb, 1, 0, 0, 39 );
-	sprintf( bb, "BASI: %d   ", reu.TIMING_BA_SIGNAL_AVAIL );
-	printC64( 0, 11, bb, 1, 0, 0, 39 );
-#endif
-
 	//#include "count.h"
 	//char bb[ 64 ];
 	//sprintf( bb, "build: %d*", BUILD_COUNT );
 
+	//char bb[64];
+	//sprintf( bb, "%d  %c   ", k, k );
+	/*if ( refreshGraphic )
+		sprintf( bb, "refresh" ); else
+		sprintf( bb, "scanning" ); 
+	printC64( 0, 6, bb, 1, 0, 0, 39 );*/
 	return 0;
 }
 
@@ -1605,9 +1618,30 @@ test:
 u8 font_logo[ 0x1000 ];
 static u32 actLED_RegOffset, actLED_RegMask;
 
+u16 sdLen = 0;
+u8 spriteData[ 512 ];
+
 u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 {
-	static u32 srCopy = 0, chCopy = 0;
+	u8 t;
+
+	if(0)
+	{
+	static int bla = 0;
+	if ( bla > 312 * 50 )
+	{
+		while ( 1 ) { BUS_RESYNC };
+		u8 t;
+		PEEK( 0xd020,t );
+		return 0;
+	}
+	bla ++;
+	}
+	//BUS_RESYNC
+	//PEEK( 0xd020,t );
+
+	static u32 srCopy = 0, chCopy = 0, lgfCopy = 0, sprCopy = 0, fntCopy = 0;
+	static u8 fl = 0;
 
 	CACHE_PRELOADL2STRM( (u8 *)&c64ColorRAM[ srCopy ] );
 	CACHE_PRELOADL2STRM( (u8 *)&c64ScreenRAM[ srCopy ] );
@@ -1691,7 +1725,7 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 		switch ( rasterCommands[ curRasterCommand ][ 1 ] )
 		{
 		case 0: 
-			POKE( 0xd020, fadeTabStep[ rasterCommands[ curRasterCommand ][ 2 ] ][ fade ] );
+			SPOKE( 0xd020, fadeTabStep[ rasterCommands[ curRasterCommand ][ 2 ] ][ fade ] );
 			break;
 		case 1:
 			SPOKE( 0xd018, rasterCommands[ curRasterCommand ][ 2 ] );
@@ -1716,16 +1750,26 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 		if ( curRasterLine >= 35 && curRasterLine < 38 )
 		{
 			u8 i = curRasterLine - 35;
-			SPOKE( 0xd027 + i, c1 );
-			SPOKE( 0xd02a + i, c2 );
-			SPOKE( SCREEN1 + 1024 - 8 + i, i );
-			SPOKE( SCREEN1 + 1024 - 8 + i+3, i+3 );
+			if ( fade1024 && fadeText )
+			{
+				SPOKE( 0xd027 + i, fadeTabStep[ c1 ][ fade ] );
+				SPOKE( 0xd02a + i, fadeTabStep[ c2 ][ fade ] );
+				SPOKE( SCREEN1 + 1024 - 8 + i, i );
+				SPOKE( SCREEN1 + 1024 - 8 + i+3, i+3 );
+			} else
+			{
+				SPOKE( 0xd027 + i, c1 );
+				SPOKE( 0xd02a + i, c2 );
+				SPOKE( SCREEN1 + 1024 - 8 + i, i );
+				SPOKE( SCREEN1 + 1024 - 8 + i+3, i+3 );
+			}
 		} else
 		if ( fade1024 && fadeText )
 		{
 			u8 x;
-			PEEK( 0xd800 + addr, x );
-			POKE( 0xd800 + addr, fadeTab[ x & 15 ] );
+			//SPEEK( 0xd800 + addr, x );
+			//SPOKE( 0xd800 + addr, fadeTab[ x & 15 ] );
+			SPOKE( 0xd800 + addr, fadeTabStep[ c64ColorRAM[ addr ] ][ fade ] );
 			addr += 3;
 			addr %= 1000;
 		} else
@@ -1745,9 +1789,50 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 				if ( screenUpdated && !fade1024 )
 				{
 					bytesToCopyScreen = min( bytesToCopyScreen, 1000 - srCopy );
+
+					register u32 d1 = *(u32*)&c64ColorRAM[ srCopy ];
+					register u32 d2 = *(u32*)&c64ScreenRAM[ srCopy ];
+
+					register u32 dx, cx = 0;
+					register u16 addr;
+					if ( ( curRasterLine % 3 ) == 0 )
+					{
+						dx = *(u32*)&font_logo[ lgfCopy ]; 
+						addr = CHARSET2 + lgfCopy;
+						lgfCopy += 4;
+						lgfCopy %= 1600;
+					} else
+					if ( ( curRasterLine % 3 ) == 1 )
+					{
+						dx = *(u32*)&spriteData[ sprCopy ]; 
+						addr = 0x4000 + sprCopy;
+						sprCopy += 4;
+						sprCopy %= sdLen;
+					} else
+					{
+						dx = *(u32*)&font_bin[ fntCopy + 2048 ];
+						addr = CHARSET + 2048 + fntCopy;
+						fntCopy += 4;
+						fntCopy &= 2047;
+					}
+
 					BUS_RESYNC
-					SMEMCPY( 0xd800 + srCopy, (u8*)&c64ColorRAM[ srCopy ], bytesToCopyScreen );
-					SMEMCPY( SCREEN1 + srCopy, (u8*)&c64ScreenRAM[ srCopy ], bytesToCopyScreen );
+					for ( register int i = 0; i < 4; i++ )
+					{
+						POKE( 0xd800 + srCopy + i, d1 & 255 ); d1 >>= 8;
+						POKE( SCREEN1 + srCopy + i, d2 & 255 ); d2 >>= 8;
+						if ( !refreshGraphic )
+						{
+							u8 t;
+							PEEK( addr + i, t ); cx |= (u32)t << ( i * 8 );
+						} else
+						{
+							POKE( addr + i, dx & 255 ); dx >>= 8;
+						}
+					}
+
+					if ( !refreshGraphic && cx != dx ) refreshGraphic = 1;
+
 					srCopy += bytesToCopyScreen;
 					if ( srCopy >= 1000 ) 
 						srCopy = 0;
@@ -1756,8 +1841,16 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 
 
 				bytesToCopyOszi = min(1280 - chCopy, bytesToCopyOszi);
+
+				register u32 d1 = *(u32*)&font_bin[ 64 * 8 + chCopy ];
+
 				BUS_RESYNC
-				SMEMCPY( CHARSET + 64 * 8 + chCopy, (u8*)&font_bin[ 64 * 8 + chCopy ], bytesToCopyOszi );
+				for ( register int i = 0; i < 4; i++ )
+				{
+					POKE( CHARSET + 64 * 8 + chCopy + i, d1 & 255 ); d1 >>= 8;
+				}
+				// BUS_RESYNC
+				// SMEMCPY( CHARSET + 64 * 8 + chCopy, (u8*)&font_bin[ 64 * 8 + chCopy ], bytesToCopyOszi );
 				chCopy += bytesToCopyOszi;
 				if ( chCopy >= 1280 ) chCopy = 0;
 			} 
@@ -2057,6 +2150,7 @@ restartHijacking:
 	}
 
 	u16 addr = 0x4000;
+	sdLen = 0;
 	for ( int i = 0; i < 6; i++ )
 	{
 		u8 c = 2 + (i / 3);
@@ -2070,10 +2164,12 @@ restartHijacking:
 				u8 v = 0;
 				for ( int a = 0; a < 8; a++ ) v |= logo[ (x++) + y * 320 ] == c ? (1<<(7-a)) : 0; 
 				SPOKE( addr, v );
+				spriteData[ sdLen ++ ] = v;
 				addr ++;				
 			}
 		}
 		SPOKE( addr, 0 );
+		spriteData[ sdLen ++ ] = 0;
 		addr ++;
 	}
 
@@ -2108,7 +2204,7 @@ restartHijacking:
 	CACHE_PRELOAD_DATA_CACHE( &font_logo[ 0 ], 4096, CACHE_PRELOADL2KEEP )
 	FORCE_READ_LINEAR32a( &font_logo, 4096, 4096 * 8 );
 	BUS_RESYNC
-	SMEMCPY( CHARSET2, &font_logo[0], 0x1000 );
+	SMEMCPY( CHARSET2, &font_logo[0], 0x1000*0+1600 );
 
 	CACHE_PRELOAD_DATA_CACHE( &font_bin[ 0 ], 4096, CACHE_PRELOADL2KEEP )
 	FORCE_READ_LINEAR32a( &font_bin, 4096, 4096 * 8 );
@@ -2217,9 +2313,14 @@ restartHijacking:
 	CACHE_PRELOAD_DATA_CACHE( (u8*)fadeTabStep, 128, CACHE_PRELOADL2KEEP )
 	CACHE_PRELOAD_DATA_CACHE( (u8*)colorCycle, 512, CACHE_PRELOADL2KEEP )
 
+
 	while ( 1 )
 	{
 		u32 r = handleOneRasterLine( 0 );
+
+		u8 t;
+		SPEEK( 0xd020, t );
+
 		int i;
 
 		switch ( ( r & RUN_FLAGS ) )
@@ -2246,23 +2347,21 @@ restartHijacking:
 		case SAVE_IMAGE:
 			// fade out
 			for ( i = 4; i < 1024 * 6; i ++ )
-				handleOneRasterLine( i >> 2, 0 );
+				handleOneRasterLine( i >> 2, 1 );
 
 			if ( meType == 0 ) // REU
 			{
 				sprintf( imgFileName, "SD:REU/%s.reu", imageNameStr );
-				#define REU_MAX_SIZE_KB	16384
-				extern u8 mempool[ REU_MAX_SIZE_KB * 1024 ] AAA;
+				extern u8 *mempoolPtr;
 				imgSize = ( 128 << meSize0 ) * 1024;
-				writeFile( logger, DRIVE, imgFileName, mempool, imgSize );
+				writeFile( logger, DRIVE, imgFileName, mempoolPtr, imgSize );
 			} else
 			if ( meType == 1 ) // GeoRAM
 			{
 				sprintf( imgFileName, "SD:GEORAM/%s.georam", imageNameStr );
-				#define REU_MAX_SIZE_KB	16384
-				extern u8 mempool[ REU_MAX_SIZE_KB * 1024 ] AAA;
+				extern u8 *mempoolPtr;
 				imgSize = ( 512 << meSize1 ) * 1024;
-				writeFile( logger, DRIVE, imgFileName, mempool, imgSize );
+				writeFile( logger, DRIVE, imgFileName, mempoolPtr, imgSize );
 			} 
 				
 			reu.isModified  = false;
@@ -2270,7 +2369,7 @@ restartHijacking:
 
 			// fade in 
 			for ( i = 1024 * 6; i >= 0; i -- )
-				handleOneRasterLine( i >> 2, 0 );
+				handleOneRasterLine( i >> 2, 1 );
 			break;
 		case SAVE_CONFIG:
 			// fade out
@@ -2285,7 +2384,7 @@ restartHijacking:
 
 			// fade in 
 			for ( i = 1024 * 6; i >= 0; i -- )
-				handleOneRasterLine( i >> 2, 0 );
+				handleOneRasterLine( i >> 2, 1 );
 			break;
 		default:
 			break;

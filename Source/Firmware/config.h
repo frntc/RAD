@@ -28,9 +28,9 @@
 #ifndef _config_h
 #define _config_h
 
-extern u32 radStartup, radStartupSize;
+extern u32 radStartup, radStartupSize, radSilentMode, radWaitCycles;
 
-#define TIMING_NAMES 21
+#define TIMING_NAMES 22
 const char timingNames[TIMING_NAMES][32] = {
 	"WAIT_FOR_SIGNALS", 
 	"WAIT_CYCLE_READ", 
@@ -52,7 +52,8 @@ const char timingNames[TIMING_NAMES][32] = {
 	"WAIT_BA_SIGNAL_AVAIL",
 	"CACHING_L1_WINDOW_KB",
 	"CACHING_L2_OFFSET_KB",
-	"CACHING_L2_PRELOADS_PER_CYCLE"
+	"CACHING_L2_PRELOADS_PER_CYCLE",
+	"WAIT_RW_BEFORE_ADDR"
 };
 
 extern int readConfig( CLogger *logger, const char *DRIVE, const char *FILENAME );

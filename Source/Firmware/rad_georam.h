@@ -53,7 +53,8 @@ typedef struct
 volatile static GEOSTATE geo AAA;
 
 // geoRAM memory pool 
-static u8  *geoRAM_Pool = mempool;
+extern u8* mempoolPtr;
+static u8  *geoRAM_Pool = (u8*)mempoolPtr;
 
 // u8* to current window
 #define GEORAM_WINDOW (&geo.RAM[ ( geo.reg[ 1 ] * 16384 ) + ( geo.reg[ 0 ] * 256 ) ])
@@ -62,7 +63,7 @@ static u8  *geoRAM_Pool = mempool;
 static void geoRAM_Init()
 {
 	geo.reg[ 0 ] = geo.reg[ 1 ] = 0;
-	geo.RAM = (u8*)( ( (u64)&geoRAM_Pool[0] + 128 ) & ~127 );
+	geo.RAM = &geoRAM_Pool[0]; //(u8*)( ( (u64)&geoRAM_Pool[0] + 128 ) & ~127 );
 	memset( geo.RAM, 0, geoSizeKB * 1024 );
 
 	geo.c64CycleCount = 0;

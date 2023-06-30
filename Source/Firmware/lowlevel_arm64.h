@@ -62,6 +62,8 @@ extern u32 CACHING_L1_WINDOW_KB;
 extern u32 CACHING_L2_OFFSET_KB;
 extern u32 CACHING_L2_PRELOADS_PER_CYCLE;
 
+extern u32 TIMING_RW_BEFORE_ADDR;
+
 extern u32 modeC128;
 extern u32 modeVIC, modePALNTSC;
 extern u32 hasSIDKick;

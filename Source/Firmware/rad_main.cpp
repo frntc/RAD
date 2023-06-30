@@ -42,6 +42,7 @@ static const char FILENAME_CONFIG[] = "SD:RAD/rad.cfg";
 #include "rad_reu.h"
 #define REU_MAX_SIZE_KB	(16384)
 u8 mempool[ REU_MAX_SIZE_KB * 1024 + 8192 ] AAA = {0};
+u8 *mempoolPtr = &mempool[ 0 ];
 u8 prgLaunch[ 65536 + 2 ] AAA = {0};
 
 // low-level communication code
@@ -203,7 +204,7 @@ u32 temperature;
 #define WAIT_FOR_READY_PROMPT \
 	int done;												\
 	do {													\
-		for ( u32 i = 0; i < 200000; i++ ) 					\
+		for ( u32 i = 0; i < radWaitCycles; i++ ) 					\
 			emuWAIT_FOR_VIC_HALFCYCLE						\
 		done = checkForReadyPrompt( !go64mode );			\
 	} while ( !done );
@@ -260,7 +261,7 @@ void CRAD::Run( void )
 		go64mode = 0;
 		res = 0;
 
-		extern u32 radStartup, radStartupSize;
+		extern u32 radStartup, radStartupSize, radSilentMode, radWaitCycles;
 		if ( radStartup == 1 )
 		{
 			meSize0 = radStartupSize;
@@ -423,12 +424,18 @@ void CRAD::Run( void )
 
 			reu.isModified = 0;
 
-			// wait for "READY." to appear on screen
-			WAIT_FOR_READY_PROMPT
-
 			if ( radLaunchPRG )
-				injectAndStartPRG( prgLaunch, prgSize, true ); else
+			{
+				// wait for "READY." to appear on screen
+				WAIT_FOR_READY_PROMPT
+				injectAndStartPRG( prgLaunch, prgSize, true ); 
+			} else
+			if ( radSilentMode != 0xffffffff )
+			{
+				// wait for "READY." to appear on screen
+				WAIT_FOR_READY_PROMPT
 				injectMessage( false );
+			}
 
 			SyncDataAndInstructionCache();
 			warmCache();
@@ -474,14 +481,26 @@ void CRAD::Run( void )
 				#endif
 			}
 
-			// wait for "READY." to appear on screen
-			WAIT_FOR_READY_PROMPT
-
 			if ( radLaunchPRG )
-				injectAndStartPRG( prgLaunch, prgSize, true ); else
-			if ( radLaunchGEORAM )
-				injectKeyInput( "SYS56832", true ); else
-				injectMessage( true );
+			{
+				// wait for "READY." to appear on screen
+				WAIT_FOR_READY_PROMPT
+				injectAndStartPRG( prgLaunch, prgSize, true ); 
+			} else
+			{
+				if ( radLaunchGEORAM )
+				{
+					// wait for "READY." to appear on screen
+					WAIT_FOR_READY_PROMPT
+					injectKeyInput( "SYS56832", true ); 
+				} else
+				if ( radSilentMode != 0xffffffff )
+				{
+					// wait for "READY." to appear on screen
+					WAIT_FOR_READY_PROMPT
+					injectMessage( true );
+				}
+			}
 
 			geo.isModified = 0;
 
@@ -508,12 +527,14 @@ void CRAD::Run( void )
 		///////////////////////////////////////////////////////////////////////
 		if ( res == RUN_MEMEXP + 3 ) // no memory expansion
 		{
-			// wait for "READY." to appear on screen
-			WAIT_FOR_READY_PROMPT
-
 			if ( radLaunchPRG )
-				injectAndStartPRG( prgLaunch, prgSize, false ); else
 			{
+				WAIT_FOR_READY_PROMPT
+				injectAndStartPRG( prgLaunch, prgSize, false ); 
+			} else
+			if ( radSilentMode != 0xffffffff )
+			{
+				WAIT_FOR_READY_PROMPT
 				#ifdef STATUS_MESSAGES
 				setStatusMessage( &statusMsg[ 0 ], "RAD DISABLED" );
 				setStatusMessage( &statusMsg[ 80 ], " " );
