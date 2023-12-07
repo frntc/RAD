@@ -1,3 +1,12 @@
+<details>
+<summary>Please read if you bought / want to buy a RAD Expansion Unit</summary>
+I’m frustrated to see that some people try making money from open source projects of others although they have been released under a non-commercial license (such as the RAD Expansion Unit). 
+<br><br>
+The production cost for a complete RAD is below 10 Euros/Dollars per piece. There are a few commercial sellers with a permit to sell RADs. They have to not only cover production cost, but also pay taxes, bear additional expenses and comply with various regulations which justifies a higher price tag. 
+<br><br>
+However, if someone who is NOT on the list below charges you more than 15€/$15 US/$20 CAD this is not only a violation of the license (commercial intent), but YOU have been ripped off. I don't blame you as the buyer, but perhaps you should ask the seller how he/she justifies this. Feel free to let me know about these sellers.
+</details>
+
 
 <img  align="right"  width="280"  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/rad_logo.jpg">
   
@@ -140,7 +149,7 @@ You've built it yourself? Cool, this project is for tinkerers!
 
 If you have questions about assembling one, don't hesitate to ask!
 
-If you can't build one yourself, there are official sellers of Sidekick64/RAD/SIDKick: www.restore-store.de (all three projects), [www.retro-updates.com](http://www.retro-updates.com) (Sidekick64).
+If you can't build one yourself, you can get pre-assembled PCBs from PCBWay or from official sellers of Sidekick64/RAD/SIDKick: www.restore-store.de (all three projects), [www.retro-updates.com](http://www.retro-updates.com) (Sidekick64), ausvantage_online, stmlord and jamessahm on ebay (RAD).
 
 *It is also perfectly fine and appreciated* if someone sells spare PCBs (populated or not) of a PCB-order or manufactures a small batch and offers them on a forum, but I expect the price tag to be lower than that of the aforementioned official sellers.
 
