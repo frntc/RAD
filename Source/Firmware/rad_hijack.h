@@ -9,7 +9,7 @@
          {_________         {______________		Expansion Unit
                 
  RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
- Copyright (c) 2022 Carsten Dachsbacher <frenetic@dachsbacher.de>
+ Copyright (c) 2022-2025 Carsten Dachsbacher <frenetic@dachsbacher.de>
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -62,6 +62,7 @@ extern bool radLaunchPRG;
 extern bool radLaunchPRG_NORUN_128;
 extern bool radLaunchGEORAM;
 extern char radLaunchPRGFile[ 1024 ];
+extern bool radLaunchVSF;
 
 extern bool radMemImageModified;
 
@@ -84,3 +85,8 @@ extern void setStatusMessage( char *msg, const char *tmp );
 extern int  hijackC64( bool alreadyInDMA = false );
 extern void initHijack();
 extern u8   checkIfMachineRunning();
+
+#define VSF_SIZE_MODULE_HEADER 22
+
+extern u8   *getVSFModule( u8 *vsf, int vsfSize, char *modulename );
+extern void resetAndInjectVSF( u8 *vsf, u32 vsfSize );

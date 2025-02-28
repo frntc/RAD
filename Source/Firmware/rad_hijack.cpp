@@ -9,7 +9,7 @@
          {_________         {______________		Expansion Unit
                 
  RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
- Copyright (c) 2022 Carsten Dachsbacher <frenetic@dachsbacher.de>
+ Copyright (c) 2022-2025 Carsten Dachsbacher <frenetic@dachsbacher.de>
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -78,11 +78,31 @@ static u32 g2, g3;
 		t = ( x & 128 ) << 1; t |= y;				\
 	} while ( t != r );
 
-#define POKE( a, v ) { emuWriteByteREU_p1( g2, a, v ); emuWriteByteREU_p2( g2, false ); }
-#define PEEK( a, v ) { emuReadByteREU_p1( g2, a ); emuReadByteREU_p2( g2 ); emuReadByteREU_p3( g2, v, false ); }
+
+#define POKE( a, v ) { DMA_WRITEBYTE_P1( a, v ); DMA_WRITEBYTE_P2( false ); }
+#define POKE_NG( a, v ) { DMA_WRITEBYTE_P1( a, v ); DMA_WRITEBYTE_P2_NG( false ); }
+#define PEEK( a, v ) { DMA_READBYTE_P1( a ); DMA_READBYTE_P2(); DMA_READBYTE_P3( v, false ); }
+#define PEEK_NG( a, v ) { DMA_READBYTE_P1( a ); DMA_READBYTE_P2(); DMA_READBYTE_P3_NG( v, false ); }
+
+#define BUSAVAIL( g ) 		( (g) & bBA )
+
+
+void SPOKE_NG( u16 a, u8 v )
+{
+	u32 g2;
+
+	WAIT_FOR_CPU_HALFCYCLE
+	WAIT_FOR_VIC_HALFCYCLE
+	RESTART_CYCLE_COUNTER
+	POKE_NG( a, v );
+
+	return;
+}
 
 void SPOKE( u16 a, u8 v )
 {
+	u32 g2;
+
 	WAIT_FOR_CPU_HALFCYCLE
 	WAIT_FOR_VIC_HALFCYCLE
 	RESTART_CYCLE_COUNTER
@@ -92,6 +112,8 @@ void SPOKE( u16 a, u8 v )
 void SPEEK( u16 a, u8 &v )
 {
 	WAIT_FOR_CPU_HALFCYCLE
+
+wait4bus_SPEEK:
 	WAIT_FOR_VIC_HALFCYCLE
 	RESTART_CYCLE_COUNTER
 	PEEK( a, v )
@@ -303,17 +325,6 @@ u16 keyScanRasterLine = keyScanRasterLinePAL;
 static u16 osziPos = 0;
 static u8 oszi[ 320 ];
 
-/*const char keyTable[ 64 ] = 
-{
-	0, '3', '5', '7', '9', '+', '?', '1',
-	0, 'W', 'R', 'Y', 'I', 'P', '*', 95,
-	0, 'A', 'D', 'G', 'J', 'L', ';', 0,
-	0, '4', '6', '8', '0', '-', VK_HOME, '2',
-	0, 'Z', 'C', 'B', 'M', '.', 0, VK_SPACE,
-	0, 'S', 'F', 'H', 'K', ':', '=', VK_COMMODORE, 
-	0, 'E', 'T', 'U', 'O', '@', '^', 'Q',
-	0, 0, 'X', 'V', 'N', ',', '/', 0, 
-};*/
 const unsigned char keyTable[ 64 ] = 
 {
 	VK_DELETE, '3',        '5', '7', '9', '+', '?', '1',
@@ -327,7 +338,7 @@ const unsigned char keyTable[ 64 ] =
 };
 
 
-int meType = 0; // 0 = REU, 1 = GEORAM, 2 = NONE
+int meType = 0, old_meType = 0; // 0 = REU, 1 = GEORAM, 2 = NONE, 3 = VSF (only set temporary)
 int meSize0 = 3, meSize1 = 0;
 const char *meSizeStr[ 9 ] = { "64 KB ", "128 KB", "256 KB", "512 KB", "1 MB  ", "2 MB  ", "4 MB  ", "8 MB  ", "16 MB " };
 
@@ -337,6 +348,7 @@ static const char FILENAME_CONFIG[] = "SD:RAD/rad.cfg";
 bool radLaunchPRG = false;
 bool radLaunchPRG_NORUN_128 = false;
 bool radLaunchGEORAM = false;
+bool radLaunchVSF = false;
 char radLaunchPRGFile[ 1024 ];
 
 bool radMemImageModified = false;
@@ -407,22 +419,12 @@ u8 checkIfMachineRunning()
 void checkForC128()
 {
 	// check if we're running on a C128
-	isC128 = 0;
-	u8 x, y;
+	u8 y;
 	SPEEK( 0xd030, y );
-	if ( y == 0xff )
-	{
-		SPOKE( 0xd030, 0xfc );
-		SPEEK( 0xd030, x );
-		if ( x == 0xfc )
-		{
-			SPOKE( 0xd030, 0xff );
-			isC128 = 1;
-		}
-	} else
-		isC128 = 1;
 
-	SPOKE( 0xd030, y );
+	isC128 = 0;
+	if ( y == 0xfe || y == 0xfc )
+		isC128 = 1;
 
 	if ( !isC128 ) isC64 = 1;
 
@@ -518,6 +520,7 @@ void waitAndHijack( register u32 &g2 )
 
 	checkForC128();
 	checkForNTSC();
+	isNTSC = 0;
 }
 
 #include "C64Side/ultimax_memcfg.h"
@@ -527,6 +530,7 @@ void startWithUltimax( bool doReset = true )
 	register u32 g2, g3;
 	u8 nNOPs = 0;
 
+restartProcedure:
 	SET_GPIO( bLATCH_A_OE | bIRQ_OUT | bOE_Dx | bRW_OUT );
 	INP_GPIO( RW_OUT );
 	INP_GPIO( IRQ_OUT );
@@ -535,10 +539,12 @@ void startWithUltimax( bool doReset = true )
 	CLR_GPIO( bRESET_OUT | bGAME_OUT | bDMA_OUT );
 
 	CACHE_PRELOAD_DATA_CACHE( &ultimax_memcfg[ 0 ], 256, CACHE_PRELOADL2KEEP )
-	FORCE_READ_LINEAR32a( &ultimax_memcfg, 256, 256 * 8 );
-	CACHE_PRELOAD_INSTRUCTION_CACHE( && ultimaxCRTCFG, 1024 );
+	FORCE_READ_LINEAR32a( &ultimax_memcfg, 256, 256 * 32 );
+	CACHE_PRELOAD_INSTRUCTION_CACHE( && ultimaxCRTCFG, 4096 );
 
 	DELAY( 1 << 20 );
+
+	int step = 0;
 
 ultimaxCRTCFG:
 	WAIT_FOR_CPU_HALFCYCLE
@@ -546,6 +552,8 @@ ultimaxCRTCFG:
 	WAIT_FOR_VIC_HALFCYCLE
 	SET_GPIO( bRESET_OUT | bDMA_OUT );
 	INP_GPIO( RESET_OUT );
+
+	u32 firstAccess = 0, cycleCounter = 1;
 
 	while ( 1 )
 	{
@@ -560,10 +568,14 @@ ultimaxCRTCFG:
 		g3 = read32( ARM_GPIO_GPLEV0 );
 		CLR_GPIO( bMPLEX_SEL );
 
+		u8 addr = ADDRESS0to7;
+
 		if ( ADDRESS_FFxx && CPU_READS_FROM_BUS )
 		{
-			u8 addr = ADDRESS0to7;
 			u8 D = ultimax_memcfg[ addr ];
+
+			if ( addr == step )
+				step ++;
 
 			register u32 DD = ( ( D ) & 255 ) << D0;
 			write32( ARM_GPIO_GPCLR0, ( D_FLAG & ( ~DD ) ) | bOE_Dx | bDIR_Dx );
@@ -572,55 +584,47 @@ ultimaxCRTCFG:
 			WAIT_UP_TO_CYCLE( WAIT_CYCLE_READ );
 			SET_GPIO( bOE_Dx | bDIR_Dx );
 
+			if ( !firstAccess ) firstAccess = cycleCounter;
+
 			if ( D == 0xEA ) nNOPs ++;
 		}
 
 		WAIT_FOR_VIC_HALFCYCLE
 
+		cycleCounter ++;
+
+		if ( cycleCounter > 1000000 ) goto restartProcedure;
+
 		if ( nNOPs > 12 )
+		{
+			CLR_GPIO( bDMA_OUT );
+			WAIT_FOR_CPU_HALFCYCLE
+			WAIT_FOR_VIC_HALFCYCLE
+			WAIT_FOR_CPU_HALFCYCLE
+			WAIT_FOR_VIC_HALFCYCLE
+			WAIT_FOR_CPU_HALFCYCLE
+			WAIT_FOR_VIC_HALFCYCLE
 			return;
+		}
+		
+		//	return;
 	}
 }
 
 
 void waitAndHijackMenu( register u32 &g2 )
 {
-	if ( !isC64 )
-		startWithUltimax();
-	SET_GPIO( bGAME_OUT );
-
-	{
-		OUT_GPIO( DMA_OUT );
-		SET_GPIO( bDMA_OUT );
-
-		CLR_GPIO( bMPLEX_SEL );
-		WAIT_FOR_CPU_HALFCYCLE
-		BEGIN_CYCLE_COUNTER
-		WAIT_FOR_VIC_HALFCYCLE
-
-		u32 cycles = 0;
-		do
-		{
-			WAIT_FOR_CPU_HALFCYCLE
-			WAIT_FOR_VIC_HALFCYCLE
-			RESTART_CYCLE_COUNTER
-			WAIT_UP_TO_CYCLE( TIMING_BA_SIGNAL_AVAIL );
-			g2 = read32( ARM_GPIO_GPLEV0 );
-			cycles ++;
-		} while ( ( g2 & bBA ) && cycles < 250000 );
-
-		emuWAIT_FOR_VIC_HALFCYCLE
-		RESTART_CYCLE_COUNTER
-		WAIT_UP_TO_CYCLE( TIMING_TRIGGER_DMA ); // 80ns after falling Phi2
-		CLR_GPIO( bDMA_OUT );
-	}
-
+	startWithUltimax();
+		
 	WAIT_FOR_CPU_HALFCYCLE
 	WAIT_FOR_VIC_HALFCYCLE
 	RESTART_CYCLE_COUNTER
 
 	checkForC128();
 	checkForNTSC();
+
+	SET_GPIO( bGAME_OUT );
+
 }
 
 
@@ -1008,11 +1012,16 @@ void printHelpScreen( int fade )
 		char bb[ 64 ];
 		char b[64];
 		bb[ 0 ] = 0;
-		if ( SIDKickVersion[ 0 ] )
+		if ( hasSIDKick == 1 )
 		{
 			strcpy( bb, SIDKickVersion );
 			bb[ 10-3 ] = '/';
 			bb[ 11-3 ] = 0;
+		} else
+		if ( hasSIDKick == 2 )
+		{
+			strcpy( bb, "SKpico/" );
+			bb[ 7 ] = 0;
 		} 
 		extern u8 supportDAC;
 		if ( SIDKickVersion[ 0 ] && supportDAC )
@@ -1090,10 +1099,15 @@ void printTimingsScreen( int fade )
 	const u8 c4 = fadeTabStep[ 12 ][ fade ];
 
 	printC64( xp, ++yp, "                                      ", 0, 0, 0, 39 );
+	#ifdef OLD_BUS_PROTOCOL
+	printC64( xp, ++yp, "Bus Timings (old protocol)            ", c1, 0, 0, 39 );
+	#else
 	printC64( xp, ++yp, "Bus Timing Adjustments                ", c1, 0, 0, 39 );
+	#endif
 
 	char bb[ 64 ];
 	xp = 9;
+
 	sprintf( bb, "TRIGGER DMA:         %3d", reu.TIMING_TRIGGER_DMA );
 	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
 	sprintf( bb, "DATA HOLD:           %3d", reu.TIMING_DATA_HOLD );
@@ -1103,17 +1117,31 @@ void printTimingsScreen( int fade )
 	sprintf( bb, "TIMING OFFSET:       %3d", reu.TIMING_OFFSET_CBTD );
 	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
 
+
+#ifdef OLD_BUS_PROTOCOL
 	sprintf( bb, "READ BA/DMA WRITE:   %3d", reu.TIMING_READ_BA_WRITING );
 	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
-	sprintf( bb, "READ BA/DMA READ:    %3d", reu.TIMING_BA_SIGNAL_AVAIL );
+#else
+	sprintf( bb, "WRITE DATA:          %3d", reu.WAIT_CYCLE_WRITEDATA );
 	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+#endif
 
+#ifdef OLD_BUS_PROTOCOL
+	sprintf( bb, "READ BA/DMA READ:    %3d", reu.TIMING_BA_SIGNAL_AVAIL );
+#else
+	sprintf( bb, "READ BA:             %3d", reu.TIMING_BA_SIGNAL_AVAIL + 675 - 261 );
+#endif
+
+	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
 	sprintf( bb, "ENABLE RW+ADDR:      %3d", reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING );
 	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+
+#ifdef OLD_BUS_PROTOCOL
 	sprintf( bb, "ENABLE DATA:         %3d", reu.TIMING_ENABLE_DATA_WRITING );
 	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
 	sprintf( bb, "RW BEFORE ADDR:      %3d", reu.TIMING_RW_BEFORE_ADDR );
 	printC64( xp, ++yp, bb, c2, 0, 0, 39 );
+#endif 
 
 	yp = 10;
 	xp = 4;
@@ -1124,8 +1152,10 @@ void printTimingsScreen( int fade )
 	printC64( xp, ++yp, "G/T", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "H/Y", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "J/U", c3, 0, 0, 39 );
+#ifdef OLD_BUS_PROTOCOL
 	printC64( xp, ++yp, "K/I", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "L/O", c3, 0, 0, 39 );
+#endif
 
 	printC64( xp, ++yp, "B Back, P Keep Permanently", c4, 0, 0, 39 );
 }
@@ -1219,16 +1249,24 @@ u32 readKeyRenderMenu( int fade )
 				if ( k == 'E' ) reu.TIMING_ENABLE_ADDRLATCH += step;
 				if ( k == 'F' ) reu.TIMING_OFFSET_CBTD = max( 0, reu.TIMING_OFFSET_CBTD - step );
 				if ( k == 'R' ) reu.TIMING_OFFSET_CBTD += step;
+			#ifdef OLD_BUS_PROTOCOL
 				if ( k == 'G' ) reu.TIMING_READ_BA_WRITING = max( 0, reu.TIMING_READ_BA_WRITING - step );
 				if ( k == 'T' ) reu.TIMING_READ_BA_WRITING += step;
+			#else
+				if ( k == 'G' ) reu.WAIT_CYCLE_WRITEDATA = max( 0, reu.WAIT_CYCLE_WRITEDATA - step );
+				if ( k == 'T' ) reu.WAIT_CYCLE_WRITEDATA += step;
+			#endif
 				if ( k == 'H' ) reu.TIMING_BA_SIGNAL_AVAIL = max( 0, reu.TIMING_BA_SIGNAL_AVAIL - step );
 				if ( k == 'Y' ) reu.TIMING_BA_SIGNAL_AVAIL += step;
 				if ( k == 'J' ) reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING = max( 0, reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING - step );
 				if ( k == 'U' ) reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING += step;
+			
+			#ifdef OLD_BUS_PROTOCOL
 				if ( k == 'K' ) reu.TIMING_ENABLE_DATA_WRITING = max( 0, reu.TIMING_ENABLE_DATA_WRITING - step );
 				if ( k == 'I' ) reu.TIMING_ENABLE_DATA_WRITING += step;
 				if ( k == 'L' ) reu.TIMING_RW_BEFORE_ADDR = max( 0, reu.TIMING_RW_BEFORE_ADDR - step );
 				if ( k == 'O' ) reu.TIMING_RW_BEFORE_ADDR += step;
+			#endif
 
 				WAIT_FOR_SIGNALS = reu.WAIT_FOR_SIGNALS;
 				WAIT_CYCLE_MULTIPLEXER = reu.WAIT_CYCLE_MULTIPLEXER;
@@ -1322,6 +1360,7 @@ u32 readKeyRenderMenu( int fade )
 				radLaunchGEORAM = false;
 				radLaunchPRG	= false;
 				radLaunchPRG_NORUN_128 = false;
+				radLaunchVSF = false;
 
 				return RUN_MEMEXP + meType + 1;
 			} 
@@ -1334,6 +1373,7 @@ u32 readKeyRenderMenu( int fade )
 				strcpy( radImageSelectedPrint, "_____________________" );
 				radLoadREUImage = false;
 				radLoadGeoImage = false;
+				radLaunchVSF = false;
 				reu.isModified  = 0;
 			}
 
@@ -1346,6 +1386,7 @@ u32 readKeyRenderMenu( int fade )
 				strcpy( radImageSelectedPrint, "_____________________" );
 				radLoadREUImage = false;
 				radLoadGeoImage = false;
+				radLaunchVSF = false;
 				reu.isModified  = 0;
 			} else
 			if ( k == '+' || k == '-' ) 
@@ -1362,6 +1403,7 @@ u32 readKeyRenderMenu( int fade )
 				strcpy(radImageSelectedPrint, "_____________________");
 				radLoadREUImage = false;
 				radLoadGeoImage = false;
+				radLaunchVSF = false;
 				reu.isModified = 0;
 			} else
 				cmd = handleKey( k );
@@ -1405,6 +1447,39 @@ u32 readKeyRenderMenu( int fade )
 					}
 				}
 			}
+			if ( cmd == REUMENU_SELECT_FILE_VSF )
+			{
+				reu.isModified = 0;
+				old_meType = meType;
+				meType = 3;
+
+				// guess REU size
+				u32 guessedSize = dirSelectedFileSize - ( 64 + 120 ) * 1024;
+				u32 s = 128 * 1024; 
+				meSize0 = 0;
+				while ( s < guessedSize && meSize0 < 7 ) { s <<= 1; meSize0 ++; }
+
+				strncpy( radImageSelectedFile, dirSelectedFile, 1023 );
+				strncpy( radImageSelectedName, dirSelectedName, 1023 );
+				memset( radImageSelectedPrint, 0, 22 );
+				// if name of VSF should be printed under "Image":
+				//strncpy( radImageSelectedPrint, dirSelectedName, 21 );
+				//removeFileExt( radImageSelectedPrint );
+
+				char tmp[ 40 ];
+
+				#ifdef STATUS_MESSAGES
+				sprintf( tmp, "%s (VSF %dK)", radImageSelectedPrint, dirSelectedFileSize / 1024 );
+				setStatusMessage( &statusMsg[ 0 ], tmp );
+				#endif
+
+				radLaunchPRG = false;
+				radLaunchPRG_NORUN_128 = false;
+				radLaunchGEORAM = false;
+				radLaunchVSF = true;
+				return RUN_MEMEXP + meType + 1;
+
+			}
 			if ( cmd == REUMENU_SELECT_FILE_GEO || cmd == REUMENU_START_GEORAM )
 			{
 				if ( dirSelectedFileSize >= 512 * 1024 && dirSelectedFileSize <= 4096 * 1024 )
@@ -1433,6 +1508,7 @@ u32 readKeyRenderMenu( int fade )
 						radLaunchPRG = false;
 						radLaunchPRG_NORUN_128 = false;
 						radLaunchGEORAM = true;
+						radLaunchVSF = false;
 						return RUN_MEMEXP + meType + 1;
 					}
 				}
@@ -1452,11 +1528,15 @@ u32 readKeyRenderMenu( int fade )
 
 					sprintf( tmp, "%s (%2.1fK, $0000)", tmp1, (float)dirSelectedFileSize / 1024.0f );
 					setStatusMessage( &statusMsg[ 120 ], tmp );
+
+					tmp[ 0 ] = 0;
+					setStatusMessage( &statusMsg[ 0 ], tmp );
 				#endif
 
 					strncpy( radLaunchPRGFile, dirSelectedFile, 1023 );
 					radLaunchPRG = true;
 					radLaunchPRG_NORUN_128 = !(k == VK_COMMODORE_RETURN);
+					radLaunchVSF = false;
 					return RUN_MEMEXP + meType + 1;
 				}
 			}
@@ -1497,27 +1577,7 @@ test:
 
 	FADE_TO_OTHER_SCREEN( fadeToHelp, showHelp )
 	FADE_TO_OTHER_SCREEN( fadeToTimings, showTimings )
-#if 0
-	if ( fadeToHelp )
-	{
-		fadeToHelp --;
-		if ( fadeToHelp < 128 )  // fading from browser to help
-		{
-			//12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1
-			if ( fadeToHelp > 5 ) 
-				fadeBetween = 11 - fadeToHelp; else
-				fadeBetween = fadeToHelp; 
-			if ( fadeToHelp == 5 ) showHelp = 1;
-		} else
-		{
-			if ( fadeToHelp > 128 + 5 ) 
-				fadeBetween = 128 + 11 - fadeToHelp; else
-				fadeBetween = fadeToHelp - 128; 
-			if ( fadeToHelp == 128 + 5 ) showHelp = 0;
-			if ( fadeToHelp == 128 ) fadeToHelp = 0;
-		}
-	}
-#endif
+
 	u8 curFade = min( 5, max( fadeBetween, fade ) );
 	if ( showTimings )	
 		printTimingsScreen( curFade ); else
@@ -1545,6 +1605,11 @@ test:
 	if ( meType == 2 )
 	{
 		printC64( vx, 4+oo, "none  ", 3, 0, 0, 39 );
+		printC64( vx, 5+oo, "      ", 3, 0, 0, 39 );
+	}
+	if ( meType == 3 )
+	{
+		printC64( vx, 4+oo, "(VSF) ", 3, 0, 0, 39 );
 		printC64( vx, 5+oo, "      ", 3, 0, 0, 39 );
 	}
 
@@ -1600,16 +1665,6 @@ test:
 	}
 	screenUpdated = true;
 
-	//#include "count.h"
-	//char bb[ 64 ];
-	//sprintf( bb, "build: %d*", BUILD_COUNT );
-
-	//char bb[64];
-	//sprintf( bb, "%d  %c   ", k, k );
-	/*if ( refreshGraphic )
-		sprintf( bb, "refresh" ); else
-		sprintf( bb, "scanning" ); 
-	printC64( 0, 6, bb, 1, 0, 0, 39 );*/
 	return 0;
 }
 
@@ -1623,25 +1678,7 @@ u8 spriteData[ 512 ];
 
 u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 {
-	u8 t;
-
-	if(0)
-	{
-	static int bla = 0;
-	if ( bla > 312 * 50 )
-	{
-		while ( 1 ) { BUS_RESYNC };
-		u8 t;
-		PEEK( 0xd020,t );
-		return 0;
-	}
-	bla ++;
-	}
-	//BUS_RESYNC
-	//PEEK( 0xd020,t );
-
 	static u32 srCopy = 0, chCopy = 0, lgfCopy = 0, sprCopy = 0, fntCopy = 0;
-	static u8 fl = 0;
 
 	CACHE_PRELOADL2STRM( (u8 *)&c64ColorRAM[ srCopy ] );
 	CACHE_PRELOADL2STRM( (u8 *)&c64ScreenRAM[ srCopy ] );
@@ -1674,7 +1711,7 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 		raw = ( (int)raw - 128 ) * sc / 1024 + 128;
 	}
 
-	u8 s;
+	register volatile u8 s;
 	if ( supportDAC )
 		s = raw; else
 	if ( SIDType )
@@ -1722,13 +1759,17 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 		if ( curRasterCommand == 0 )
 			frameCount ++;
 
+		register volatile u8 x;
+
 		switch ( rasterCommands[ curRasterCommand ][ 1 ] )
 		{
 		case 0: 
-			SPOKE( 0xd020, fadeTabStep[ rasterCommands[ curRasterCommand ][ 2 ] ][ fade ] );
+			x = fadeTabStep[ rasterCommands[ curRasterCommand ][ 2 ] ][ fade ];
+			SPOKE( 0xd020, x );
 			break;
 		case 1:
-			SPOKE( 0xd018, rasterCommands[ curRasterCommand ][ 2 ] );
+			x = rasterCommands[ curRasterCommand ][ 2 ];
+			SPOKE( 0xd018, x );
 			break;
 		default:
 			break;
@@ -1740,6 +1781,7 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 	{
 		static u8 nthFrame = 0;
 		static u8 c1, c2;
+		register volatile u8 cc1, cc2;
 
 		if ( curRasterLine == 34 )
 		{
@@ -1752,24 +1794,28 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 			u8 i = curRasterLine - 35;
 			if ( fade1024 && fadeText )
 			{
-				SPOKE( 0xd027 + i, fadeTabStep[ c1 ][ fade ] );
-				SPOKE( 0xd02a + i, fadeTabStep[ c2 ][ fade ] );
+				cc1 = fadeTabStep[ c1 ][ fade ];
+				cc2 = fadeTabStep[ c2 ][ fade ];
+				SPOKE( 0xd027 + i, cc1 );
+				SPOKE( 0xd02a + i, cc2 );
 				SPOKE( SCREEN1 + 1024 - 8 + i, i );
 				SPOKE( SCREEN1 + 1024 - 8 + i+3, i+3 );
 			} else
 			{
-				SPOKE( 0xd027 + i, c1 );
-				SPOKE( 0xd02a + i, c2 );
+				cc1 = c1; cc2 = c2;
+				SPOKE( 0xd027 + i, cc1 );
+				SPOKE( 0xd02a + i, cc2 );
 				SPOKE( SCREEN1 + 1024 - 8 + i, i );
 				SPOKE( SCREEN1 + 1024 - 8 + i+3, i+3 );
 			}
 		} else
 		if ( fade1024 && fadeText )
 		{
-			u8 x;
+			register volatile u8 x;
 			//SPEEK( 0xd800 + addr, x );
 			//SPOKE( 0xd800 + addr, fadeTab[ x & 15 ] );
-			SPOKE( 0xd800 + addr, fadeTabStep[ c64ColorRAM[ addr ] ][ fade ] );
+			x = fadeTabStep[ c64ColorRAM[ addr ] ][ fade ];
+			SPOKE( 0xd800 + addr, x );
 			addr += 3;
 			addr %= 1000;
 		} else
@@ -1790,11 +1836,11 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 				{
 					bytesToCopyScreen = min( bytesToCopyScreen, 1000 - srCopy );
 
-					register u32 d1 = *(u32*)&c64ColorRAM[ srCopy ];
-					register u32 d2 = *(u32*)&c64ScreenRAM[ srCopy ];
+					register volatile u32 d1 = *(u32*)&c64ColorRAM[ srCopy ];
+					register volatile u32 d2 = *(u32*)&c64ScreenRAM[ srCopy ];
 
-					register u32 dx, cx = 0;
-					register u16 addr;
+					register volatile u32 dx, cx = 0;
+					register volatile u16 addr;
 					if ( ( curRasterLine % 3 ) == 0 )
 					{
 						dx = *(u32*)&font_logo[ lgfCopy ]; 
@@ -1831,6 +1877,7 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 						}
 					}
 
+					// TODO 
 					if ( !refreshGraphic && cx != dx ) refreshGraphic = 1;
 
 					srCopy += bytesToCopyScreen;
@@ -1842,7 +1889,7 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 
 				bytesToCopyOszi = min(1280 - chCopy, bytesToCopyOszi);
 
-				register u32 d1 = *(u32*)&font_bin[ 64 * 8 + chCopy ];
+				register volatile u32 d1 = *(u32*)&font_bin[ 64 * 8 + chCopy ];
 
 				BUS_RESYNC
 				for ( register int i = 0; i < 4; i++ )
@@ -1972,6 +2019,14 @@ restartHijacking:
 	if ( !alreadyInDMA )
 		waitAndHijackMenu( g2 );
 
+	SPOKE( 0xdc0d, 0x7f );
+	SPOKE( 0xd01a, 0x01 );
+	SPOKE( 0xd011, 0x1b );
+	SPOKE( 0xd012, 0x10 );
+	SPEEK( 0xdc0d, x );
+	SPEEK( 0xdd0d, x );
+	SPEEK( 0xd019, x );
+
 	checkForC128();
 	checkForNTSC();
 
@@ -1983,6 +2038,9 @@ restartHijacking:
 #ifdef PLAY_MUSIC
 	wavPosition = 0;
 #endif
+
+	if ( meType == 3 )
+		meType = old_meType;
 
 	radLaunchPRG = false;
 	radLaunchPRGFile[ 0 ] = 0; 
@@ -2080,17 +2138,14 @@ restartHijacking:
 		int j = 0; 
 		while ( j++ < 16 && SIDType == 0 )
 		{
-			POKE( 0xd41f, 0xff );
+			SPOKE( 0xd41f, 0xff );
 			for ( int i = 0; i < 16 + 16; i++ )
 			{
-				POKE( 0xd41e, 224 + i );
-				PEEK( 0xd41d, *(u8*)&SIDKickVersion[ i ] );
-				BUS_RESYNC
-				BUS_RESYNC
-				BUS_RESYNC
-				BUS_RESYNC
+				SPOKE( 0xd41e, 224 + i );
+				SPEEK( 0xd41d, *(u8*)&SIDKickVersion[ i ] );
 			}
 
+			// SIDKick (Teensy) ?
 			if ( SIDKickVersion[ 0 ] == 0x53 &&
 				SIDKickVersion[ 1 ] == 0x49 &&
 				SIDKickVersion[ 2 ] == 0x44 &&
@@ -2098,32 +2153,56 @@ restartHijacking:
 				SIDKickVersion[ 4 ] == 0x09 &&
 				SIDKickVersion[ 5 ] == 0x03 &&
 				SIDKickVersion[ 6 ] == 0x0b )
-				{
-					// found SIDKick!
-					SIDKickVersion[ 16 ] = 0; 
-					hasSIDKick = 1;
+			{
+				// found SIDKick!
+				SIDKickVersion[ 16 ] = 0; 
+				hasSIDKick = 1;
 
-					// let's see if it's version 0.21 (supporting direct DAC)
-					const unsigned char VERSION_STR_ext[10] = { 0x53, 0x49, 0x44, 0x4b, 0x09, 0x03, 0x0b, 0x00, 0, 21 };
+				// let's see if it's version 0.21 (supporting direct DAC)
+				const unsigned char VERSION_STR_ext[10] = { 0x53, 0x49, 0x44, 0x4b, 0x09, 0x03, 0x0b, 0x00, 0, 21 };
 
-					supportDAC = 1;
-					// check for signature
-					for ( int i = 0; i < 8; i++ )
-						if ( SIDKickVersion[ i + 20 ] != VERSION_STR_ext[ i ] )
-							supportDAC = 0;
-					
-					if ( supportDAC )
-					{
-						int version = SIDKickVersion[ 20 + 8 ] * 100 + SIDKickVersion[ 20 + 9 ];
-						if ( version < 21 )
-							supportDAC = 0;
-					}
-
-					if ( supportDAC && SIDKickVersion[ 20 + 10 ] == 0 )
+				supportDAC = 1;
+				// check for signature
+				for ( int i = 0; i < 8; i++ )
+					if ( SIDKickVersion[ i + 20 ] != VERSION_STR_ext[ i ] )
 						supportDAC = 0;
+				
+				if ( supportDAC )
+				{
+					int version = SIDKickVersion[ 20 + 8 ] * 100 + SIDKickVersion[ 20 + 9 ];
+					if ( version < 21 )
+						supportDAC = 0;
+				}
 
-				} else
+				if ( supportDAC && SIDKickVersion[ 20 + 10 ] == 0 )
+					supportDAC = 0;
+
+				break;
+			} else
+			// SIDKick pico ?
+			if ( SIDKickVersion[ 0 ] == 0x53 &&
+				SIDKickVersion[ 1 ] == 0x4b &&
+				SIDKickVersion[ 2 ] == 0x10 &&
+				SIDKickVersion[ 3 ] == 0x09 &&
+				SIDKickVersion[ 4 ] == 0x03 &&
+				SIDKickVersion[ 5 ] == 0x0f )
+			{
+				// found SIDKick pico!
+				SIDKickVersion[ 16 ] = 0; 
+				hasSIDKick = 2;
+
+				// let's see if it's version 0.21 (supporting direct DAC)
+				//const unsigned char VERSION_STR_ext[10] = { 0x53, 0x49, 0x44, 0x4b, 0x09, 0x03, 0x0b, 0x00, 0, 21 };
+
+				supportDAC = 0;
+				if ( SIDKickVersion[ 30 ] )
+					supportDAC = 2;
+
+				break;
+			} else
 				SIDKickVersion[ 0 ] = 0;
+
+
 
 			bool badline = false;
 
@@ -2211,51 +2290,6 @@ restartHijacking:
 	BUS_RESYNC
 	SMEMCPY( CHARSET, &font_bin[0], 0x1000 );
 
-	// init SID
-	BUS_RESYNC
-	for ( int i = 0; i < 32; i++ )
-		SPOKE( 0xd400 + i, 0 );
-
-	#ifdef PLAY_MUSIC
-	BUS_RESYNC
-	if ( SIDType == 0 )
-	{
-		SPOKE( 0xd405, 0 );
-		SPOKE( 0xd406, 0xff );
-		SPOKE( 0xd40d, 0xff );
-		SPOKE( 0xd414, 0xff );
-		SPOKE( 0xd404, 0x49 );
-		SPOKE( 0xd40b, 0x49 );
-		SPOKE( 0xd412, 0x49 );
-		SPOKE( 0xd40c, 0 );
-		SPOKE( 0xd413, 0 );
-		SPOKE( 0xd415, 0 );
-		SPOKE( 0xd416, 0x10 );
-		SPOKE( 0xd417, 0xf7 );
-	} else
-	{
-		// Mahoney's technique
-		SPOKE( 0xd405, 0x0f );
-		SPOKE( 0xd40c, 0x0f );
-		SPOKE( 0xd413, 0x0f );
-		SPOKE( 0xd406, 0xff );
-		SPOKE( 0xd40d, 0xff );
-		SPOKE( 0xd414, 0xff );
-		SPOKE( 0xd404, 0x49 );
-		SPOKE( 0xd40b, 0x49 );
-		SPOKE( 0xd412, 0x49 );
-		SPOKE( 0xd415, 0xff );
-		SPOKE( 0xd416, 0xff );
-		SPOKE( 0xd417, 0x03 );
-
-		// use SIDKick's pure DAC mode if supported
-		if ( supportDAC )
-			SPOKE( 0xd41f, 0xfc );
-
-	}
-
-	mahoneyLUT = ( SIDType == (6581 & 255) ) ? lookup6581 : lookup8580;
-	#endif
 
 	SPOKE( 0xdc03, 0 );		// port b ddr (input)
 	SPOKE( 0xdc02, 0xff );	// port a ddr (output)
@@ -2302,6 +2336,63 @@ restartHijacking:
 	extern CLogger	*logger;
 	char imgFileName[ 512 ];
 	u32 imgSize;
+
+	// init SID
+	BUS_RESYNC
+	for ( int i = 0; i < 32; i++ )
+		SPOKE( 0xd400 + i, 0 );
+
+	#ifdef PLAY_MUSIC
+	BUS_RESYNC
+	if ( SIDType == 0 && !supportDAC )
+	{
+		SPOKE( 0xd405, 0 );
+		SPOKE( 0xd406, 0xff );
+		SPOKE( 0xd40d, 0xff );
+		SPOKE( 0xd414, 0xff );
+		SPOKE( 0xd404, 0x49 );
+		SPOKE( 0xd40b, 0x49 );
+		SPOKE( 0xd412, 0x49 );
+		SPOKE( 0xd40c, 0 );
+		SPOKE( 0xd413, 0 );
+		SPOKE( 0xd415, 0 );
+		SPOKE( 0xd416, 0x10 );
+		SPOKE( 0xd417, 0xf7 );
+	} else
+	{
+		// use SIDKick's pure DAC mode if supported
+		if ( supportDAC == 1 )
+		{
+			SPOKE( 0xd41f, 0xfc );
+		} else
+		if ( supportDAC == 2 ) // SKpico
+		{
+			u8 x;
+			do {
+				SPEEK( 0xd41d, x );
+			} while ( x != 0x4c );
+			SPOKE( 0xd41f, 0xfc );
+		} else
+		{
+			// Mahoney's technique
+			SPOKE( 0xd405, 0x0f );
+			SPOKE( 0xd40c, 0x0f );
+			SPOKE( 0xd413, 0x0f );
+			SPOKE( 0xd406, 0xff );
+			SPOKE( 0xd40d, 0xff );
+			SPOKE( 0xd414, 0xff );
+			SPOKE( 0xd404, 0x49 );
+			SPOKE( 0xd40b, 0x49 );
+			SPOKE( 0xd412, 0x49 );
+			SPOKE( 0xd415, 0xff );
+			SPOKE( 0xd416, 0xff );
+			SPOKE( 0xd417, 0x03 );
+		}
+	}
+
+	mahoneyLUT = ( SIDType == (6581 & 255) ) ? lookup6581 : lookup8580;
+	#endif
+
 
 	CACHE_PRELOAD_DATA_CACHE( (u8*)&font_bin[ 0 ], 4096, CACHE_PRELOADL2KEEP )
 	CACHE_PRELOAD_DATA_CACHE( (u8*)&oszi[ 0 ], 320, CACHE_PRELOADL2KEEP )
@@ -2526,5 +2617,382 @@ static void convertWAV2RAW_inplace( u8 *_data )
 				}
 			}
 		}
+	}
+}
+
+//
+//
+// VSF (Vice-Snapshot) Injection 
+//
+//
+
+int substr( char *str, char *strsearch )
+{
+    char *t = strstr( str, strsearch );
+    return (u64)t - (u64)str;
+}
+
+bool substr( char *str, int ofs, char *strsearch )
+{
+    char *t = strstr( str + ofs, strsearch );
+    if ( t != NULL ) return true;
+    return false;
+}
+
+u8 *getVSFModule( u8 *vsf, int vsfSize, char *modulename )
+{
+    int i = 0x3a, modLen;
+    bool found = false;
+    u8 *p = NULL;
+    do {
+        modLen = (int)vsf[ i + 0x12 ] + ( (int)vsf[ i + 0x13 ] << 8 ) +
+                 ( (int)vsf[ i + 0x14 ] << 16 ) + ( (int)vsf[ i + 0x15 ] << 24 );
+        
+        if ( substr( (char*)vsf, i, modulename ) )
+        {
+            found = true;
+            p = &vsf[ i ];
+        } else
+        {
+            i += modLen;
+        }
+    } while ( !found && ( i < vsfSize ) );
+    
+    return p;
+}
+
+#include "C64Side/ultimax_vsf.h"
+
+const int patchOffset = 9;
+
+static int nRasterNOPs = 0;
+static u8 code[ 256 ];
+static int vsfRasterLine, vsfRasterCycle;
+static u8 *vsfREU = NULL;
+
+void __attribute__ ((noinline)) doInjectionVSF( u8 *vsf, u32 vsfSize )
+{
+	u8 *cpu, *mem, *cia1, *cia2, *sid, *vic;
+
+	INP_GPIO( GAME_OUT );
+	SET_GPIO( bGAME_OUT );
+
+	bool isC128Snapshot = false;
+
+	mem = getVSFModule( vsf, vsfSize, (char *)"C64MEM" );
+
+	if ( mem != NULL )
+	{
+		mem += VSF_SIZE_MODULE_HEADER;
+	} else
+	{
+		mem = getVSFModule( vsf, vsfSize, (char *)"C128MEM" ) + VSF_SIZE_MODULE_HEADER + 11;	
+		if ( mem == NULL )
+			return;
+
+		if ( mem[ 0 ] == 0 && mem[ 1 ] == 0 ) // catch Vice bug, and write often-correct port ddr/bits
+		{
+			mem[ 0 ] = 0x2f;
+			mem[ 1 ] = 0x75;
+		}
+
+		isC128Snapshot = true;
+	}
+
+	if ( isC128Snapshot )
+	{
+		//mem = getVSFModule( vsf, vsfSize, (char *)"C128MEM" ) + VSF_SIZE_MODULE_HEADER + 11;
+		for ( int i = 2; i < 65536; i++ )
+			SPOKE_NG( i, mem[ i ] );
+	} else
+	{
+		// offset memory dump = 26 = VSF_SIZE_MODULE_HEADER + 4
+		// offset cpu port 0 and 1 = 22 and 23 = VSF_SIZE_MODULE_HEADER
+		// EXROM / GAME = 24 and 25 = VSF_SIZE_MODULE_HEADER + 2
+		//	mem = getVSFModule( vsf, vsfSize, (char *)"C64MEM" ) + VSF_SIZE_MODULE_HEADER;
+		u8 *ppp = mem + 4;
+		for ( int i = 2; i < 65536; i++ )
+			SPOKE_NG( i, ppp[ i ] );
+
+	}
+
+	// Ultimax mode => write to IO
+	OUT_GPIO( GAME_OUT );
+	CLR_GPIO( bGAME_OUT );
+
+	cia1 = getVSFModule( vsf, vsfSize, (char *)"CIA1" ) + VSF_SIZE_MODULE_HEADER;
+
+	SPOKE_NG( 0xdc0d, 0x1f );
+	SPOKE_NG( 0xdc0e, 0x00 );
+	SPOKE_NG( 0xdc0f, 0x00 );
+
+	for ( int i = 0; i < 13; i++ )
+		SPOKE_NG( 0xdc00 + i, cia1[ i ] );
+
+	SPOKE_NG( 0xdc0d, cia1[ 13 ] | 0x80 );
+
+	SPOKE_NG( 0xdc0e, 0x10 );
+	SPOKE_NG( 0xdc0f, 0x10 );
+
+	cia2 = getVSFModule( vsf, vsfSize, (char *)"CIA2" ) + VSF_SIZE_MODULE_HEADER;
+
+	SPOKE_NG( 0xdd0d, 0x1f );
+	SPOKE_NG( 0xdd0e, 0x00 );
+	SPOKE_NG( 0xdd0f, 0x00 );
+
+	for ( int i = 0; i < 13; i++ )
+		SPOKE_NG( 0xdd00 + i, cia2[ i ] );
+
+	SPOKE_NG( 0xdd0d, cia2[ 13 ] | 0x80 );
+
+	SPOKE_NG( 0xdd0e, 0x10 );
+	SPOKE_NG( 0xdd0f, 0x10 );
+
+	sid  = getVSFModule( vsf, vsfSize, (char *)"SIDEXTENDED" ) + VSF_SIZE_MODULE_HEADER;
+	for ( int i = 0; i < 0x20; i++ )
+		SPOKE_NG( 0xd400 + i, sid[ i ] );
+
+	vic  = getVSFModule( vsf, vsfSize, (char *)"VIC-II" ) + VSF_SIZE_MODULE_HEADER;
+
+	if ( isC128Snapshot ) // Vice uses the old VIC-II emulation (not the "SC" one)
+	{
+		for ( int i = 0; i < 0x2f; i++ )
+			SPOKE_NG( 0xd000 + i, vic[ i + 1119 ] );
+
+		for ( int i = 0; i < 0x400; i++ )
+			SPOKE_NG( 0xd800 + i, vic[ i + 43 ] );
+	} else
+	{
+		for ( int i = 0; i < 0x2f; i++ )
+			SPOKE_NG( 0xd000 + i, vic[ i + 1 ] );
+
+		for ( int i = 0; i < 0x400; i++ )
+			SPOKE_NG( 0xd800 + i, vic[ i + 761 ] );
+	}
+
+	// 
+	// create reanimation code for execution on C64-CPU
+	//
+	u8 *c = &code[ patchOffset ];
+
+	// CIAs
+	#define CODE_POKE( A, D ) { \
+		*(c ++) = 0xa9; *(c ++) = (D); \
+		*(c ++) = 0x8d; *(c ++) = (A) & 255; *(c ++) = ( (A) >> 8 ); }
+
+	CODE_POKE( 0xdc0e, cia1[ 14 ] );
+	CODE_POKE( 0xdc0f, cia1[ 15 ] );
+	CODE_POKE( 0xdd0e, cia2[ 14 ] );
+	CODE_POKE( 0xdd0f, cia2[ 15 ] );
+
+	for ( int i = 0; i < 4; i++ )
+		CODE_POKE( 0xdc04 + i, cia1[ 16 + i ] );
+	for ( int i = 0; i < 4; i++ )
+		CODE_POKE( 0xdd04 + i, cia2[ 16 + i ] );
+
+	// CPU ports
+	if ( isC128Snapshot )
+	{
+		CODE_POKE( 1, mem[ 1 ] );
+		CODE_POKE( 0, mem[ 0 ] );
+	} else
+	{
+		CODE_POKE( 1, mem[ 0 ] );
+		CODE_POKE( 0, mem[ 1 ] );
+	}
+
+	// wait for raster
+	int line = vic[ 0x49 ];
+	if ( vic[ 0x48 ] & 128 ) line += 256;
+
+	int rastercycle = ( (int)vic[ 0x40 ] ) + ( (int)vic[ 0x44 ] << 8 );
+
+	vsfRasterLine = line;
+	vsfRasterCycle = rastercycle;
+
+	nRasterNOPs = ( ( rastercycle & 63 ) / 2 ) + 21;
+
+	// isNTSC == 0 => PAL: 312 rasterlines, 63 cycles
+	// isNTSC == 1 => NTSC: 262 (0..261) rasterlines, 64 cycles, 6567R56A
+	// isNTSC == 2 => NTSC: 263 (0..262) rasterlines, 65 cycles, 6567R8
+
+	int maxRasterLines;
+	switch ( isNTSC )
+	{
+		default:
+		case 0: maxRasterLines = 312; break;
+		case 1: maxRasterLines = 262; break;
+		case 2: maxRasterLines = 263; break;
+	}
+	line --; if ( line < 0 ) line = maxRasterLines - 1;
+	if ( line >= (maxRasterLines - 1) ) line = maxRasterLines - 1;
+
+	/*
+	wait for rasterline:	line < 256		line >= 256
+	.C:1000  2C 11 D0    	BIT $D011
+	.C:1003  10 FB       	BPL $1000		BMI (0x30)
+	.C:1005  2C 11 D0    	BIT $D011
+	.C:1008  30 FB       	BMI $1005		BPL (0x10)
+	.C:100a  A2 20       	LDX #$20
+	.C:100c  EC 12 D0    	CPX $D012
+	.C:100f  D0 FB       	BNE $100C
+	*/
+
+	*( c++ ) = 0x2c; *( c++ ) = 0x11; *( c++ ) = 0xd0;
+	if ( line < 256 )
+	{
+		*( c++ ) = 0x10; *( c++ ) = 0xfb;
+		*( c++ ) = 0x2c; *( c++ ) = 0x11; *( c++ ) = 0xd0;
+		*( c++ ) = 0x30; *( c++ ) = 0xfb;
+	} else
+	{
+		*( c++ ) = 0x30; *( c++ ) = 0xfb;
+		*( c++ ) = 0x2c; *( c++ ) = 0x11; *( c++ ) = 0xd0;
+		*( c++ ) = 0x10; *( c++ ) = 0xfb;
+	}
+	*( c++ ) = 0xa2; *( c++ ) = ( line & 255 );
+	*( c++ ) = 0xec; *( c++ ) = 0x12; *( c++ ) = 0xd0;
+	*( c++ ) = 0xd0; *( c++ ) = 0xfb;
+
+	for ( int i = 0; i < nRasterNOPs; i++ )
+		*( c++ ) = 0xea;	
+
+	// CPU reanimation
+	cpu = getVSFModule( vsf, vsfSize, (char *)"MAINCPU" ) + VSF_SIZE_MODULE_HEADER;
+	*(c ++) = 0xa2; *(c ++) = cpu[ 11 ];     					// LDX #sp
+	*(c ++) = 0x9a;                       						// TXS
+	*(c ++) = 0xa9; *(c ++) = cpu[ 14 ];       					// LDA #flags
+	*(c ++) = 0x48;                       						// PHA
+	*(c ++) = 0xa9; *(c ++) = cpu[ 8 ];        					// LDA #...
+	*(c ++) = 0xa2; *(c ++) = cpu[ 9 ];        					// LDX #...
+	*(c ++) = 0xa0; *(c ++) = cpu[ 10 ];       					// LDY #...
+	*(c ++) = 0x28;                       						// PLP
+	*(c ++) = 0x4c; *(c ++) = cpu[ 12 ]; *(c ++) = cpu[ 13 ]; 	// JMP addr
+
+	vsfREU = getVSFModule( vsf, vsfSize, (char *)"REU1764" );
+
+	if ( vsfREU )
+	{
+		SyncDataAndInstructionCache();
+		extern void warmCache();
+		warmCache();
+
+		CACHE_PRELOAD_INSTRUCTION_CACHE( (void*)reuUsingPolling, 1024 * 7 );
+		FORCE_READ_LINEARa( (void*)reuUsingPolling, 1024 * 7, 65536 );
+
+		reuUsingPolling( 1 );
+	}
+}
+
+
+void resetAndInjectVSF( u8 *vsf, u32 vsfSize )
+{
+	register u32 g2, g3;
+
+
+restartInjection:
+	SET_GPIO( bLATCH_A_OE | bIRQ_OUT | bOE_Dx | bRW_OUT );
+	INP_GPIO( RW_OUT );
+	INP_GPIO( IRQ_OUT );
+	OUT_GPIO( RESET_OUT );
+	OUT_GPIO( GAME_OUT );
+	CLR_GPIO( bRESET_OUT | bGAME_OUT | bDMA_OUT );
+
+	memcpy( code, ultimax_vsf, 256 );
+
+	nRasterNOPs = 0;
+
+	int oneTimeOffset = patchOffset - 1;
+
+	int cycleCounter = 0;
+
+restartUltimaxCartridge:
+	CACHE_PRELOAD_DATA_CACHE( &code[ 0 ], 256, CACHE_PRELOADL2KEEP )
+	FORCE_READ_LINEAR32a( &code, 256, 256 * 32 );
+	CACHE_PRELOAD_INSTRUCTION_CACHE( &&vsfCRTCFG, 4096 );
+	CACHE_PRELOAD_INSTRUCTION_CACHE( &&vsfCRTCFG, 4096 );
+
+	DELAY( 1 << 20 );
+
+vsfCRTCFG:
+	WAIT_FOR_CPU_HALFCYCLE
+	BEGIN_CYCLE_COUNTER
+	WAIT_FOR_VIC_HALFCYCLE
+	SET_GPIO( bRESET_OUT | bDMA_OUT );
+	INP_GPIO( RESET_OUT );
+	CLR_GPIO( bGAME_OUT );
+
+
+	while ( 1 )
+	{
+		WAIT_FOR_CPU_HALFCYCLE
+		RESTART_CYCLE_COUNTER						
+		WAIT_UP_TO_CYCLE( WAIT_FOR_SIGNALS+ TIMING_OFFSET_CBTD );
+		g2 = read32( ARM_GPIO_GPLEV0 );
+
+		SET_GPIO( bMPLEX_SEL );
+		WAIT_UP_TO_CYCLE( WAIT_CYCLE_MULTIPLEXER );
+		
+		g3 = read32( ARM_GPIO_GPLEV0 );
+		CLR_GPIO( bMPLEX_SEL );
+
+		u8 addr = ADDRESS0to7;
+		u8 access = 0;
+
+		if ( ADDRESS_FFxx && CPU_READS_FROM_BUS )
+		{
+			u8 D = code[ addr ];
+
+			register u32 DD = ( ( D ) & 255 ) << D0;
+			write32( ARM_GPIO_GPCLR0, ( D_FLAG & ( ~DD ) ) | bOE_Dx | bDIR_Dx );
+			write32( ARM_GPIO_GPSET0, DD );
+			SET_BANK2_OUTPUT
+			WAIT_UP_TO_CYCLE( WAIT_CYCLE_READ );
+			SET_GPIO( bOE_Dx | bDIR_Dx );
+
+			access = 1;
+		}
+
+		WAIT_FOR_VIC_HALFCYCLE
+		cycleCounter ++;
+
+		if ( access && addr == oneTimeOffset )
+		{
+			oneTimeOffset = 0x100000;
+
+			// note: $00/$01 are configured for full RAM access if no cartridge is active,
+			//       access to IO is done using the Ultimax mode (GAME low)
+			CLR_GPIO( bDMA_OUT );
+			WAIT_FOR_CPU_HALFCYCLE
+			WAIT_FOR_VIC_HALFCYCLE
+			WAIT_FOR_CPU_HALFCYCLE
+			WAIT_FOR_VIC_HALFCYCLE
+			WAIT_FOR_CPU_HALFCYCLE
+			WAIT_FOR_VIC_HALFCYCLE
+			
+			doInjectionVSF( vsf, vsfSize );
+
+			goto restartUltimaxCartridge;
+		}
+
+		// # instructions
+		// CPU reanimation		16
+		// wait raster 			17		
+		// nRasterNOPs			n
+		// CODE_POKE			14 * 5
+		if ( access && addr == patchOffset + 16 + 14 * 5 + 17 + nRasterNOPs - 1 )
+		{
+			SET_GPIO( bDMA_OUT );
+			INP_GPIO( GAME_OUT );
+			SET_GPIO( bGAME_OUT );
+
+			if ( vsfREU )
+				reuUsingPolling( 2 );
+
+			return;
+		}
+
+		if ( cycleCounter > 1000000 )
+			goto restartInjection;
 	}
 }

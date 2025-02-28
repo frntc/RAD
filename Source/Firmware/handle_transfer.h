@@ -9,7 +9,7 @@
          {_________         {______________		Expansion Unit
                 
  RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
- Copyright (c) 2022 Carsten Dachsbacher <frenetic@dachsbacher.de>
+ Copyright (c) 2022-2025 Carsten Dachsbacher <frenetic@dachsbacher.de>
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -25,6 +25,9 @@
  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
+
+//#define USE_OLD_CACHE_PRELOADING_SCHEME
+
 #define COMMON_ENTRY_IN_TRANSFER
 
 #pragma GCC diagnostic push
@@ -45,7 +48,11 @@ reu.incrC64 = reu.addrREUCtrl & REU_ADDR_FIX_C64 ? 0 : 1;
 reu.incrREU = reu.addrREUCtrl & REU_ADDR_FIX_REU ? 0 : 1;
 
 register u32 next_r_a, temp_r_a;
-register u8 newStatus = 0, x, y, tmp;
+register u8 newStatus = 0, x, y;
+
+#ifdef USE_OLD_CACHE_PRELOADING_SCHEME
+register u8 tmp;
+#endif
 
 //#define REU_PROTOCOL
 #ifdef REU_PROTOCOL
@@ -86,15 +93,18 @@ case REU_COMMAND_TRANSFER_TO_REU: // stash: c64->reu
 	while ( l )
 	{
 		reuPrefetchW( r_a );
-		emuReadByteREU_p1( g2, c_a );
-		emuReadByteREU_p2( g2 );
+		//emuReadByteREU_p1( g2, c_a );
+		//emuReadByteREU_p2( g2 );
+		DMA_READBYTE_P1( c_a );
+		DMA_READBYTE_P2();
 		if ( l < length )
 			reuStore( temp_r_a, x );
 		l --;
 		temp_r_a = r_a; REU_INCREMENT_ADDRESS( r_a ); 
 		reuPrefetchW( r_a + 64 ); 
 		REU_INCREMENT_C64ADDRESS( c_a );
-		emuReadByteREU_p3( g2, x, (l==0) );
+		//emuReadByteREU_p3( g2, x, (l==0) );
+		DMA_READBYTE_P3( x, (l==0) );
 	}
 	reuStore( temp_r_a, x );
 
@@ -130,7 +140,9 @@ case REU_COMMAND_TRANSFER_TO_C64: // fetch: c64<-reu
 		CACHE_PRELOADL1STRM( &reuMemory[ r_a & ( reu.wrapAroundDRAM - 1 ) ] );
 		for ( int i = 0; i < 8; i++ )
 		{
+			#ifdef USE_OLD_CACHE_PRELOADING_SCHEME
 			reu.nextREUByte = reuLoad( r_a );
+			#endif
 			WAIT_FOR_CPU_HALFCYCLE
 			WAIT_FOR_VIC_HALFCYCLE
 			RESTART_CYCLE_COUNTER
@@ -138,7 +150,9 @@ case REU_COMMAND_TRANSFER_TO_C64: // fetch: c64<-reu
 	} else
 #endif
 	{
+		#ifdef USE_OLD_CACHE_PRELOADING_SCHEME
 		reu.nextREUByte = reuLoad( r_a );
+		#endif
 	}
 
 	while ( l )
@@ -146,9 +160,16 @@ case REU_COMMAND_TRANSFER_TO_C64: // fetch: c64<-reu
 		next_r_a = REU_GET_NEXT_ADDRESS( r_a ); 
 		reuPrefetchL1( next_r_a );
 		l --;
-		emuWriteByteREU_p1( g2, c_a, reu.nextREUByte );
-		reu.nextREUByte = reuLoad( next_r_a ); r_a = next_r_a; reuPrefetchL1( r_a ); reuPrefetchL1( r_a + 64 ); 
-		emuWriteByteREU_p2( g2, (l==0) );
+		//emuWriteByteREU_p1( g2, c_a, reu.nextREUByte );
+		#ifdef USE_OLD_CACHE_PRELOADING_SCHEME
+		DMA_WRITEBYTE_P1( c_a, reu.nextREUByte );
+		reu.nextREUByte = reuLoad( next_r_a ); 
+		#else
+		DMA_WRITEBYTE_P1( c_a, ( ( ( r_a & (reu.wrapAroundDRAM - 1) ) < reu.reuSize ) ? reuMemory[ ( r_a & (reu.wrapAroundDRAM - 1) ) ] : 0xff ) );
+		#endif
+		r_a = next_r_a; reuPrefetchL1( r_a ); reuPrefetchL1( r_a + 64 ); 
+		//emuWriteByteREU_p2( g2, (l==0) );
+		DMA_WRITEBYTE_P2( (l==0) );
 
 		REU_INCREMENT_C64ADDRESS( c_a );
 	}
@@ -171,14 +192,26 @@ case REU_COMMAND_TRANSFER_SWAP: // swap: c64<->reu
 	while ( l )
 	{
 		reuPrefetchL1( r_a );
-		emuReadByteREU_p1( g2, c_a );
-		emuReadByteREU_p2( g2 );
-		{tmp = reuLoad( r_a ); next_r_a = REU_GET_NEXT_ADDRESS( r_a ); reuPrefetchL1( next_r_a );l --; reuPrefetchL1( r_a + 64 ); }
-		emuReadByteREU_p3( g2, x, false );
+		//emuReadByteREU_p1( g2, c_a );
+		//emuReadByteREU_p2( g2 );
+		DMA_READBYTE_P1( c_a );
+		DMA_READBYTE_P2();
+		#ifdef USE_OLD_CACHE_PRELOADING_SCHEME
+		tmp = reuLoad( r_a ); 
+		#endif
+		next_r_a = REU_GET_NEXT_ADDRESS( r_a ); reuPrefetchL1( next_r_a );l --; reuPrefetchL1( r_a + 64 ); 
+		//emuReadByteREU_p3( g2, x, false );
+		DMA_READBYTE_P3( x, false );
 
-		emuWriteByteREU_p1( g2, c_a, tmp );
+		//emuWriteByteREU_p1( g2, c_a, tmp );
+		#ifdef USE_OLD_CACHE_PRELOADING_SCHEME
+		DMA_WRITEBYTE_P1( c_a, tmp );
+		#else
+		DMA_WRITEBYTE_P1( c_a, ( ( ( r_a & (reu.wrapAroundDRAM - 1) ) < reu.reuSize ) ? reuMemory[ ( r_a & (reu.wrapAroundDRAM - 1) ) ] : 0xff ) );
+		#endif
 		{reuStore( r_a, x ); r_a = next_r_a; REU_INCREMENT_C64ADDRESS( c_a ); }
-		emuWriteByteREU_p2( g2, (l==0) );
+		//emuWriteByteREU_p2( g2, (l==0) );
+		DMA_WRITEBYTE_P2( (l==0) );
 
 	}
 

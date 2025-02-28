@@ -9,7 +9,7 @@
          {_________         {______________		Expansion Unit
                 
  RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
- Copyright (c) 2022 Carsten Dachsbacher <frenetic@dachsbacher.de>
+ Copyright (c) 2022-2025 Carsten Dachsbacher <frenetic@dachsbacher.de>
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -44,6 +44,7 @@ extern CLogger *logger;
 #define REUDIR_DIRECTORY	0x08
 #define REUDIR_DUMMYNEW		0x10
 #define REUDIR_TOPARENT		0x20
+#define REUDIR_VSFIMAGE		0x40
 
 u32 rdSectionFirst, rdSectionLast;
 
@@ -116,6 +117,8 @@ void makeFormattedName( REUDIRENTRY *d )
 
 	if ( strstr( (char*)fn_up, ".PRG" ) || 
 		 strstr( (char*)fn_up, ".REU" ) )
+		filename[ strlen( filename ) - 4 ] = 0;
+	if ( strstr( (char*)fn_up, ".VSF" ) )
 		filename[ strlen( filename ) - 4 ] = 0;
 	if ( strstr( (char*)fn_up, ".GEORAM" ) )
 		filename[ strlen( filename ) - 7 ] = 0;
@@ -215,6 +218,14 @@ bool ListDirectoryContents( const char *sDir, REUDIRENTRY *d, u32 *n, u32 *nElem
 					strcpy( (char*)sort[sortCur].filename, FileInfo.fname );
 					sort[ sortCur ].size = FileInfo.fsize;
 					sort[ sortCur++ ].f = REUDIR_REUIMAGE;
+					nAdditionalEntries ++;
+				}
+				if ( strstr( FileInfo.fname, ".vsf" ) > 0 || strstr( FileInfo.fname, ".VSF" ) > 0 )
+				{
+					strcpy( (char*)sort[sortCur].path, sDir );
+					strcpy( (char*)sort[sortCur].filename, FileInfo.fname );
+					sort[ sortCur ].size = FileInfo.fsize;
+					sort[ sortCur++ ].f = REUDIR_VSFIMAGE;
 					nAdditionalEntries ++;
 				}
 				if ( strstr( FileInfo.fname, ".georam" ) > 0 || strstr( FileInfo.fname, ".GEORAM" ) > 0 )
@@ -484,6 +495,7 @@ void saveCurrentCursor()
 
 	REUDIRENTRY *e = &files[ curPosition ];
 	if ( e->f & REUDIR_REUIMAGE ||
+		 e->f & REUDIR_VSFIMAGE ||
  		 e->f & REUDIR_GEOIMAGE ||
 		 e->f & REUDIR_PRG  )
 	{
@@ -550,6 +562,7 @@ u32 handleKey( int k )
 			saveCurrentCursor();
 		} else
 		if ( e->f & REUDIR_REUIMAGE ||
+			 e->f & REUDIR_VSFIMAGE ||
 			 e->f & REUDIR_GEOIMAGE ||
 			 e->f & REUDIR_PRG  )
 		{
@@ -571,6 +584,11 @@ u32 handleKey( int k )
 
 				if ( e->f & REUDIR_REUIMAGE )
 					return REUMENU_SELECT_FILE_REU; else
+				if ( e->f & REUDIR_VSFIMAGE )
+				{
+					k = VK_SHIFT_RETURN;
+					return REUMENU_SELECT_FILE_VSF; 
+				} else
 				if ( e->f & REUDIR_GEOIMAGE )
 					return REUMENU_SELECT_FILE_GEO; else
 					return REUMENU_SELECT_FILE_PRG;

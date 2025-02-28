@@ -9,7 +9,7 @@
          {_________         {______________		Expansion Unit
                 
  RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
- Copyright (c) 2022 Carsten Dachsbacher <frenetic@dachsbacher.de>
+ Copyright (c) 2022-2025 Carsten Dachsbacher <frenetic@dachsbacher.de>
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -51,6 +51,9 @@ u64 armCycleCounter;
 
 // GeoRAM
 #include "rad_georam.h"
+
+// VSF
+u8 vsf[ 17 * 1024 * 1024 ] = {0};
 
 void warmCache()
 {
@@ -196,9 +199,6 @@ bool reuImageIsBlureu( u8 *m, u32 size )
 	return 0;
 }
 
-unsigned fiqRegOffset;
-u32		 fiqRegMask;
-
 u32 temperature;
 
 #define WAIT_FOR_READY_PROMPT \
@@ -208,7 +208,6 @@ u32 temperature;
 			emuWAIT_FOR_VIC_HALFCYCLE						\
 		done = checkForReadyPrompt( !go64mode );			\
 	} while ( !done );
-
 
 void CRAD::Run( void )
 {
@@ -251,8 +250,6 @@ void CRAD::Run( void )
 
 	checkIfMachineRunning();		
 	DELAY( 1 << 27 );
-
-	u8 justStarted = 1*0;
 
 	while ( 1 )
 	{
@@ -318,8 +315,7 @@ void CRAD::Run( void )
 		//
 		///////////////////////////////////////////////////////////////////////
 
-		res = hijackC64( justStarted );			// after hijackC64 the CPU is still halted by DMA
-		justStarted = 0;
+		res = hijackC64( false );			// after hijackC64 the CPU is still halted by DMA
 
 		/*radLaunchPRG = 1;
 		sprintf( radLaunchPRGFile, "SD:RAD_PRG/reu-checker v1.0.prg" );
@@ -369,7 +365,7 @@ void CRAD::Run( void )
 			}
 		}
 
-		if ( radLaunchGEORAM )
+		if ( radLaunchGEORAM || radLaunchVSF )
 			go64mode = 1;
 
 		//
@@ -445,12 +441,6 @@ void CRAD::Run( void )
 
 			CACHE_PRELOAD_INSTRUCTION_CACHE( (void*)reuUsingPolling, 1024 * 7 );
 			FORCE_READ_LINEARa( (void*)reuUsingPolling, 1024 * 7, 65536 );
-
-			// DMA remained low after inject code above 
-/*			WAIT_FOR_CPU_HALFCYCLE
-			WAIT_FOR_VIC_HALFCYCLE
-			RESTART_CYCLE_COUNTER
-			SET_GPIO( bDMA_OUT );*/
 
 			reuUsingPolling();
 		} else
@@ -543,7 +533,48 @@ void CRAD::Run( void )
 			}
 
 			goto radIsWaiting;
-		}
+		} else
+		///////////////////////////////////////////////////////////////////////
+		//
+		// VSF loading (and possibly REU emulation)
+		//
+		///////////////////////////////////////////////////////////////////////
+		if ( res == RUN_MEMEXP + 4 ) 
+		{
+			// load VSF
+			u32 vsfSize;
+			readFile( logger, (char*)DRIVE, (char*)radImageSelectedFile, vsf, &vsfSize );
+			reu.isSpecial = false;
+
+			u8 *vsfREU = getVSFModule( vsf, vsfSize, (char *)"REU1764" );
+			
+			REU_SIZE_KB = 0;
+			if ( vsfREU )
+			{
+				REU_SIZE_KB = (int)vsfREU[ VSF_SIZE_MODULE_HEADER + 0 ] + ( (int)vsfREU[ VSF_SIZE_MODULE_HEADER + 1 ] << 8 ) + ( (int)vsfREU[ VSF_SIZE_MODULE_HEADER + 2 ] << 16 ) + ( (int)vsfREU[ VSF_SIZE_MODULE_HEADER + 3 ] << 24 );
+				initREU(mempool);
+
+				// transfer register content
+		        u8 *reuRegisterData = &vsfREU[ VSF_SIZE_MODULE_HEADER + 4 ];
+				reu.status = reuRegisterData[ 0 ];
+				reu.command = reuRegisterData[ 1 ];
+				reu.shadow_addrC64 = reu.addrC64 = (u16)reuRegisterData[ 2 ] + ( (u16)reuRegisterData[ 3 ] << 8 );
+				reu.shadow_addrREU = reu.addrREU = (u16)reuRegisterData[ 4 ] + ( (u16)reuRegisterData[ 5 ] << 8 );
+				reu.shadow_bank = reu.bank = reuRegisterData[ 6 ];
+				reu.shadow_length = reu.length = (u16)reuRegisterData[ 7 ] + ( (u16)reuRegisterData[ 8 ] << 8 );
+				reu.IRQmask = reuRegisterData[ 9 ];
+				reu.addrREUCtrl = reuRegisterData[ 10 ];
+
+				// copy REU data
+		        u8 *reuMem = &vsfREU[ VSF_SIZE_MODULE_HEADER + 20 ];
+				memcpy( mempool, reuMem, REU_SIZE_KB * 1024 );
+			}
+			reu.isModified = 0;
+
+			resetAndInjectVSF( vsf, vsfSize );
+
+			goto radIsWaiting;
+		} 
 
 		OUT_GPIO( GAME_OUT );
 		OUT_GPIO( DMA_OUT );

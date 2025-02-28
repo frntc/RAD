@@ -9,7 +9,7 @@
          {_________         {______________		Expansion Unit
                 
  RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
- Copyright (c) 2022 Carsten Dachsbacher <frenetic@dachsbacher.de>
+ Copyright (c) 2022-2025 Carsten Dachsbacher <frenetic@dachsbacher.de>
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -76,8 +76,9 @@ extern void unmarkAllFiles();
 #define REUMENU_SELECT_FILE_GEO	(2<<24)
 #define REUMENU_SELECT_FILE_PRG	(3<<24)
 #define REUMENU_PLAY_NUVIE_REU  (4<<24)
-#define REUMENU_START_GEORAM	(5<<24)
-#define REUMENU_CREATE_IMAGE	(1<<26)
+#define REUMENU_START_GEORAM	  (5<<24)
+#define REUMENU_SELECT_FILE_VSF	(6<<24)
+#define REUMENU_CREATE_IMAGE	  (1<<26)
 
 extern char dirSelectedFile[ 1024 ];
 extern char dirSelectedName[ 1024 ];
