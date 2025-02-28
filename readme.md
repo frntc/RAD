@@ -1,17 +1,7 @@
-<details>
-<summary>Please read if you bought / want to buy a RAD Expansion Unit</summary>
-I’m frustrated to see that some people try making money from open source projects of others although they have been released under a non-commercial license (such as the RAD Expansion Unit). 
-<br><br>
-The production cost for a complete RAD is below 10 Euros/Dollars per piece. There are a few commercial sellers with a permit to sell RADs. They have to not only cover production cost, but also pay taxes, bear additional expenses and comply with various regulations which justifies a higher price tag. 
-<br><br>
-However, if someone who is NOT on the list below charges you more than 15€/$15 US/$20 CAD this is not only a violation of the license (commercial intent), but YOU have been ripped off. I don't blame you as the buyer, but perhaps you should ask the seller how he/she justifies this. Feel free to let me know about these sellers.
-</details>
-
-
 <img  align="right"  width="280"  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/rad_logo.jpg">
   
 
-The **RAD Expansion Unit** is a cartridge/expansion for the C64 and C128 using a Raspberry Pi 3A+, 3B+ or Zero 2 to implement the actual functionality. Currently it emulates a *RAM Expansion Unit* up to 16mb (compatible to CBM 1700/1750/1764 REU, CLD Super 1750 Clone, CMD 1750/1750XL) and a *GeoRAM/NeoRAM memory expansion* up to 4mb. It also features a menu to browse, manage and launch REU- and GeoRAM-images, NUVIEs, and PRGs. The RAD is designed to not only emulate existing extensions, other things that have already been tested (but not yet included here) are, for example, MOS 6510/8500 emulation (incl. turbo mode) or using the RAD as a (co-)processor (in fact the menu runs on the ARM CPU only).
+The **RAD Expansion Unit** is a cartridge/expansion for the C64 and C128 using a Raspberry Pi 3A+, 3B+ or Zero 2 to implement the actual functionality. Currently it emulates a *RAM Expansion Unit* up to 16mb (compatible to CBM 1700/1750/1764 REU, CLD Super 1750 Clone, CMD 1750/1750XL) and a *GeoRAM/NeoRAM memory expansion* up to 4mb. It also features a menu to browse, manage and launch REU- and GeoRAM-images, NUVIEs, PRGs and Vice Snapshots (VSF). The RAD is designed to not only emulate existing extensions, other things that have already been tested (but not yet included here) are, for example, MOS 6510/8500 emulation (incl. turbo mode) or using the RAD as a (co-)processor (in fact the menu runs on the ARM CPU only).
 
   
 
@@ -123,7 +113,12 @@ The Raspberry Pi configuration (SD:config.txt) overclocks the RPi (moderately fo
 The bus timings and cache parameters are stored in SD:RAD/rad.cfg -- in most cases there is no need to modify these values... unless you notify glitches (e.g. when playing NUVIEs or BluREU). I experienced such with the (only) cartridge port expander (I own). In the configuration file there are alternative timings which remove these problems on my machines. It might happen that similar issues occur with other expanders or machines with other expansion port setups (SX64, which I can't test). The same counter measures should help there. Also one tester reported problems with his ASSY 250407 C64. Adjusting the timings WAIT_ENABLE_RW_ADDRLATCH and WAIT_ENABLE_DATA_WRITING (e.g. in +/- 10 steps) helped. If you experience problems, reach out for me on forum64.de.
 
   
-  
+## Vice Snapshots
+
+These VSF-files can be created using the Vice emulator (use latest release!) and are similar to what freezer cartridges do: storing the current state of the computer. The RAD will restore the memory, VIC, SID, CIA, and CPU states from the stored VSF data (however, timers and CPU-VIC-sync are not restored absolutely accurate).
+
+Keep in mind that snapshots have to be used with care: they work for C64s and C128s in C64-mode, but a C64-VSF might not work on a C128 and vice versa. Also, for example, if you snapshot a C64 in Vice and then load the VSF on a C64 with a different kernal ROM the machine might crash (ROMs are not replaced in the real machine).
+
 
 ## Known limitations/bugs
 
