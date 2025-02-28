@@ -8,7 +8,7 @@
 ;              {_________         {______________		Expansion Unit
 ;                     
 ;      RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
-;      Copyright (c) 2022 Carsten Dachsbacher <frenetic@dachsbacher.de>
+;      Copyright (c) 2022-2025 Carsten Dachsbacher <frenetic@dachsbacher.de>
 ;     
 ;     
 ;     This program is free software: you can redistribute it and/or modify
@@ -26,20 +26,12 @@
 
 * = $ff00
     SEI
-
-    LDA #0
-    STA $D011 
-    STA $D020
-    STA $D021
-
-    LDA #$35
+    LDA #$30
     STA $01     ; full access to RAM (unless in Ultimax Mode!)
     LDA #$2F
     STA $00     ; 
 
     .fill $fffc - *, $EA
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 * = $FFFC
      .byte $00, $ff     ; reset routine, CPU jumps to this address after cold boot
