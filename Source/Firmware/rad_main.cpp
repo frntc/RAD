@@ -9,7 +9,7 @@
          {_________         {______________		Expansion Unit
                 
  RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
- Copyright (c) 2022-2025 Carsten Dachsbacher <frenetic@dachsbacher.de>
+ Copyright (c) 2022-2026 Carsten Dachsbacher <frenetic@dachsbacher.de>
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -34,6 +34,7 @@
 #include "c64screen.h"
 #include "linux/kernel.h"
 #include "config.h"
+#include "rad_iecdevice.h"
 
 static const char DRIVE[] = "SD:";
 static const char FILENAME_CONFIG[] = "SD:RAD/rad.cfg";
@@ -209,9 +210,14 @@ u32 temperature;
 		done = checkForReadyPrompt( !go64mode );			\
 	} while ( !done );
 
+
 void CRAD::Run( void )
 {
 	m_EMMC.Initialize();
+
+	EnableIRQs();
+	initSerialOverUSB_IECDevice( &m_Interrupt, &m_Timer, &m_DeviceNameService, false );
+
 	gpioInit();
 
 	setDefaultTimings( AUTO_TIMING_RPI3PLUS_C64C128 );
@@ -222,6 +228,7 @@ void CRAD::Run( void )
 	DELAY( 1 << 25 );
 	SET_GPIO( bRESET_OUT );
 	INP_GPIO( RESET_OUT );
+
 
 	DisableIRQs();
 
@@ -317,13 +324,6 @@ void CRAD::Run( void )
 
 		res = hijackC64( false );			// after hijackC64 the CPU is still halted by DMA
 
-		/*radLaunchPRG = 1;
-		sprintf( radLaunchPRGFile, "SD:RAD_PRG/reu-checker v1.0.prg" );
-		res = RUN_MEMEXP + 1;
-		radLoadREUImage = 0;
-		meSize0 = 4;*/
-
-
 		WAIT_FOR_CPU_HALFCYCLE
 		WAIT_FOR_VIC_HALFCYCLE
 		RESTART_CYCLE_COUNTER
@@ -408,7 +408,7 @@ void CRAD::Run( void )
 				reu.isSpecial = reuImageIsNuvie( mempool );
 				if ( !reu.isSpecial )
 					reu.isSpecial = reuImageIsBlureu( mempool, size );
-			} else
+		} else
 			{
 				memset( mempool, 0, reu.reuSize );
 				#ifdef STATUS_MESSAGES
@@ -442,6 +442,7 @@ void CRAD::Run( void )
 			CACHE_PRELOAD_INSTRUCTION_CACHE( (void*)reuUsingPolling, 1024 * 7 );
 			FORCE_READ_LINEARa( (void*)reuUsingPolling, 1024 * 7, 65536 );
 
+			resetREU();
 			reuUsingPolling();
 		} else
 		///////////////////////////////////////////////////////////////////////
@@ -517,21 +518,35 @@ void CRAD::Run( void )
 		///////////////////////////////////////////////////////////////////////
 		if ( res == RUN_MEMEXP + 3 ) // no memory expansion
 		{
-			if ( radLaunchPRG )
+			extern int radSpecialBasicCommand;
+			if ( radSpecialBasicCommand )
 			{
 				WAIT_FOR_READY_PROMPT
-				injectAndStartPRG( prgLaunch, prgSize, false ); 
-			} else
-			if ( radSilentMode != 0xffffffff )
-			{
-				WAIT_FOR_READY_PROMPT
-				#ifdef STATUS_MESSAGES
-				setStatusMessage( &statusMsg[ 0 ], "RAD DISABLED" );
+
+				setStatusMessage( &statusMsg[ 0 ], "SIDKICK CONFIGURATION" );
+				setStatusMessage( &statusMsg[ 40 ], " " );
 				setStatusMessage( &statusMsg[ 80 ], " " );
 				injectMessage( false );
-				#endif
-			}
 
+				injectKeyInput( "SYS54301", false ); 
+				radSpecialBasicCommand = 0;
+			} else
+			{
+				if ( radLaunchPRG )
+				{
+					WAIT_FOR_READY_PROMPT
+					injectAndStartPRG( prgLaunch, prgSize, false ); 
+				} else
+				if ( radSilentMode != 0xffffffff )
+				{
+					WAIT_FOR_READY_PROMPT
+					#ifdef STATUS_MESSAGES
+					setStatusMessage( &statusMsg[ 0 ], "RAD DISABLED" );
+					setStatusMessage( &statusMsg[ 80 ], " " );
+					injectMessage( false );
+					#endif
+				}
+			}
 			goto radIsWaiting;
 		} else
 		///////////////////////////////////////////////////////////////////////

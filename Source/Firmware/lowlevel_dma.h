@@ -437,11 +437,10 @@ __attribute__( ( always_inline ) ) inline u8 flipByte( u8 x )
 	CLR_GPIO( ( D_FLAG & ( ~DD ) ) );									\
 																		\
 	CLR_GPIO( bLATCH_A0 | bDIR_Dx );									\
+	/*WAIT_UP_TO_CYCLE( reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING + 0 );*/	\
 	OUT_GPIO( RW_OUT );													\
 																		\
-	WAIT_UP_TO_CYCLE( reu.TIMING_ENABLE_RWOUT_ADDR_LATCH_WRITING + 0 );	\
-																		\
-	CLR_GPIO( bLATCH_A_OE );											\
+	CLR_GPIO( bLATCH_A_OE  | ( pullGAMEforIO ? bGAME_OUT : 0 ));											\
 																		\
 	DD = (data) << D0;													\
 	SET_GPIO( DD );														\
@@ -449,7 +448,7 @@ __attribute__( ( always_inline ) ) inline u8 flipByte( u8 x )
 																		\
 	WAIT_FOR_CPU_HALFCYCLE												\
 	RESTART_CYCLE_COUNTER												\
-	CLR_GPIO( bOE_Dx | bRW_OUT | ( pullGAMEforIO ? bGAME_OUT : 0 ) );										}
+	CLR_GPIO( bOE_Dx | bRW_OUT );										}
 
 
 

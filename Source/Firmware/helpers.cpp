@@ -10,7 +10,7 @@
                 
  RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
         - this file contains some code already used in Sidekick64
- Copyright (c) 2019-2022 Carsten Dachsbacher <frenetic@dachsbacher.de>
+ Copyright (c) 2019-2026 Carsten Dachsbacher <frenetic@dachsbacher.de>
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -28,6 +28,43 @@
 */
 
 #include "helpers.h"
+#include <circle/util.h>
+
+unsigned char toupper( unsigned char c )
+{
+	if ( c >= 'a' && c <= 'z' )
+		return c + 'A' - 'a';
+	return c;
+}
+
+char *strupr( unsigned char *s )
+{
+	unsigned char *p;
+
+  	for ( p = s; *p; p++ )
+    	*p = toupper(*p);
+
+  	return (char *)s;
+}
+
+void strupr( char *d, char *s )
+{
+	strcpy( d, s );
+	strupr( (unsigned char*)d );
+}
+
+void makeFileStructure( const char *DRIVE )
+{
+	FATFS m_FileSystem;
+
+	if ( f_mount( &m_FileSystem, DRIVE, 1 ) != FR_OK ) return;
+
+	f_mkdir( "RAD_PRINT" );
+	f_chdir( "RAD_PRG" );
+	f_mkdir( "IECBuddy" );
+
+	if ( f_mount( 0, DRIVE, 0 ) != FR_OK ) return;
+}
 
 // file reading
 int readFile( CLogger *logger, const char *DRIVE, const char *FILENAME, u8 *data, u32 *size )

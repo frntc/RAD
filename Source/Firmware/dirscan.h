@@ -52,25 +52,28 @@ typedef struct
 #define SHIFT_TYPE		16
 
 #define DIR_FILE_MARKED	(1<<20)
-#define DIR_KERNAL_FILE	(1<<21)
-#define DIR_SID_FILE	(1<<22)
-#define DIR_LISTALL 	(1<<23)
-#define DIR_SCANNED 	(1<<24)
-#define DIR_UNROLLED	(1<<25)
-#define DIR_D64_FILE	(1<<26)
-#define DIR_CRT_FILE	(1<<27)
-#define DIR_PRG_FILE	(1<<28)
-#define DIR_DIRECTORY	(1<<29)
-#define DIR_FILE_IN_D64	(1<<30)
-#define DIR_BIN_FILE	(1<<31)
+
+#define REUDIR_REUIMAGE		0x01
+#define REUDIR_GEOIMAGE		0x02
+#define REUDIR_PRG			  0x04
+#define REUDIR_DIRECTORY	0x08
+#define REUDIR_DUMMYNEW		0x10
+#define REUDIR_TOPARENT		0x20
+#define REUDIR_VSFIMAGE		0x40
+
+#define REUDIR_D64			0x80
+#define REUDIR_ZIP			0x100
+#define REUDIR_SEQ			0x200
+
+#define BROWSER_NUM_CATEGORIES	3
+#define BROWSER_NUM_LINES		10
 
 #define ITEM_SELECTED 128
 
 #define MAX_DIR_ENTRIES		16384
 extern DIRENTRY dir[ MAX_DIR_ENTRIES ];
 extern s32 nDirEntries;
-
-extern void unmarkAllFiles();
+extern int nFilesAllCategories;
 
 #define REUMENU_SELECT_FILE_REU	(1<<24)
 #define REUMENU_SELECT_FILE_GEO	(2<<24)
@@ -84,5 +87,20 @@ extern char dirSelectedFile[ 1024 ];
 extern char dirSelectedName[ 1024 ];
 extern u32 dirSelectedFileSize;
 
+#define REUDIR_MARKSYNC		(1<<23)
+#define IECSYNC_NOT_SYNCED	0x01
+
+#define REUDIR_FILEOP_DELETE  0x01
+#define REUDIR_FILEOP_RENAME  0x02
+
+typedef struct
+{
+	u8  path[ 1024 ];
+	u8  filename[ 256 ];
+	u8	name[ 256 ];
+	u32 f, size, first, last, parent;
+  u32 fileOp;
+  u8  rename[ 256 ];
+} REUDIRENTRY;
 
 #endif

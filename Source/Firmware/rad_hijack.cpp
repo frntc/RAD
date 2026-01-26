@@ -9,7 +9,7 @@
          {_________         {______________		Expansion Unit
                 
  RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
- Copyright (c) 2022-2025 Carsten Dachsbacher <frenetic@dachsbacher.de>
+ Copyright (c) 2022-2026 Carsten Dachsbacher <frenetic@dachsbacher.de>
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -30,10 +30,14 @@
 #include "dirscan.h"
 #include "linux/kernel.h"
 #include <circle/machineinfo.h>
+#include "rad_iecdevice.h"
+
 
 //#define DEBUG_REBOOT_RPI_ON_R
 
 #define PLAY_MUSIC
+
+static const char DRIVE[] = "SD:";
 
 static u64 armCycleCounter;
 
@@ -86,7 +90,6 @@ static u32 g2, g3;
 
 #define BUSAVAIL( g ) 		( (g) & bBA )
 
-
 void SPOKE_NG( u16 a, u8 v )
 {
 	u32 g2;
@@ -97,6 +100,26 @@ void SPOKE_NG( u16 a, u8 v )
 	POKE_NG( a, v );
 
 	return;
+}
+
+void POKE_FILL( u16 a, u16 n, u8 v )
+{
+	u32 g2;
+	WAIT_FOR_CPU_HALFCYCLE
+	WAIT_FOR_VIC_HALFCYCLE
+	RESTART_CYCLE_COUNTER
+	for ( int i = 0; i < n; i++ )
+		POKE( a + i, v );
+}
+
+void POKE_MEMCPY( u16 a, u16 n, u8 *src )
+{
+	u32 g2;
+	WAIT_FOR_CPU_HALFCYCLE
+	WAIT_FOR_VIC_HALFCYCLE
+	RESTART_CYCLE_COUNTER
+	for ( int i = 0; i < n; i++ )
+		POKE( a + i, *(src++) );
 }
 
 void SPOKE( u16 a, u8 v )
@@ -112,8 +135,6 @@ void SPOKE( u16 a, u8 v )
 void SPEEK( u16 a, u8 &v )
 {
 	WAIT_FOR_CPU_HALFCYCLE
-
-wait4bus_SPEEK:
 	WAIT_FOR_VIC_HALFCYCLE
 	RESTART_CYCLE_COUNTER
 	PEEK( a, v )
@@ -325,6 +346,7 @@ u16 keyScanRasterLine = keyScanRasterLinePAL;
 static u16 osziPos = 0;
 static u8 oszi[ 320 ];
 
+
 const unsigned char keyTable[ 64 ] = 
 {
 	VK_DELETE, '3',        '5', '7', '9', '+', '?', '1',
@@ -350,6 +372,7 @@ bool radLaunchPRG_NORUN_128 = false;
 bool radLaunchGEORAM = false;
 bool radLaunchVSF = false;
 char radLaunchPRGFile[ 1024 ];
+int  radSpecialBasicCommand = 0;
 
 bool radMemImageModified = false;
 
@@ -363,13 +386,6 @@ char radImageSelectedName[ 1024 ];
 const char statusHeader[] = ".- RAD EXPANSION UNIT -.";
 char statusMsg[ 40 * 8 ];
 #endif
-
-static u8 toupper( u8 c )
-{
-	if ( c >= 'a' && c <= 'z' )
-		return c + 'A' - 'a';
-	return c;
-}
 
 void setStatusMessage( char *msg, const char *tmp )
 {
@@ -614,8 +630,35 @@ ultimaxCRTCFG:
 
 void waitAndHijackMenu( register u32 &g2 )
 {
-	startWithUltimax();
+	//if ( !isC64 )
+		startWithUltimax();
 		
+/*	{
+		OUT_GPIO( DMA_OUT );
+		SET_GPIO( bDMA_OUT );
+
+		CLR_GPIO( bMPLEX_SEL );
+		WAIT_FOR_CPU_HALFCYCLE
+		BEGIN_CYCLE_COUNTER
+		WAIT_FOR_VIC_HALFCYCLE
+
+		u32 cycles = 0;
+		do
+		{
+			WAIT_FOR_CPU_HALFCYCLE
+			WAIT_FOR_VIC_HALFCYCLE
+			RESTART_CYCLE_COUNTER
+			WAIT_UP_TO_CYCLE( TIMING_BA_SIGNAL_AVAIL );
+			g2 = read32( ARM_GPIO_GPLEV0 );
+			cycles ++;
+		} while ( ( g2 & bBA ) && cycles < 250000 );
+
+		emuWAIT_FOR_VIC_HALFCYCLE
+		RESTART_CYCLE_COUNTER
+		WAIT_UP_TO_CYCLE( TIMING_TRIGGER_DMA ); // 80ns after falling Phi2
+		CLR_GPIO( bDMA_OUT );
+	}*/
+
 	WAIT_FOR_CPU_HALFCYCLE
 	WAIT_FOR_VIC_HALFCYCLE
 	RESTART_CYCLE_COUNTER
@@ -962,7 +1005,8 @@ u16 lastRasterLine = 1234;
 bool screenUpdated = true;
 
 u8 imageNameEdit = 0;
-char imageNameStr[ 60 ] = { 0 };
+char imageNameStr[ 128 ] = { 0 };
+char imageNameExt[ 32 ] = { 0 };
 u8 imageNameStrLength = 0;
 const u8 *mahoneyLUT;
 
@@ -970,6 +1014,11 @@ static u8 fadeToHelp = 0;
 static u8 showHelp = 0;
 static u8 fadeToTimings = 0;
 static u8 showTimings = 0;
+u8 showIECDevice = 0;
+static u8 fadeToIECDevice = 0;
+//static u8 fadeToBrowser = 0;
+//static u8 showBrowser = 0;
+
 
 void printHelpScreen( int fade )
 {
@@ -980,32 +1029,35 @@ void printHelpScreen( int fade )
 	const u8 c2 = fadeTabStep[ 3 ][ fade ];
 	const u8 c3 = fadeTabStep[ 13 ][ fade ];
 	const u8 c4 = fadeTabStep[ 11 ][ fade ];
+	const u8 c5 = fadeTabStep[ 12 ][ fade ];
 
 	printC64( xp, ++yp, "                                      ", 0, 0, 0, 39 );
 	printC64( xp, ++yp, "Keyboard Commands                   ", c1, 0, 0, 39 );
 	printC64( xp, ++yp, "T,+,-    change expansion type/size ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "CURSOR   navigate in browser        ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "F1/F3    page up/down               ", c2, 0, 0, 39 );
-//	printC64( xp, ++yp, "HOME   first entry                  ", c2, 0, 0, 39 );
-//	printC64( xp, ++yp, "DEL    go one directory up          ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "AB,F1/F3 navigate, page up/down     ", c2, 0, 0, 39 );
 	printC64( xp, ++yp, "HOME/DEL first entry, directory up  ", c2, 0, 0, 39 );
 	printC64( xp, ++yp, "RETURN   start PRG/select image,    ", c2, 0, 0, 39 );
 	printC64( xp, ++yp, "         2x autostart NUVIE/GeoRAM  ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "U        unmount REU/GeoRAM image   ", c2, 0, 0, 39 );
-	printC64( xp, ++yp, "N        name&save modified image   ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "U/N      unmount/name&save image    ", c2, 0, 0, 39 );
+	printC64( xp, ++yp, "D/R      delete/rename file on SD   ", c2, 0, 0, 39 );
 	printC64( xp, ++yp, "\x5c        adjust bus timings         ", c2, 0, 0, 39 );
 
+	++yp;
+	if ( IECDevicePresent )
+		printC64( xp, yp, "I        IECBuddy sync/transfer     ", c2, 0, 0, 39 ); else
+		printC64( xp, yp, "I        IECBuddy not present       ", c5, 0, 0, 39 ); 
+ 
 	yp = 10;
 	printC64( xp, ++yp, "T,+,-", c3, 0, 0, 39 );
-	printC64( xp, ++yp, "CURSOR", c3, 0, 0, 39 );
-	printC64( xp, ++yp, "F1/F3", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "\x5e\x5f", c3, 0, 1, 39 );
+	printC64( xp + 2, yp, ",F1/F3", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "HOME/DEL", c3, 0, 0, 39 );
-	//printC64( xp, ++yp, "DEL", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "RETURN", c3, 0, 0, 39 );
 	++yp;
-	printC64( xp, ++yp, "U", c3, 0, 0, 39 );
-	printC64( xp, ++yp, "N", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "U/N", c3, 0, 0, 39 );
+	printC64( xp, ++yp, "D/R", c3, 0, 0, 39 );
 	printC64( xp, ++yp, "\x5c", c3, 0, 1, 39 );
+	printC64( xp, ++yp, "I", IECDevicePresent ? c3 : c5, 0, 0, 39 );
 
 	{
 		extern u32 temperature;
@@ -1166,6 +1218,9 @@ u32 readKeyRenderMenu( int fade )
 	u8 a;
 	static int lastKey = -1, repKey = 0;
 
+	extern u32 nFileOpsPending, foRenaming;
+	extern REUDIRENTRY *pFileToRename;
+
 	SPOKE( 0xdc00, 0 );
 	SPEEK( 0xdc01, a );
 						
@@ -1226,8 +1281,18 @@ u32 readKeyRenderMenu( int fade )
 		u32 cmd = 0;
 		if ( k == lastKey )
 			repKey ++;
+
 		if ( k && ( k != lastKey || repKey > 4 ) )
 		{
+			if ( showIECDevice )
+			{
+				extern u32 handleKeyIECDeviceScreen( int k );
+				handleKeyIECDeviceScreen( k );
+				k = 0;
+				//lastKey = -1;
+				goto test;
+			} 
+
 			if ( showTimings && fadeToTimings == 0 )
 			{
 				if ( k == 'B' || k == '?' ) 
@@ -1291,6 +1356,81 @@ u32 readKeyRenderMenu( int fade )
 				k = 0;
 			}
 
+			if ( imageNameEdit )
+			{
+				if ( k != lastKey )
+				{
+					extern u32 foRenaming, nFileOpsPending;
+					extern REUDIRENTRY *pFileToRename;
+					if ( k == VK_ESC )
+					{
+						if ( foRenaming )
+						{
+							foRenaming = 0;
+							char tmp[ 128 ];
+							sprintf( tmp, "%s%s", imageNameStr, imageNameExt );
+							if ( strcmp( (char*)pFileToRename->filename, tmp ) == 0 && ( pFileToRename->fileOp & REUDIR_FILEOP_RENAME ) )
+							{
+								if ( nFileOpsPending ) nFileOpsPending --;
+								pFileToRename->fileOp &= ~REUDIR_FILEOP_RENAME;
+							}
+							//debugg = 1;
+						} 
+						
+						imageNameEdit = 0;
+					} else
+					if ( ( ( k >= 'A' && k <= 'Z' ) || ( k >= '0' && k <= '9' ) || k == '.' ) && imageNameStrLength < 20 )
+					{
+						imageNameStr[ imageNameStrLength++ ] = k;
+						imageNameStr[ imageNameStrLength ] = 0;
+						//debugg = 0;
+					} else
+					if ( k == VK_DELETE && imageNameStrLength )
+					{
+						imageNameStr[ --imageNameStrLength ] = 0; 
+						//debugg = 0;
+					} else
+					if ( k == VK_RETURN )
+					{
+						if ( foRenaming )
+						{
+							foRenaming = 0;
+							char tmp[ 128 ];
+							sprintf( tmp, "%s%s", imageNameStr, imageNameExt );
+							if ( strcmp( (char*)pFileToRename->filename, tmp ) != 0 )
+							{
+								strcpy( (char*)pFileToRename->rename, tmp );
+								//strcpy( (char*)pFileToRename->filename, (char*)pFileToRename->rename );
+								extern void makeFormattedName( REUDIRENTRY *d );
+								makeFormattedName( pFileToRename );
+								pFileToRename->fileOp |= REUDIR_FILEOP_RENAME;							
+//							debugg = 2;
+							} else
+							{
+//							debugg = 3;
+								if ( pFileToRename->fileOp & REUDIR_FILEOP_RENAME )
+								{
+									if ( nFileOpsPending ) nFileOpsPending --;
+//							debugg = 4;
+								}
+								pFileToRename->fileOp &= ~REUDIR_FILEOP_RENAME;
+							}
+							imageNameEdit = 0;
+						} else
+						{
+							imageNameEdit = 0;
+							return SAVE_IMAGE;
+						}
+					}
+					repKey = 0;
+					lastKey = k;
+				}
+
+				k = -1;
+				//continue;
+				goto test;
+			}
+
 			if ( ( k == 'H' || showHelp ) && fadeToHelp == 0 )
 			{
 				if ( showHelp )
@@ -1307,43 +1447,21 @@ u32 readKeyRenderMenu( int fade )
 				k = 0;
 			}
 
-			if ( imageNameEdit )
-			{
-				if ( k != lastKey )
-				{
-					if ( k == VK_ESC )
-					{
-						imageNameEdit = 0;
-					} else
-					if ( ( ( k >= 'A' && k <= 'Z' ) || ( k >= '0' && k <= '9' ) ) && imageNameStrLength < 20 )
-					{
-						imageNameStr[ imageNameStrLength++ ] = k;
-						imageNameStr[ imageNameStrLength ] = 0;
-					} else
-					if ( k == VK_DELETE && imageNameStrLength )
-					{
-						imageNameStr[ --imageNameStrLength ] = 0; 
-					} else
-					if ( k == VK_RETURN )
-					{
-						imageNameEdit = 0;
-						return SAVE_IMAGE;
-					}
-					repKey = 0;
-					lastKey = k;
-				}
-
-				k = -1;
-				//continue;
-				goto test;
-			}
-
-
 			#ifdef DEBUG_REBOOT_RPI_ON_R
-			if ( k == 'R' )
+			if ( k == 'B' )
 				return RUN_REBOOT;
 			#endif
 
+			if ( k == 'O' && nFileOpsPending )
+			{
+				extern void omitAllPendingFileoperations();
+				omitAllPendingFileoperations();
+			} else
+			if ( k == 'A' && nFileOpsPending )
+			{
+				extern void applyAllPendingFileoperations( const char *DRIVE );
+				applyAllPendingFileoperations( DRIVE );
+			} else
 			if ( k == 'N' && reu.isModified == meType + 1 )
 			{
 				if ( radImageSelectedFile[ 0 ] == '_' || radImageSelectedFile[ 0 ] == 0 )
@@ -1351,7 +1469,7 @@ u32 readKeyRenderMenu( int fade )
 					strcpy( imageNameStr, radImageSelectedPrint );
 				imageNameStrLength = strlen( imageNameStr );
 				imageNameEdit = 1;
-			}
+			} else
 
 			if ( k == 'X' )
 			{
@@ -1363,7 +1481,26 @@ u32 readKeyRenderMenu( int fade )
 				radLaunchVSF = false;
 
 				return RUN_MEMEXP + meType + 1;
-			} 
+			} else
+			if ( k == 'K' && hasSIDKick )
+			{
+				memset( &statusMsg[ 80 ], 0, 120 );
+
+				radLaunchGEORAM = false;
+				radLaunchPRG	= false;
+				radLaunchPRG_NORUN_128 = false;
+				radLaunchVSF = false;
+
+				char tmp[ 40 ];
+				sprintf( tmp, "bla" );
+				setStatusMessage( &statusMsg[ 0 ], tmp );
+				setStatusMessage( &statusMsg[ 40 ], tmp );
+				setStatusMessage( &statusMsg[ 80 ], tmp );
+
+				radSpecialBasicCommand = 1;
+
+				return RUN_MEMEXP + 3;
+			}  else
 			if ( k == 'U' )
 			{
 				unmarkAllFiles();
@@ -1375,7 +1512,7 @@ u32 readKeyRenderMenu( int fade )
 				radLoadGeoImage = false;
 				radLaunchVSF = false;
 				reu.isModified  = 0;
-			}
+			} else
 
 			if ( k == 'T' ) 
 			{
@@ -1405,6 +1542,12 @@ u32 readKeyRenderMenu( int fade )
 				radLoadGeoImage = false;
 				radLaunchVSF = false;
 				reu.isModified = 0;
+			} else
+			if ( !showIECDevice && ( k == 'I' || k == 'i' ) && IECDevicePresent )
+			{
+				showIECDevice = 1;
+				k = 0;
+				return DO_SOMETHING_WITH_USB;
 			} else
 				cmd = handleKey( k );
 
@@ -1492,7 +1635,7 @@ u32 readKeyRenderMenu( int fade )
 					strncpy( radImageSelectedFile, dirSelectedFile, 1023 );
 					strncpy( radImageSelectedName, dirSelectedName, 1023 );
 					memset( radImageSelectedPrint, 0, 22 );
-					strncpy( radImageSelectedPrint, dirSelectedName, 10 );
+					strncpy( radImageSelectedPrint, dirSelectedName, 21 );
 					removeFileExt( radImageSelectedPrint );
 					radLoadGeoImage = true;
 					radLaunchGEORAM = false;
@@ -1555,6 +1698,11 @@ u32 readKeyRenderMenu( int fade )
 	{
 		SPOKE( 0xdc00, 255 );
 		lastKey = -1;
+		if ( showIECDevice )
+		{
+			extern u32 handleKeyIECDeviceScreen( int k );
+			handleKeyIECDeviceScreen( 0 );
+		}
 	}
 test:
 
@@ -1577,8 +1725,21 @@ test:
 
 	FADE_TO_OTHER_SCREEN( fadeToHelp, showHelp )
 	FADE_TO_OTHER_SCREEN( fadeToTimings, showTimings )
+	//FADE_TO_OTHER_SCREEN( fadeToBrowser, showBrowser )
+	if ( fadeToIECDevice )
+	{
+		FADE_TO_OTHER_SCREEN( fadeToIECDevice, showIECDevice )
+		fadeBetween |= 0x10000000;
+	}
 
 	u8 curFade = min( 5, max( fadeBetween, fade ) );
+	if ( showIECDevice )
+	{
+		extern void printIECDeviceScreen( IECSYNCFILE *syncFile, u32 nSyncFile, u32 nBytesFree, int fade );
+		printIECDeviceScreen( iecFiles, iecNumFiles, iecBytesFree, curFade ); 
+		screenUpdated = true;
+		return 0;
+	} else
 	if ( showTimings )	
 		printTimingsScreen( curFade ); else
 	if ( showHelp )
@@ -1587,80 +1748,141 @@ test:
 
 	const u32 oo = 1;
 	const u32 px = 4, vx = 15, kx = 26;
-	printC64( px, 3+oo, "Memory Expansion", 1, 0, 0, 39 );
-	printC64( px, 4+oo, "Type",13, 0, 0, 39 );
 
-	printC64( px, 5+oo, "Size", meType == 2 ? 5 : 13, 0, 0, 39 );
-
-	if ( meType == 0 )
+	if ( nFileOpsPending )
 	{
-		printC64( vx, 4+oo, "REU   ", 3, 0, 0, 39 );
-		printC64( vx, 5+oo, meSizeStr[ meSize0 + 1 ], 3, 0, 0, 39 );
-	} else
-	if ( meType == 1 )
-	{
-		printC64( vx, 4+oo, "GeoRAM", 3, 0, 0, 39 );
-		printC64( vx, 5+oo, meSizeStr[ meSize1 + 3 ], 3, 0, 0, 39 );
-	} else
-	if ( meType == 2 )
-	{
-		printC64( vx, 4+oo, "none  ", 3, 0, 0, 39 );
-		printC64( vx, 5+oo, "      ", 3, 0, 0, 39 );
-	}
-	if ( meType == 3 )
-	{
-		printC64( vx, 4+oo, "(VSF) ", 3, 0, 0, 39 );
-		printC64( vx, 5+oo, "      ", 3, 0, 0, 39 );
-	}
-
-	if ( meType == 2 )
-	{
-		printC64( px, 6+oo, "Image:                ", 5, 0, 0, 39 ); 
-		printC64( px, 7+oo, "_____________________", 5, 0, 0, 39 );
-	} else
-	{
-		if ( reu.isModified == meType + 1 )
+		printC64( px, 3+oo, "Pending File Operations         ", 1, 0, 0, 39 );
+		if ( !foRenaming )
 		{
-			printC64( px, 6+oo, "Image (modified):     ", 13, 0, 0, 39 );
-			printC64( px + 7, 6+oo, "modified", 18, 0, 0, 39 );
+			printC64( px, 4+oo, "Apply Omit                      ", 15, 0, 0, 39 );
+			printC64( px, 4+oo, "A", 19, 0, 0, 39 );
+			printC64( px+6, 4+oo, "O", 20, 0, 0, 39 );
 		} else
-			printC64( px, 6+oo, "Image:                ", 13, 0, 0, 39 ); 
-		printC64( px, 7+oo, "_____________________", 3, 0, 0, 39 );
-	}
+		{
+			printC64( px, 4+oo, "Apply Omit        ", 11, 0, 0, 39 );
+		}
 
-	if ( imageNameEdit )
-	{
-		printC64( px, 7+oo, imageNameStr, 3, 0, 0, 39 );
-		printC64( px + imageNameStrLength, 7+oo, "_", 3, 128, 0, 39 );
-		printC64( kx, 6+oo, "(\x1f cancel,", 15, 0, 0, 39 );
-		printC64( kx, 7+oo, " RET save) ", 15, 0, 0, 39 );
-		printC64( kx+1, 6+oo, "\x1f", 19, 0, 0, 39 );
-		printC64( kx+1, 7+oo, "RET", 20, 0, 0, 39 );
+		printC64( px, 5+oo, "                                ", 15, 0, 0, 39 );
 
-		printC64( kx + 1, 4+oo, "T", 15, 0, 0, 39 );
-		printC64( kx, 5+oo, "(+/-)", 15, 0, 0, 39 );
+		if ( !foRenaming )
+		{
+			printC64( px, 6+oo, "Filename:                      ", 11, 0, 0, 39 ); 
+			printC64( px, 7+oo, "_____________________          ", 11, 0, 0, 39 );
+		} else
+		{
+			if ( foRenaming == 1 )
+			{
+				strncpy( imageNameStr, (const char*)pFileToRename->rename, 20 );
+
+				imageNameStrLength = min( 20, strlen( imageNameStr ) );
+
+				// strip extension (should not be edited)
+				if ( imageNameStr[ imageNameStrLength - 4 ] == '.' )
+				{
+					imageNameStrLength -= 4;
+					strncpy( imageNameExt, &imageNameStr[ imageNameStrLength ], 7 );
+					imageNameStr[ imageNameStrLength ] = 0;
+				}
+
+				imageNameEdit = 1;
+				foRenaming = 2;
+				printC64( px, 7+oo, "_____________________", 3, 0, 0, 39 );
+			}
+			printC64( px, 6+oo, "Filename:            ", 15, 0, 0, 39 ); 
+
+			printC64( px, 7+oo, imageNameStr, 3, 0, 0, 39 );
+			printC64( px + imageNameStrLength, 7+oo, "_", 3, 128, 0, 39 );
+			if ( imageNameStrLength < 20 )
+				printC64( px + imageNameStrLength + 1, 7+oo, "_", 3, 0, 0, 39 );
+			printC64( kx, 6+oo, "(\x1f cancel,", 15, 0, 0, 39 );
+			printC64( kx, 7+oo, " RET save) ", 15, 0, 0, 39 );
+			printC64( kx+1, 6+oo, "\x1f", 19, 0, 0, 39 );
+			printC64( kx+1, 7+oo, "RET", 20, 0, 0, 39 );
+		}
 	} else
 	{
-		printC64( kx, 4+oo, "(T/EXIT)", 15, 0, 0, 39 );
-		printC64( kx+1, 4+oo, "T", 19, 0, 0, 39 );
-		printC64( kx+4, 4+oo, "X", 20, 0, 0, 39 );
-		printC64( kx, 5+oo, "(+/-)", meType == 2 ? 11 : 15, 0, 0, 39 );
-		printC64( px, 7+oo, radImageSelectedPrint, meType == 2 ? 14 : 3, 0, 0, 39 );
-		if ( radImageSelectedFile[ 0 ] != 0 || reu.isModified == meType + 1 )
-			printC64( kx, 6+oo, "(Unmount)  ", meType == 2 ? 11 : 15, 0, 0, 39 ); else
-			printC64( kx, 6+oo, "           ", meType == 2 ? 11 : 15, 0, 0, 39 );
-		if ( meType != 2 )
+		printC64( px, 3+oo, "Memory Expansion                ", 1, 0, 0, 39 );
+		printC64( px, 4+oo, "Type                            ",13, 0, 0, 39 );
+
+		printC64( px, 5+oo, "Size", meType == 2 ? 5 : 13, 0, 0, 39 );
+
+		if ( meType == 0 )
 		{
-			printC64( kx + 1, 5+oo, "+", 21, 0, 0, 39 );
-			printC64( kx + 3, 5+oo, "-", 22, 0, 0, 39 );
-			if ( radImageSelectedFile[ 0 ] != 0 || reu.isModified == meType + 1 )
-				printC64( kx+1, 6+oo, "U", 23, 0, 0, 39 );
+			printC64( vx, 4+oo, "REU   ", 3, 0, 0, 39 );
+			printC64( vx, 5+oo, meSizeStr[ meSize0 + 1 ], 3, 0, 0, 39 );
+		} else
+		if ( meType == 1 )
+		{
+			printC64( vx, 4+oo, "GeoRAM", 3, 0, 0, 39 );
+			printC64( vx, 5+oo, meSizeStr[ meSize1 + 3 ], 3, 0, 0, 39 );
+		} else
+		if ( meType == 2 )
+		{
+			printC64( vx, 4+oo, "none  ", 3, 0, 0, 39 );
+			printC64( vx, 5+oo, "      ", 3, 0, 0, 39 );
 		}
-		printC64( kx, 7+oo, "           ", 15, 0, 0, 39 );
-		if ( reu.isModified == meType + 1 )
+		if ( meType == 3 )
 		{
-			printC64( kx - 1, 7+oo, " (Name&Save)", 15, 0, 0, 39 );
-			printC64( kx + 1, 7+oo, "N", 24, 0, 0, 39 );
+			printC64( vx, 4+oo, "(VSF) ", 3, 0, 0, 39 );
+			printC64( vx, 5+oo, "      ", 3, 0, 0, 39 );
+		}
+
+		if ( meType == 2 )
+		{
+			printC64( px, 6+oo, "Image:                ", 5, 0, 0, 39 ); 
+			printC64( px, 7+oo, "_____________________", 5, 0, 0, 39 );
+		} else
+		{
+			if ( reu.isModified == meType + 1 )
+			{
+				printC64( px, 6+oo, "Image (modified):     ", 13, 0, 0, 39 );
+				printC64( px + 7, 6+oo, "modified", 18, 0, 0, 39 );
+			} else
+				printC64( px, 6+oo, "Image:                ", 13, 0, 0, 39 ); 
+			printC64( px, 7+oo, "_____________________", 3, 0, 0, 39 );
+		}
+	}
+
+	if ( nFileOpsPending )
+	{
+		//printC64( px, 3+oo, "Pending File Operations         ", 1, 0, 0, 39 );
+		//printC64( px, 4+oo, "Delete Rename Apply Omit",13, 0, 0, 39 );
+	} else
+	{
+		if ( imageNameEdit )
+		{
+			printC64( px, 7+oo, imageNameStr, 3, 0, 0, 39 );
+			printC64( px + imageNameStrLength, 7+oo, "_", 3, 128, 0, 39 );
+			printC64( kx, 6+oo, "(\x1f cancel,", 15, 0, 0, 39 );
+			printC64( kx, 7+oo, " RET save) ", 15, 0, 0, 39 );
+			printC64( kx+1, 6+oo, "\x1f", 19, 0, 0, 39 );
+			printC64( kx+1, 7+oo, "RET", 20, 0, 0, 39 );
+
+			printC64( kx + 1, 4+oo, "T", 15, 0, 0, 39 );
+			printC64( kx, 5+oo, "(+/-)", 15, 0, 0, 39 );
+		} else
+		{
+			printC64( kx, 4+oo, "(T/EXIT)", 15, 0, 0, 39 );
+			printC64( kx+1, 4+oo, "T", 19, 0, 0, 39 );
+			printC64( kx+4, 4+oo, "X", 20, 0, 0, 39 );
+			printC64( kx, 5+oo, "(+/-)", meType == 2 ? 11 : 15, 0, 0, 39 );
+			printC64( px, 7+oo, radImageSelectedPrint, meType == 2 ? 14 : 3, 0, 0, 39 );
+			if ( radImageSelectedFile[ 0 ] != 0 || reu.isModified == meType + 1 )
+				printC64( kx, 6+oo, "(Unmount)  ", meType == 2 ? 11 : 15, 0, 0, 39 ); else
+				printC64( kx, 6+oo, "           ", meType == 2 ? 11 : 15, 0, 0, 39 );
+			if ( meType != 2 )
+			{
+				printC64( kx + 1, 5+oo, "+", 21, 0, 0, 39 );
+				printC64( kx + 3, 5+oo, "-", 22, 0, 0, 39 );
+				if ( radImageSelectedFile[ 0 ] != 0 || reu.isModified == meType + 1 )
+					printC64( kx+1, 6+oo, "U", 23, 0, 0, 39 );
+			}
+			printC64( kx, 7+oo, "           ", 15, 0, 0, 39 );
+			if ( reu.isModified == meType + 1 )
+			{
+				printC64( kx - 1, 7+oo, " (Name&Save)", 15, 0, 0, 39 );
+				printC64( kx + 1, 7+oo, "N", 24, 0, 0, 39 );
+			}
 		}
 	}
 	screenUpdated = true;
@@ -1675,6 +1897,13 @@ static u32 actLED_RegOffset, actLED_RegMask;
 
 u16 sdLen = 0;
 u8 spriteData[ 512 ];
+
+static u8 nthFrame = 0;
+
+int noUpdatesRasterLine = 0;
+int fastRefresh = 0;
+
+int rasterLineDelayCounter = 0;
 
 u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 {
@@ -1693,9 +1922,54 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 
 	static int bla = 0;
 	bla ++; bla &= 31;
-	if ( bla < ledActivityBrightness )
-		{ write32( ARM_GPIO_GPSET0+ actLED_RegOffset, actLED_RegMask ); } else
-		{ write32( ARM_GPIO_GPCLR0+ actLED_RegOffset, actLED_RegMask );	}
+	if ( noUpdatesRasterLine )
+	{
+		write32( ARM_GPIO_GPCLR0+ actLED_RegOffset, actLED_RegMask );
+	} else
+	{
+		if ( bla < ledActivityBrightness )
+			{ write32( ARM_GPIO_GPSET0+ actLED_RegOffset, actLED_RegMask ); } else
+			{ write32( ARM_GPIO_GPCLR0+ actLED_RegOffset, actLED_RegMask );	}
+	}
+
+	if ( rasterLineDelayCounter )
+		rasterLineDelayCounter --;
+
+	if ( noUpdatesRasterLine )
+	{
+		BUS_RESYNC
+
+		u16 curRasterLine;
+		u8 y;
+		do {
+			SPEEK( 0xd012, y );
+			curRasterLine = y;
+		} while ( curRasterLine == lastRasterLine );
+		lastRasterLine = curRasterLine;
+
+		SPEEK( 0xd011, y );
+		if ( y & 128 ) curRasterLine += 256;
+
+		if ( curRasterLine == keyScanRasterLine && ( ( ++nthFrame % 3 ) == 0 || fastRefresh ) )
+		{
+			nthFrame = 0;
+			u32 r = readKeyRenderMenu( 0 );
+
+			if ( r ) return r;
+		} 
+		return 0;
+	}
+
+	int colorRAM_addrIncr = 3;
+	int noLogoFade = 0;
+
+	if ( fade1024 & 0x10000000 )
+		colorRAM_addrIncr = 1;
+
+	if ( fade1024 & 0x20000000 )
+		noLogoFade = 1;
+
+	fade1024 &= ~0x30000000;
 
 	int fade = fade1024 >> 8;
 
@@ -1727,7 +2001,6 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 
 #else
 	s16 raw = 128;
-	u8 s = 0;
 #endif
 
 	BUS_RESYNC
@@ -1764,7 +2037,7 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 		switch ( rasterCommands[ curRasterCommand ][ 1 ] )
 		{
 		case 0: 
-			x = fadeTabStep[ rasterCommands[ curRasterCommand ][ 2 ] ][ fade ];
+			x = fadeTabStep[ rasterCommands[ curRasterCommand ][ 2 ] ][ noLogoFade ? 0 : fade ];
 			SPOKE( 0xd020, x );
 			break;
 		case 1:
@@ -1779,20 +2052,20 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 		curRasterCommand %= nRasterCommands;
 	} else
 	{
-		static u8 nthFrame = 0;
 		static u8 c1, c2;
 		register volatile u8 cc1, cc2;
 
 		if ( curRasterLine == 34 )
 		{
-			c1 = fadeTabStep[ 15 ][ fade ];
-			c2 = fadeTabStep[ 11 ][ fade ];
+			//c1 = fadeTabStep[ 15 ][ fade ];
+			//c2 = fadeTabStep[ 11 ][ fade ];
+			c1 = 15; c2 = 11;
 			SPOKE( 0xd015, 0b111111 );
 		} else
 		if ( curRasterLine >= 35 && curRasterLine < 38 )
 		{
 			u8 i = curRasterLine - 35;
-			if ( fade1024 && fadeText )
+			if ( fade1024 && fadeText && !noLogoFade )
 			{
 				cc1 = fadeTabStep[ c1 ][ fade ];
 				cc2 = fadeTabStep[ c2 ][ fade ];
@@ -1814,9 +2087,11 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 			register volatile u8 x;
 			//SPEEK( 0xd800 + addr, x );
 			//SPOKE( 0xd800 + addr, fadeTab[ x & 15 ] );
+			if ( noLogoFade && addr < 4 * 40 )
+				addr = 4 * 40;
 			x = fadeTabStep[ c64ColorRAM[ addr ] ][ fade ];
 			SPOKE( 0xd800 + addr, x );
-			addr += 3;
+			addr += colorRAM_addrIncr;
 			addr %= 1000;
 		} else
 		if ( curRasterLine == keyScanRasterLine && !fade1024 && ( ++nthFrame % 3 ) == 0 )
@@ -1954,20 +2229,16 @@ u32 handleOneRasterLine( int fade1024, u8 fadeText = 1 )
 
 void initHijack()
 {
-	extern CLogger	*logger;
-	u32 size;
-
 	initMenu();
-
-	static const char DRIVE[] = "SD:";
 
 	//readFile( logger, (char*)DRIVE, ( char* )"SD:RAD/font.bin", &font_bin[ 0 ], &size );
 	//memcpy( font_bin + 2048 + 94 * 8, font_bin + 2048 + 233 * 8, 8 );
-
 	//readFile( logger, (char*)DRIVE, ( char* )"SD:RAD/logo.raw", &logo[ 0 ], &size );
 
 	#ifdef PLAY_MUSIC
 	wavMemory = new u8[ 8192 * 1024 ];
+	extern CLogger	*logger;
+	u32 size;
 	readFile( logger, (char*)DRIVE, ( char* )"SD:RAD/music.wav", wavMemory, &size );
 	convertWAV2RAW_inplace( wavMemory );
 	wavPosition = 0;
@@ -2006,6 +2277,119 @@ void fadeScreen()
 			addr += 3;
 			addr %= 1000;
 		}
+	}
+}
+
+void prepareScreenAndSprites()
+{
+	CACHE_PRELOAD_DATA_CACHE( &font_logo[ 0 ], 4096, CACHE_PRELOADL2KEEP )
+	FORCE_READ_LINEAR32a( &font_logo, 4096, 4096 * 8 );
+	BUS_RESYNC
+	SMEMCPY( CHARSET2, &font_logo[0], 0x1000*0+1600 );
+
+	CACHE_PRELOAD_DATA_CACHE( &font_bin[ 0 ], 4096, CACHE_PRELOADL2KEEP )
+	FORCE_READ_LINEAR32a( &font_bin, 4096, 4096 * 8 );
+	BUS_RESYNC
+	SMEMCPY( CHARSET, &font_bin[0], 0x1000 );
+
+	const u8 vic[] = { 
+		0, 0, 0, 0, 0, 0, 0, 0, 
+		0, 0, 0, 0, 0, 0, 0, 0, 
+		0, 0x1B-0x10, 0, 0, 0, 0, 8, 0, 
+		0x14*0+8, 0, 0, 0, 0, 0, 0, 0,
+		0*14, 6*0, 1, 2, 3, 4, 0, 1, 
+		2, 3, 4, 5, 6, 7
+	};
+
+	for ( int j = 0; j < 46; j++ )
+		SPOKE( 0xd000 + j, vic[ j ] );
+
+	SPOKE( 0xdd00, 0b11000000 | ( ( SCREEN1 >> 14 ) ^ 0x03 ) );
+	SPOKE( 0xd018, PAGE1_LOWERCASE );
+
+	uint8_t x;
+	PEEK( 0xdd00, x );
+	x |= 4;
+	SPOKE( 0xdd00, x );
+
+	u16 addr = 0x4000;
+	sdLen = 0;
+	for ( int i = 0; i < 6; i++ )
+	{
+		u8 c = 2 + (i / 3);
+		int ox = (i%3) * 24;
+
+		for ( int y = 0; y < 21; y++ )
+		{
+			int x = ox;
+			for ( int b = 0; b < 3; b++ )
+			{
+				u8 v = 0;
+				for ( int a = 0; a < 8; a++ ) v |= logo[ (x++) + y * 320 ] == c ? (1<<(7-a)) : 0; 
+				SPOKE( addr, v );
+				spriteData[ sdLen ++ ] = v;
+				addr ++;				
+			}
+		}
+		SPOKE( addr, 0 );
+		spriteData[ sdLen ++ ] = 0;
+		addr ++;
+	}
+
+	addr = 0x7800;
+	for ( int i = 0; i < 1024; i++ )
+		SPOKE( addr + i, 0 );
+
+	// sprites
+	u32 o = 56+92;
+	SPOKE( 0xd000, o+0 );  SPOKE( 0xd001, 53+1 );
+	SPOKE( 0xd002, o+24 ); SPOKE( 0xd003, 53+1 );
+	SPOKE( 0xd004, o+48 ); SPOKE( 0xd005, 53+1 );
+	//o += 72;
+	SPOKE( 0xd006, o+0 );  SPOKE( 0xd007, 53+1 );
+	SPOKE( 0xd008, o+24 ); SPOKE( 0xd009, 53+1 );
+	SPOKE( 0xd00a, o+48 ); SPOKE( 0xd00b, 53+1 );
+	SPOKE( 0xd010, 0 );
+	SPOKE( 0xd01c, 0 );
+	// u8 c1 = fadeTabStep[ 15 ][ 0 ];
+	// u8 c2 = fadeTabStep[ 11 ][ 0 ];
+	// c1 = c2 = 0;
+	// keep sprites black for now (will be colored on-the-fly)
+	for ( int i = 0; i < 3; i++ )
+	{
+		SPOKE( 0xd027 + i, 0 );
+		SPOKE( 0xd02a + i, 0 );
+	}
+	SPOKE( 0xd015, 0b111111 );
+	for ( int i = 0; i < 6; i++ )
+		SPOKE( SCREEN1 + 1024 - 8 + i, i );
+
+	SPOKE( 0xdc03, 0 );		// port b ddr (input)
+	SPOKE( 0xdc02, 0xff );	// port a ddr (output)
+	SPOKE( 0xd016, 8 );
+	SPOKE( 0xd021, 0 );
+	SPOKE( 0xd011, 0x1b );
+	SPOKE( 0xdd00, 0b11000000 | ((SCREEN1 >> 14) ^ 0x03) );
+
+
+	BUS_RESYNC
+	POKE( 0xd011, 0x1b );
+
+}
+
+void setCharsForLogoAndOscilloscope()
+{
+	// top logo chars
+	for ( int i = 0; i < 40 * 4; i++ )
+	{
+		c64ScreenRAM[ i ] = i;
+		c64ColorRAM[ i ] = 1;
+	}
+
+	for ( int i = 0; i < 4*40; i++ )
+	{
+		c64ScreenRAM[ osziPosY * 40 + i ] = i + 64;
+		c64ColorRAM[ osziPosY * 40 + i ] = (i/40) == 0 || (i/40) == 3 ? 12 : 15;
 	}
 }
 
@@ -2050,6 +2434,9 @@ restartHijacking:
 	extern void scanDirectoriesRAD( char *DRIVE );
 	scanDirectoriesRAD( (char*)DRIVE );
 
+	if ( IECDevicePresent )
+		markSyncFilesRAD();// syncFileOnDevice, nSyncFileOnDevice );
+
 #ifdef STATUS_MESSAGES
 	if ( radImageSelectedFile[ 0 ] == '_' || radImageSelectedFile[ 0 ] == 0 )
 		setStatusMessage( &statusMsg[ 0 ], " " );
@@ -2061,11 +2448,7 @@ restartHijacking:
 	memset( c64ScreenRAM, 32, 1024 );
 	memset( c64ColorRAM, 2, 1024 );
 
-	for ( int i = 0; i < 4*40; i++ )
-	{
-		c64ScreenRAM[ osziPosY * 40 + i ] = i + 64;
-		c64ColorRAM[ osziPosY * 40 + i ] = (i/40) == 0 || (i/40) == 3 ? 12 : 15;
-	}
+	setCharsForLogoAndOscilloscope();
 
 	printBrowser( 0 );
 
@@ -2082,9 +2465,102 @@ restartHijacking:
 	for ( int i = 0; i < 4 * 40 * 8; i++ )
 		font_bin[ 64*8+i ] = 255*0;
 
+	int syncIcon = 0x5b * 8 + 256 * 8;
+	// . . x x x . x .	58
+	// . x . . . x x .	70
+	// x . . . x x x .	142
+	// . . . . . . . .	0
+	// x x x . . . x .	226
+	// x x . . . x . .	196
+	// x . x x x . . .	184
+	// . . . . . . . .	0
+	font_bin[ syncIcon + 0 ] = 58;
+	font_bin[ syncIcon + 1 ] = 70;
+	font_bin[ syncIcon + 2 ] = 142;
+	font_bin[ syncIcon + 3 ] = 0;
+	font_bin[ syncIcon + 4 ] = 226;
+	font_bin[ syncIcon + 5 ] = 196;
+	font_bin[ syncIcon + 6 ] = 184;
+	font_bin[ syncIcon + 7 ] = 0;
+
+	int diskIcon = 0x5c * 8 + 256 * 8;
+	font_bin[ diskIcon ++ ] = 254;			font_bin[ diskIcon + 128 * 8 - 1 ] = ~font_bin[ diskIcon - 1 ];
+	font_bin[ diskIcon ++ ] = 132;			font_bin[ diskIcon + 128 * 8 - 1 ] = ~font_bin[ diskIcon - 1 ];
+	font_bin[ diskIcon ++ ] = 254;			font_bin[ diskIcon + 128 * 8 - 1 ] = ~font_bin[ diskIcon - 1 ];
+	font_bin[ diskIcon ++ ] = 254 - 16;		font_bin[ diskIcon + 128 * 8 - 1 ] = ~font_bin[ diskIcon - 1 ];
+	font_bin[ diskIcon ++ ] = 254 - 16;		font_bin[ diskIcon + 128 * 8 - 1 ] = ~font_bin[ diskIcon - 1 ];
+	font_bin[ diskIcon ++ ] = 254;			font_bin[ diskIcon + 128 * 8 - 1 ] = ~font_bin[ diskIcon - 1 ];
+	font_bin[ diskIcon ++ ] = 254;			font_bin[ diskIcon + 128 * 8 - 1 ] = ~font_bin[ diskIcon - 1 ];
+	font_bin[ diskIcon ++ ] = 0;			font_bin[ diskIcon + 128 * 8 - 1 ] = ~font_bin[ diskIcon - 1 ];
+
+	int prgIcon = 0x5d * 8 + 256 * 8;
+	font_bin[ prgIcon ++ ] = 0b01101110; font_bin[ prgIcon + 128 * 8 - 1 ] = ~font_bin[ prgIcon - 1 ];
+	font_bin[ prgIcon ++ ] = 0b10000110; font_bin[ prgIcon + 128 * 8 - 1 ] = ~font_bin[ prgIcon - 1 ];
+	font_bin[ prgIcon ++ ] = 0b10001010; font_bin[ prgIcon + 128 * 8 - 1 ] = ~font_bin[ prgIcon - 1 ];
+	font_bin[ prgIcon ++ ] = 0b10010000; font_bin[ prgIcon + 128 * 8 - 1 ] = ~font_bin[ prgIcon - 1 ];
+	font_bin[ prgIcon ++ ] = 0b10100010; font_bin[ prgIcon + 128 * 8 - 1 ] = ~font_bin[ prgIcon - 1 ];
+	font_bin[ prgIcon ++ ] = 0b10000010; font_bin[ prgIcon + 128 * 8 - 1 ] = ~font_bin[ prgIcon - 1 ];
+	font_bin[ prgIcon ++ ] = 0b01111100; font_bin[ prgIcon + 128 * 8 - 1 ] = ~font_bin[ prgIcon - 1 ];
+	font_bin[ prgIcon ++ ] = 0b00000000; font_bin[ prgIcon + 128 * 8 - 1 ] = ~font_bin[ prgIcon - 1 ];
+
+	int vsfIcon = 0x5e * 8 + 256 * 8;
+	font_bin[ vsfIcon ++ ] = 0b01010100; font_bin[ vsfIcon + 128 * 8 - 1 ] = ~font_bin[ vsfIcon - 1 ]; 
+	font_bin[ vsfIcon ++ ] = 0b10010010; font_bin[ vsfIcon + 128 * 8 - 1 ] = ~font_bin[ vsfIcon - 1 ];
+	font_bin[ vsfIcon ++ ] = 0b10010000; font_bin[ vsfIcon + 128 * 8 - 1 ] = ~font_bin[ vsfIcon - 1 ];
+	font_bin[ vsfIcon ++ ] = 0b10011100; font_bin[ vsfIcon + 128 * 8 - 1 ] = ~font_bin[ vsfIcon - 1 ];
+	font_bin[ vsfIcon ++ ] = 0b10000000; font_bin[ vsfIcon + 128 * 8 - 1 ] = ~font_bin[ vsfIcon - 1 ];
+	font_bin[ vsfIcon ++ ] = 0b10000010; font_bin[ vsfIcon + 128 * 8 - 1 ] = ~font_bin[ vsfIcon - 1 ];
+	font_bin[ vsfIcon ++ ] = 0b01111100; font_bin[ vsfIcon + 128 * 8 - 1 ] = ~font_bin[ vsfIcon - 1 ];
+	font_bin[ vsfIcon ++ ] = 0b00000000; font_bin[ vsfIcon + 128 * 8 - 1 ] = ~font_bin[ vsfIcon - 1 ];
+
+	int ramIcon = 0x60 * 8 + 256 * 8;
+	font_bin[ ramIcon ++ ] = 0b00000000; font_bin[ ramIcon + 128 * 8 - 1 ] = ~font_bin[ ramIcon - 1 ]; 
+	font_bin[ ramIcon ++ ] = 0b01010100; font_bin[ ramIcon + 128 * 8 - 1 ] = ~font_bin[ ramIcon - 1 ];
+	font_bin[ ramIcon ++ ] = 0b11111110; font_bin[ ramIcon + 128 * 8 - 1 ] = ~font_bin[ ramIcon - 1 ];
+	font_bin[ ramIcon ++ ] = 0b10000010; font_bin[ ramIcon + 128 * 8 - 1 ] = ~font_bin[ ramIcon - 1 ];
+	font_bin[ ramIcon ++ ] = 0b10000010; font_bin[ ramIcon + 128 * 8 - 1 ] = ~font_bin[ ramIcon - 1 ];
+	font_bin[ ramIcon ++ ] = 0b11111110; font_bin[ ramIcon + 128 * 8 - 1 ] = ~font_bin[ ramIcon - 1 ];
+	font_bin[ ramIcon ++ ] = 0b01010100; font_bin[ ramIcon + 128 * 8 - 1 ] = ~font_bin[ ramIcon - 1 ];
+	font_bin[ ramIcon ++ ] = 0b00000000; font_bin[ ramIcon + 128 * 8 - 1 ] = ~font_bin[ ramIcon - 1 ];
+
+	/*int vsfIcon = 0x5f * 8 + 256 * 8;
+	font_bin[ vsfIcon ++ ] = 0b01111100;
+	font_bin[ vsfIcon ++ ] = 0b11001010;
+	font_bin[ vsfIcon ++ ] = 0b10010010;
+	font_bin[ vsfIcon ++ ] = 0b10111010;
+	font_bin[ vsfIcon ++ ] = 0b10010010;
+	font_bin[ vsfIcon ++ ] = 0b10000010;
+	font_bin[ vsfIcon ++ ] = 0b11111110;
+	font_bin[ vsfIcon ++ ] = 0b00000000;
+
+	int vsfIcon = 0x60 * 8 + 256 * 8;
+	font_bin[ vsfIcon ++ ] = 0b00111000;
+	font_bin[ vsfIcon ++ ] = 0b11101110;
+	font_bin[ vsfIcon ++ ] = 0b10010010;
+	font_bin[ vsfIcon ++ ] = 0b10111010;
+	font_bin[ vsfIcon ++ ] = 0b10010010;
+	font_bin[ vsfIcon ++ ] = 0b10000010;
+	font_bin[ vsfIcon ++ ] = 0b11111110;
+	font_bin[ vsfIcon ++ ] = 0b00000000;*/
+
+	/*font_bin[ diskIcon + 0 ] = 0;
+	font_bin[ diskIcon + 1 ] = 252;
+	font_bin[ diskIcon + 2 ] = 252 - 4;
+	font_bin[ diskIcon + 3 ] = 252 - 48;
+	font_bin[ diskIcon + 4 ] = 252 - 48;
+	font_bin[ diskIcon + 5 ] = 252;
+	font_bin[ diskIcon + 6 ] = 252;
+	font_bin[ diskIcon + 7 ] = 0;*/
+
 	BUS_RESYNC
 
 	fadeScreen();
+
+	// initialize CIA2
+	SPOKE( 0xdd02, 0x3f );
+	SPOKE( 0xdd0d, 0x7f );
+	SPOKE( 0xdd03, 0x06 );
+	SPOKE( 0xdd01, 0x06 );
 
 	for ( u32 i = 0; i < 1000; i++ )
 	{
@@ -2095,35 +2571,15 @@ restartHijacking:
 		SPOKE( 0x0400 + i, 32 );
 	}
 
-	// initialize CIA2
-	SPOKE( 0xdd02, 0x3f );
-	SPOKE( 0xdd0d, 0x7f );
-	SPOKE( 0xdd03, 0x06 );
-	SPOKE( 0xdd01, 0x06 );
 
-	PEEK( 0xdd00, x );
-	x |= 4;
-	SPOKE( 0xdd00, x );
-
-	const u8 vic[] = { 
-		0, 0, 0, 0, 0, 0, 0, 0, 
-		0, 0, 0, 0, 0, 0, 0, 0, 
-		0, 0x1B-0x10, 0, 0, 0, 0, 8, 0, 
-		0x14*0+8, 0, 0, 0, 0, 0, 0, 0,
-		0*14, 6*0, 1, 2, 3, 4, 0, 1, 
-		2, 3, 4, 5, 6, 7
-	};
-
-	for ( int j = 0; j < 46; j++ )
-		SPOKE( 0xd000 + j, vic[ j ] );
-
-	SPOKE( 0xdd00, 0b11000000 | ( ( SCREEN1 >> 14 ) ^ 0x03 ) );
-	SPOKE( 0xd018, PAGE1_LOWERCASE );
 
 	// init SID
 	BUS_RESYNC
 	for ( int i = 0; i < 32; i++ )
+	{
 		SPOKE( 0xd400 + i, 0 );
+		NOP( 8 );
+	}
 
 
 	static u8 detectSIDOnce = 1;
@@ -2132,27 +2588,17 @@ restartHijacking:
 	{
 		detectSIDOnce = 0;
 
-		SIDKickVersion[ 0 ] = 0;
 		supportDAC = hasSIDKick = 0;
-
-		int j = 0; 
-		while ( j++ < 16 && SIDType == 0 )
+#if 1
 		{
-			SPOKE( 0xd41f, 0xff );
-			for ( int i = 0; i < 16 + 16; i++ )
-			{
-				SPOKE( 0xd41e, 224 + i );
-				SPEEK( 0xd41d, *(u8*)&SIDKickVersion[ i ] );
-			}
-
 			// SIDKick (Teensy) ?
 			if ( SIDKickVersion[ 0 ] == 0x53 &&
-				SIDKickVersion[ 1 ] == 0x49 &&
-				SIDKickVersion[ 2 ] == 0x44 &&
-				SIDKickVersion[ 3 ] == 0x4b &&
-				SIDKickVersion[ 4 ] == 0x09 &&
-				SIDKickVersion[ 5 ] == 0x03 &&
-				SIDKickVersion[ 6 ] == 0x0b )
+				 SIDKickVersion[ 1 ] == 0x49 &&
+				 SIDKickVersion[ 2 ] == 0x44 &&
+				 SIDKickVersion[ 3 ] == 0x4b &&
+				 SIDKickVersion[ 4 ] == 0x09 &&
+				 SIDKickVersion[ 5 ] == 0x03 &&
+				 SIDKickVersion[ 6 ] == 0x0b )
 			{
 				// found SIDKick!
 				SIDKickVersion[ 16 ] = 0; 
@@ -2177,15 +2623,16 @@ restartHijacking:
 				if ( supportDAC && SIDKickVersion[ 20 + 10 ] == 0 )
 					supportDAC = 0;
 
-				break;
-			} else
+				//break;
+			} 
+			else
 			// SIDKick pico ?
 			if ( SIDKickVersion[ 0 ] == 0x53 &&
-				SIDKickVersion[ 1 ] == 0x4b &&
-				SIDKickVersion[ 2 ] == 0x10 &&
-				SIDKickVersion[ 3 ] == 0x09 &&
-				SIDKickVersion[ 4 ] == 0x03 &&
-				SIDKickVersion[ 5 ] == 0x0f )
+				 SIDKickVersion[ 1 ] == 0x4b &&
+				 SIDKickVersion[ 2 ] == 0x10 &&
+				 SIDKickVersion[ 3 ] == 0x09 &&
+				 SIDKickVersion[ 4 ] == 0x03 &&
+				 SIDKickVersion[ 5 ] == 0x0f )
 			{
 				// found SIDKick pico!
 				SIDKickVersion[ 16 ] = 0; 
@@ -2198,69 +2645,12 @@ restartHijacking:
 				if ( SIDKickVersion[ 30 ] )
 					supportDAC = 2;
 
-				break;
+				//break;
 			} else
 				SIDKickVersion[ 0 ] = 0;
-
-
-
-			bool badline = false;
-
-			do {
-				u8 y;
-				PEEK( 0xd012, y );
-				u16 curRasterLine = y;
-				do
-				{
-					PEEK( 0xd012, y );
-				} while ( y == curRasterLine );
-
-				badline = ( curRasterLine & 7 ) == 3;
-			} while ( badline );
-
-			u8 a1 = detectSID();
-			u8 a2 = detectSID();
-			u8 a3 = detectSID();
-
-			if ( a1 == a2 && a2 == a3 )
-				SIDType = a1; else		// detection succesful: 6581 or 8580
-				SIDType = 0;			// no success => maybe SwinSID
 		}
+#endif
 	}
-
-	u16 addr = 0x4000;
-	sdLen = 0;
-	for ( int i = 0; i < 6; i++ )
-	{
-		u8 c = 2 + (i / 3);
-		int ox = (i%3) * 24;
-
-		for ( int y = 0; y < 21; y++ )
-		{
-			int x = ox;
-			for ( int b = 0; b < 3; b++ )
-			{
-				u8 v = 0;
-				for ( int a = 0; a < 8; a++ ) v |= logo[ (x++) + y * 320 ] == c ? (1<<(7-a)) : 0; 
-				SPOKE( addr, v );
-				spriteData[ sdLen ++ ] = v;
-				addr ++;				
-			}
-		}
-		SPOKE( addr, 0 );
-		spriteData[ sdLen ++ ] = 0;
-		addr ++;
-	}
-
-	for ( int i = 0; i < 40 * 4; i++ )
-	{
-		c64ScreenRAM[ i ] = i;
-		c64ColorRAM[ i ] = 1;
-	}
-
-	addr = 0x7800;
-	for ( int i = 0; i < 1024; i++ )
-		SPOKE( addr + i, 0 );
 
 	memset( font_logo, 0, 0x1000 );
 
@@ -2280,50 +2670,7 @@ restartHijacking:
 		}
 	}
 	
-	CACHE_PRELOAD_DATA_CACHE( &font_logo[ 0 ], 4096, CACHE_PRELOADL2KEEP )
-	FORCE_READ_LINEAR32a( &font_logo, 4096, 4096 * 8 );
-	BUS_RESYNC
-	SMEMCPY( CHARSET2, &font_logo[0], 0x1000*0+1600 );
-
-	CACHE_PRELOAD_DATA_CACHE( &font_bin[ 0 ], 4096, CACHE_PRELOADL2KEEP )
-	FORCE_READ_LINEAR32a( &font_bin, 4096, 4096 * 8 );
-	BUS_RESYNC
-	SMEMCPY( CHARSET, &font_bin[0], 0x1000 );
-
-
-	SPOKE( 0xdc03, 0 );		// port b ddr (input)
-	SPOKE( 0xdc02, 0xff );	// port a ddr (output)
-	SPOKE( 0xd016, 8 );
-	SPOKE( 0xd021, 0 );
-	SPOKE( 0xd011, 0x1b );
-	SPOKE( 0xdd00, 0b11000000 | ((SCREEN1 >> 14) ^ 0x03) );
-	// sprites
-	u32 o = 56+92;
-	SPOKE( 0xd000, o+0 );  SPOKE( 0xd001, 53+1 );
-	SPOKE( 0xd002, o+24 ); SPOKE( 0xd003, 53+1 );
-	SPOKE( 0xd004, o+48 ); SPOKE( 0xd005, 53+1 );
-	//o += 72;
-	SPOKE( 0xd006, o+0 );  SPOKE( 0xd007, 53+1 );
-	SPOKE( 0xd008, o+24 ); SPOKE( 0xd009, 53+1 );
-	SPOKE( 0xd00a, o+48 ); SPOKE( 0xd00b, 53+1 );
-	SPOKE( 0xd010, 0 );
-	SPOKE( 0xd01c, 0 );
-	// u8 c1 = fadeTabStep[ 15 ][ 0 ];
-	// u8 c2 = fadeTabStep[ 11 ][ 0 ];
-	// c1 = c2 = 0;
-	// keep sprites black for now (will be colored on-the-fly)
-	for ( int i = 0; i < 3; i++ )
-	{
-		SPOKE( 0xd027 + i, 0 );
-		SPOKE( 0xd02a + i, 0 );
-	}
-	SPOKE( 0xd015, 0b111111 );
-	for ( int i = 0; i < 6; i++ )
-		SPOKE( SCREEN1 + 1024 - 8 + i, i );
-
-
-	BUS_RESYNC
-	POKE( 0xd011, 0x1b );
+	prepareScreenAndSprites();
 
 	lastRasterLine = 1234;
 
@@ -2363,6 +2710,12 @@ restartHijacking:
 		// use SIDKick's pure DAC mode if supported
 		if ( supportDAC == 1 )
 		{
+			u8 x;
+			do {
+				SPEEK( 0xd41d, x );
+			} while ( x != 0x4c );
+			SPOKE( 0xd41f, 0xfc );
+			SPOKE( 0xd41f, 0xfc );
 			SPOKE( 0xd41f, 0xfc );
 		} else
 		if ( supportDAC == 2 ) // SKpico
@@ -2371,6 +2724,8 @@ restartHijacking:
 			do {
 				SPEEK( 0xd41d, x );
 			} while ( x != 0x4c );
+			SPOKE( 0xd41f, 0xfc );
+			SPOKE( 0xd41f, 0xfc );
 			SPOKE( 0xd41f, 0xfc );
 		} else
 		{
@@ -2434,6 +2789,11 @@ restartHijacking:
 		case RUN_MEMEXP:
 			for ( i = 4; i < 1024 * 6; i ++ )
 				handleOneRasterLine( i >> 2 );
+			if ( supportDAC )
+			{
+				// reboot SIDKick
+				SPOKE( 0xd41f, 0xf9 );
+			}
 			return r;
 		case SAVE_IMAGE:
 			// fade out
@@ -2455,8 +2815,11 @@ restartHijacking:
 				writeFile( logger, DRIVE, imgFileName, mempoolPtr, imgSize );
 			} 
 				
-			reu.isModified  = false;
+			reu.isModified = false;
 			scanDirectoriesRAD( (char*)DRIVE );
+		
+			if ( IECDevicePresent )
+				markSyncFilesRAD();// syncFileOnDevice, nSyncFileOnDevice );
 
 			// fade in 
 			for ( i = 1024 * 6; i >= 0; i -- )
@@ -2477,6 +2840,51 @@ restartHijacking:
 			for ( i = 1024 * 6; i >= 0; i -- )
 				handleOneRasterLine( i >> 2, 1 );
 			break;
+			
+		case DO_SOMETHING_WITH_USB:
+			// fade out
+			for ( u32 i = 312; i < 312 * 10; i ++ )
+				handleOneRasterLine( 0x10000000 | (i * 256 / 312 / 2), 1 );
+
+			for ( u32 i = 4*40; i < 1000; i++ )
+				SPOKE( SCREEN1 + i, 32 );
+
+			for ( u32 i = 0; i < 1000; i++ )
+				SPOKE( 0xd800 + i, 0 );
+
+			//printC64( 4, 13, "reading directory", 1, 0, 0, 39 );
+
+			EnableIRQs();
+
+			getIECUpdateStatistics();
+
+			extern int getPrint();
+			getPrint();
+
+			DisableIRQs();
+
+			extern void printIECDeviceScreen( IECSYNCFILE *syncFile, u32 nSyncFile, u32 nBytesFree, int fade );
+			printIECDeviceScreen( iecFiles, iecNumFiles, iecBytesFree, 0 ); 
+			screenUpdated = true;
+
+			for ( u32 i = 0; i < 1000; i++ )
+			{
+				SPOKE( SCREEN1 + i, c64ScreenRAM[ i ] );
+			}
+
+			uint8_t x, y; int t;											\
+			do {															\
+				SPEEK( 0xd012, y );											\
+				SPEEK( 0xd011, x );											\
+				t = ( (int)x & 128 ) << 1; t |= y;							\
+			} while ( t != 260 );											\
+
+			// fade in 
+			for ( s32 i = 312 * 10; i >= 0; i -- )
+				handleOneRasterLine( 0x10000000 | (i * 256 / 312 / 2), 1 ); 
+			
+			break;
+
 		default:
 			break;
 		}

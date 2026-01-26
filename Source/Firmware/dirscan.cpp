@@ -9,7 +9,7 @@
          {_________         {______________		Expansion Unit
                 
  RADExp - A framework for DMA interfacing with Commodore C64/C128 computers using a Raspberry Pi Zero 2 or 3A+/3B+
- Copyright (c) 2022-2025 Carsten Dachsbacher <frenetic@dachsbacher.de>
+ Copyright (c) 2022-2026 Carsten Dachsbacher <frenetic@dachsbacher.de>
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -33,30 +33,17 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "rad_iecdevice.h"
+
 extern CLogger *logger;
 
 #define REUDIR_PRINT_MAXNAMECHARS	22
 #define REUDIR_PRINT_SIZEPOS		25
 
-#define REUDIR_REUIMAGE		0x01
-#define REUDIR_GEOIMAGE		0x02
-#define REUDIR_PRG			0x04
-#define REUDIR_DIRECTORY	0x08
-#define REUDIR_DUMMYNEW		0x10
-#define REUDIR_TOPARENT		0x20
-#define REUDIR_VSFIMAGE		0x40
+u32 nFileOpsPending = 0, foRenaming = 0;
+REUDIRENTRY *pFileToRename = NULL;
 
 u32 rdSectionFirst, rdSectionLast;
-
-typedef struct
-{
-	u8  path[ 1024 ];
-	u8  filename[ 256 ];
-	u8	name[ 64 ];
-	u32 f, size, first, last, parent;
-} REUDIRENTRY;
-
-
 
 int compareEntriesREU( const void *e1, const void *e2 )
 {
@@ -95,13 +82,6 @@ void quicksortREU( REUDIRENTRY *begin, REUDIRENTRY *end )
 
 REUDIRENTRY sort[ 2048 ];
 
-static unsigned char toupper( unsigned char c )
-{
-	if ( c >= 'a' && c <= 'z' )
-		return c + 'A' - 'a';
-	return c;
-}
-
 void makeFormattedName( REUDIRENTRY *d )
 {
 	char filename[ 1024 ], fn_up[ 1024 ];
@@ -115,7 +95,8 @@ void makeFormattedName( REUDIRENTRY *d )
 	}
 	fn_up[ i ] = 0;
 
-	if ( strstr( (char*)fn_up, ".PRG" ) || 
+	if ( /*strstr( (char*)fn_up, ".D64" ) || */
+		 strstr( (char*)fn_up, ".PRG" ) || 
 		 strstr( (char*)fn_up, ".REU" ) )
 		filename[ strlen( filename ) - 4 ] = 0;
 	if ( strstr( (char*)fn_up, ".VSF" ) )
@@ -157,12 +138,13 @@ void makeFormattedName( REUDIRENTRY *d )
 	sprintf( (char*)d->name, "%s%s", name, fs );
 }
 
-
 bool ListDirectoryContents( const char *sDir, REUDIRENTRY *d, u32 *n, u32 *nElementsThisLevel, u32 parent, u32 level, bool addNewImageEntry )
 {
 	char sPath[ 2048 ];
 
 	u32 sortCur = 0;
+
+	nFileOpsPending = 0;
 
 	sprintf( sPath, "%s", sDir );
 
@@ -203,6 +185,9 @@ bool ListDirectoryContents( const char *sDir, REUDIRENTRY *d, u32 *n, u32 *nElem
 		{
 			sprintf( sPath, "%s\\%s", sDir, FileInfo.fname );
 
+			sort[ sortCur ].rename[ 0 ] = 0;
+			sort[ sortCur ].fileOp = 0;
+			
 			// file or folder?
 			if ( ( FileInfo.fattrib & ( AM_DIR ) ) )
 			{
@@ -242,6 +227,38 @@ bool ListDirectoryContents( const char *sDir, REUDIRENTRY *d, u32 *n, u32 *nElem
 					strcpy( (char*)sort[sortCur].filename, FileInfo.fname );
 					sort[ sortCur ].size = FileInfo.fsize;
 					sort[ sortCur++ ].f = REUDIR_PRG;
+					nAdditionalEntries ++;
+				}
+
+				if ( strstr( FileInfo.fname, ".seq" ) > 0 || strstr( FileInfo.fname, ".SEQ" ) > 0 )
+				{
+					strcpy( (char*)sort[sortCur].path, sDir );
+					strcpy( (char*)sort[sortCur].filename, FileInfo.fname );
+					sort[ sortCur ].size = FileInfo.fsize;
+					sort[ sortCur++ ].f = REUDIR_SEQ;
+					nAdditionalEntries ++;
+				}
+				//D64,D71,D81,G64,G71
+				//ZIP
+				if ( strstr( FileInfo.fname, ".d64" ) > 0 || strstr( FileInfo.fname, ".D64" ) > 0 ||
+					 strstr( FileInfo.fname, ".d71" ) > 0 || strstr( FileInfo.fname, ".D71" ) > 0 ||
+					 strstr( FileInfo.fname, ".d81" ) > 0 || strstr( FileInfo.fname, ".D81" ) > 0 ||
+					 strstr( FileInfo.fname, ".g64" ) > 0 || strstr( FileInfo.fname, ".G64" ) > 0 ||
+					 strstr( FileInfo.fname, ".g71" ) > 0 || strstr( FileInfo.fname, ".G71" ) > 0 )
+				{
+					strcpy( (char*)sort[sortCur].path, sDir );
+					strcpy( (char*)sort[sortCur].filename, FileInfo.fname );
+					sort[ sortCur ].size = FileInfo.fsize;
+					sort[ sortCur++ ].f = REUDIR_D64;
+					nAdditionalEntries ++;
+				}
+
+				if ( strstr( FileInfo.fname, ".zip" ) > 0 || strstr( FileInfo.fname, ".ZIP" ) > 0 )
+				{
+					strcpy( (char*)sort[sortCur].path, sDir );
+					strcpy( (char*)sort[sortCur].filename, FileInfo.fname );
+					sort[ sortCur ].size = FileInfo.fsize;
+					sort[ sortCur++ ].f = REUDIR_ZIP;
 					nAdditionalEntries ++;
 				}
 			}
@@ -289,11 +306,7 @@ bool ListDirectoryContents( const char *sDir, REUDIRENTRY *d, u32 *n, u32 *nElem
 
 
 
-
-#define BROWSER_NUM_CATEGORIES	3
-#define BROWSER_NUM_LINES		10
-
-REUDIRENTRY filesAll[ 1024 ];
+REUDIRENTRY filesAll[ 8192 ];
 
 struct BROWSESTATE
 {
@@ -489,6 +502,9 @@ void scanDirectoriesRAD( char *DRIVE )
 	LOAD_CATEGORY( curCategory );
 }
 
+
+
+
 void saveCurrentCursor()
 {
 	selectedCategory = curCategory;
@@ -519,8 +535,126 @@ void saveCurrentCursor()
 void unmarkAllFiles()
 {
 	for ( int i = 0; i < nFilesAllCategories; i++ )
-		files[ i ].f &= ~DIR_FILE_MARKED;
+		filesAll[ i ].f &= ~(u32)DIR_FILE_MARKED;
 }
+
+
+void omitAllPendingFileoperations()
+{
+	if ( nFileOpsPending == 0 ) return;
+	for ( int i = 0; i < nFilesAllCategories; i++ )
+	{
+		files[ i ].fileOp = 0;
+	}
+	nFileOpsPending = 0;
+}
+
+void applyAllPendingFileoperations( const char *DRIVE )
+{
+	if ( nFileOpsPending == 0 ) return;
+
+	extern u32 handleOneRasterLine( int fade1024, u8 fadeText );
+
+	for ( u32 i = 312; i < 312 * 10; i ++ )
+		handleOneRasterLine( 0x10000000 | (i * 256 / 312 / 2), 1 );
+
+	extern void POKE_FILL( u16 a, u16 n, u8 v );
+	POKE_FILL( 0x6400, 1000, 32 );
+	POKE_FILL( 0xD800, 1000, 0 );
+
+	nFileOpsPending = 0;
+
+	FATFS m_FileSystem;
+
+	// mount file system
+	if ( f_mount( &m_FileSystem, DRIVE, 1 ) != FR_OK )
+		logger->Write( "RaspiMenu", LogPanic, "Cannot mount drive: %s", DRIVE );
+
+	char curSelectedFile[ 1024 ];
+	curSelectedFile[ 0 ] = 0;
+
+	int myCurCategory = curCategory;
+	int myScrollPos = dirFirstLast[ curLevel ].scrollPos;
+
+	while ( files[ curPosition ].fileOp & REUDIR_FILEOP_DELETE )
+	{
+		if ( curPosition > dirFirstLast[ curLevel ].first + 1 )
+		{
+			if ( -- curPosition < dirFirstLast[ curLevel ].first + dirFirstLast[ curLevel ].scrollPos )
+				dirFirstLast[ curLevel ].scrollPos --;
+			sprintf( curSelectedFile, "%s/%s", (const char*)files[ curPosition ].path, (const char*)files[ curPosition ].filename );
+		} else
+		if ( curPosition < dirFirstLast[ curLevel ].last - 1 )
+		{
+			if ( dirFirstLast[ curLevel ].scrollPos > 0 )
+				dirFirstLast[ curLevel ].scrollPos --;
+			if ( ++ curPosition >= dirFirstLast[ curLevel ].first + dirFirstLast[ curLevel ].scrollPos + BROWSER_NUM_LINES )
+				dirFirstLast[ curLevel ].scrollPos ++;
+		
+			sprintf( curSelectedFile, "%s/%s", (const char*)files[ curPosition ].path, (const char*)files[ curPosition ].filename );
+		} 
+	}
+
+	for ( int i = 0; i < nFilesAllCategories; i++ )
+	{
+		if ( files[ i ].fileOp & REUDIR_FILEOP_DELETE )
+		{
+			char fn[ 2048 ];
+			sprintf( fn, "%s/%s", files[ i ].path, files[ i ].filename );
+			f_unlink( fn );
+		} else
+		if ( files[ i ].fileOp & REUDIR_FILEOP_RENAME )
+		{
+			char oldName[ 2048 ], newName[ 2048 ];
+			sprintf( oldName, "%s/%s", files[ i ].path, files[ i ].filename );
+			sprintf( newName, "%s/%s", files[ i ].path, files[ i ].rename );
+			f_rename( oldName, newName );
+		}
+	}
+
+	// unmount file system
+	if ( f_mount( 0, DRIVE, 0 ) != FR_OK )
+		logger->Write( "RaspiMenu", LogPanic, "Cannot unmount drive: %s", DRIVE );
+
+	firstTimeScanning = 1;
+	scanDirectoriesRAD( (char*)DRIVE );
+	if ( curSelectedFile[ 0 ] )
+	{
+		findFile( myCurCategory, curSelectedFile );
+		dirFirstLast[ curLevel ].scrollPos = 0;
+		for ( int i = 0; i < myScrollPos; i++ )
+		{
+			if ( dirFirstLast[ curLevel ].first + dirFirstLast[ curLevel ].scrollPos + BROWSER_NUM_LINES < dirFirstLast[ curLevel ].last )
+				dirFirstLast[ curLevel ].scrollPos ++;
+		}
+	}
+
+	for ( int i = curLevel - 1; i >= 0; i-- )
+	{
+		dirFirstLast[ i ].scrollPos = dirFirstLast[ i ].first;
+	}
+	/*if ( curLevel > 0 )
+	{
+		// this fakes "go on directory up, and go to directory again"
+		curPosition = dirFirstLast[ curLevel-- ].curPos;
+		saveCurrentCursor();
+		u32 handleKey( int k );
+		handleKey( VK_RETURN );
+	}*/
+
+	extern u32 readKeyRenderMenu( int fade );
+	readKeyRenderMenu( 0 );
+	extern u8 c64ScreenRAM[ 1024 * 4 ];
+	extern void POKE_MEMCPY( u16 a, u16 n, u8 *src );
+	POKE_MEMCPY( 0x6400, 1000, c64ScreenRAM );
+
+	for ( s32 i = 312 * 10; i >= 0; i -- )
+		handleOneRasterLine( 0x10000000 | (i * 256 / 312 / 2), 1 ); 
+}
+
+
+int showWarningMessage = 0, showWarningTimeout = 0, showWarningPosition = 0;
+char warningMessage[ 41 ];
 
 u32 handleKey( int k )
 {
@@ -559,6 +693,7 @@ u32 handleKey( int k )
 			dirFirstLast[ curLevel ].last   = e->last + 1;
 			dirFirstLast[ curLevel ].curPos = curPosition;
 			curPosition = e->first;
+			dirFirstLast[ curLevel ].scrollPos = 0;
 			saveCurrentCursor();
 		} else
 		if ( e->f & REUDIR_REUIMAGE ||
@@ -566,7 +701,6 @@ u32 handleKey( int k )
 			 e->f & REUDIR_GEOIMAGE ||
 			 e->f & REUDIR_PRG  )
 		{
-			//printf( "SELECT: %s/%s\n", files[ curPosition ].path, files[ curPosition ].filename );
 			sprintf( dirSelectedFile, "%s/%s", (const char*)files[ curPosition ].path, (const char*)files[ curPosition ].filename );
 			strncpy( dirSelectedName, (const char*)files[ curPosition ].filename, 511 );
 			dirSelectedFileSize = files[ curPosition ].size;
@@ -574,7 +708,7 @@ u32 handleKey( int k )
 			saveCurrentCursor();
 
 			// double RETURN -> start
-			if ( e->f & DIR_FILE_MARKED && k == VK_RETURN )
+			if ( (e->f & DIR_FILE_MARKED) && (k == VK_RETURN) )
 				k = VK_SHIFT_RETURN;
 
 			if ( k == VK_RETURN || k == VK_COMMODORE_RETURN )
@@ -602,10 +736,99 @@ u32 handleKey( int k )
 		} else
 		if ( e->f & REUDIR_DUMMYNEW )
 		{
-			//printf( "CREATE NEW IMAGE\n" );
 			return REUMENU_CREATE_IMAGE;
 		}
+	} else
+	if ( ( k == 'D' || k == 'd' ) && !( files[ curPosition ].f & REUDIR_MARKSYNC ) )  // mark file for deletion
+	{
+		REUDIRENTRY *e = &files[ curPosition ];
+
+		if ( e->f & ( REUDIR_D64 | REUDIR_PRG | REUDIR_REUIMAGE |  REUDIR_REUIMAGE | REUDIR_VSFIMAGE ) )
+		{
+			if ( e->fileOp & REUDIR_FILEOP_DELETE )
+			{
+				if ( nFileOpsPending ) nFileOpsPending --;
+				e->fileOp &= ~REUDIR_FILEOP_DELETE;
+			} else
+			{
+				nFileOpsPending ++;
+				e->fileOp |= REUDIR_FILEOP_DELETE;
+			}
+		}
+	} else
+	if ( ( k == 'R' || k == 'r' ) && !( files[ curPosition ].f & REUDIR_MARKSYNC ) )  // renaming
+	{
+		REUDIRENTRY *e = &files[ curPosition ];
+
+		if ( e->f & ( REUDIR_D64 | REUDIR_PRG | REUDIR_REUIMAGE |  REUDIR_REUIMAGE | REUDIR_VSFIMAGE ) )
+		{
+			if ( !( e->fileOp & REUDIR_FILEOP_RENAME ) )
+			{
+				nFileOpsPending ++;
+				memcpy( e->rename, e->filename, 64 );
+				e->fileOp |= REUDIR_FILEOP_RENAME;
+			}
+
+			foRenaming = 1;
+			pFileToRename = e;
+		}
+	} else
+	if ( k == 'S' || k == 's' ) // mark file for sync (if filetype is PRG, SEQ, Dxx, ...)
+	{
+		#ifdef DEBUG_OUT_IECDEVICE
+		logger->Write( "[mark files for sync]", LogNotice, " " );
+		#endif
+		REUDIRENTRY *e = &files[ curPosition ];
+		if ( e->f & REUDIR_D64 ||
+			 e->f & REUDIR_PRG )
+		{
+			if ( !(e->f & REUDIR_MARKSYNC) )
+			{
+				int idx = indexOfSyncFile_FileNameSize( syncRemoveFiles, nRemoveFiles, (char*)e->filename, e->size );
+				if ( idx != -1 )
+				{
+					// file exists on IECDevice and we marked it for deletion. Now we undo this!
+					removeSyncFile( syncRemoveFiles, &nRemoveFiles, (char*)e->path, (char*)e->filename, (char*)e->name, e->size );
+					e->f |= REUDIR_MARKSYNC;
+				} else
+				{
+					// we avoid name clashes as on iecdevice files will be identified by "name" only
+					int idx1 = indexOfSyncFile_FileNameOnly( syncFileOnDevice, nSyncFileOnDevice, (char*)e->filename );
+					int idx2 = indexOfSyncFile_FileNameOnly( syncFileChanges, nSyncFileChanges, (char*)e->filename );
+
+					if ( idx1 != -1 || idx2 != -1 )
+					{
+						// a file with the same filename is already on the IECDevice or to be synced
+						// todo: display warning
+						showWarningMessage = 1;
+						showWarningTimeout = 0;
+						showWarningPosition = -1;
+						sprintf( warningMessage, "filename already used on IECBuddy" );
+					} else
+					{
+						// 2 or more files on SD-card (from different subdirectories may have the same filename)
+						addSyncFile( syncFileChanges, &nSyncFileChanges, (char*)e->path, (char*)e->filename, (char*)e->name, e->size, 0 );
+						e->f |= REUDIR_MARKSYNC;
+					}
+				}
+			} else
+			{
+				e->f &= ~REUDIR_MARKSYNC;
+				// remove from list of files to be synced
+				int idxA = indexOfSyncFile_FileNameSize( syncFileOnDevice, nSyncFileOnDevice, (char*)e->filename, e->size );
+				if ( idxA != -1 )
+				{
+					// file is on the IECDevice and we mark the file to deletion
+					addSyncFile( syncRemoveFiles, &nRemoveFiles, (char*)e->path, (char*)e->filename, (char*)e->name, e->size, 0 );
+				} else
+				{
+					// file is not yet on IECDevice, it has just been added to the list for syncing, and we'll remove it from there
+					removeSyncFile( syncFileChanges, &nSyncFileChanges, (char*)e->path, (char*)e->filename, (char*)e->name, e->size );
+				}
+			}
+		}
 	}
+
 
 	if ( k == VK_UP && curPosition > dirFirstLast[ curLevel ].first )
 	{
@@ -627,6 +850,42 @@ extern void printC64( u32 x, u32 y, const char *t, u8 color, u8 flag, u32 conver
 
 extern unsigned char fadeTabStep[ 16 ][ 6 ];
 
+void fadeBG_FG( int curtime, int totaltime, int fadesteps, int *fBG, int *fFG )
+{
+	if ( curtime < fadesteps )
+	{
+		// fade away normal text
+		*fBG = curtime;	// => 0 .. fadesteps - 1
+		*fFG = -1;
+	} else
+	if ( curtime < 2 * fadesteps - 1 ) // fadesteps .. 2 * fadesteps - 2
+	{
+		// fade in error message
+		*fFG = 2 * fadesteps - 2 - curtime; 
+		*fBG = -1;
+	} else
+	if ( curtime < totaltime - 2 * fadesteps )
+	{
+		*fFG = 0;
+		*fBG = -1;
+	} else
+	if ( curtime < totaltime - fadesteps )
+	{
+		// fade out error message
+		*fFG = curtime - (totaltime - 2 * fadesteps) + 1;
+		*fBG = -1;
+	} else
+	if ( curtime < totaltime - 1 )  // curTime [totaltime-fadesteps .. totalTime - 1]
+	{
+		*fBG = totaltime - curtime - 1;
+		*fFG = -1;
+	} else
+	{
+		*fBG = -1;
+		*fFG = -1;
+	}	
+}
+
 void printBrowser( int fade )
 {
 	int curScrollPos = dirFirstLast[ curLevel ].scrollPos;
@@ -641,6 +900,7 @@ void printBrowser( int fade )
 	int yp = 9+1;
 
 	u8 c = fadeTabStep[ 1 ][ fade ];
+	printC64( xp, yp, "              ", 0, 0, 0, 14 );
 	printC64( xp, yp, "PRG", c, (curCategory==0)?0x80:0, 0, 4 );
 	printC64( xp+4, yp, "REU", c, (curCategory==1)?0x80:0, 0, 4 );
 	printC64( xp+8, yp, "GEORAM", c, (curCategory==2)?0x80:0, 0, 6 );
@@ -662,7 +922,34 @@ void printBrowser( int fade )
 		if ( files[ i ].f & DIR_FILE_MARKED )
 			color = 16 + 1 + ( fade << 5 );
 
-		printC64( xp, yp ++, (const char*)files[ i ].name, color, i == curPosition ? 0x80 : 0, 0, 39 );
+		if ( files[ i ].fileOp & REUDIR_FILEOP_DELETE )
+			color = 10; else
+		if ( files[ i ].fileOp & REUDIR_FILEOP_RENAME )
+			color = 14; 
+
+		u8 printName[ 64 ];
+		if ( files[ i ].f & REUDIR_MARKSYNC )
+		{
+			memcpy( printName, files[ i ].name, 64 );
+			printC64( xp-1, yp, (const char*)"\x5b", color, 0 /*i == curPosition ? 0x80 : 0*/, 0, 39 );
+			printC64( xp, yp, (const char*)printName, color, i == curPosition ? 0x80 : 0, 0, 39 );
+		} else
+		{
+			memcpy( printName, files[ i ].name, 64 );
+			printC64( xp, yp, (const char*)printName, color, i == curPosition ? 0x80 : 0, 0, 39 );
+		}
+
+		// icons
+		if ( files[ i ].f & (REUDIR_VSFIMAGE) )
+			printC64( xp + 23, yp, (const char*)"\x5e", color, i == curPosition ? 0x80 : 0, 0, 39 ); else
+		if ( files[ i ].f & (REUDIR_PRG) )
+			printC64( xp + 23, yp, (const char*)"\x5d", color, i == curPosition ? 0x80 : 0, 0, 39 ); else
+		if ( files[ i ].f & (REUDIR_D64) )
+			printC64( xp + 23, yp, (const char*)"\x5c", color, i == curPosition ? 0x80 : 0, 0, 39 ); 
+		if ( files[ i ].f & (REUDIR_REUIMAGE|REUDIR_GEOIMAGE) )
+			printC64( xp + 23, yp, (const char*)"\x60", color, i == curPosition ? 0x80 : 0, 0, 39 ); 
+
+		yp ++;
 	}
 
 	// scroll bar
@@ -682,11 +969,34 @@ void printBrowser( int fade )
 		c64ScreenRAM[ 35 + ( i + yp ) * 40 ] = c;
 		c64ColorRAM[ 35 + ( i + yp ) * 40 ]  = color;
 	}
-	/*
-	for ( int i = 0; i < 256; i++ )
+
+	if ( showWarningMessage )
 	{
-		c64ScreenRAM[ (i%20) + ( (i/20) + yp ) * 40 ] = i;
-		c64ColorRAM[ (i%20) + ( ( i / 20 ) + yp ) * 40 ] = color;
+		int bFade = max( 0, min( 6, min( showWarningTimeout, 50 - showWarningTimeout ) ) );
+
+		if ( bFade > 0 ) 
+		{
+			for ( int y = 17; y < 21; y++ )
+			{
+				int f = max( 0, bFade - ( 20 - y ) * 2 );
+				for ( int i = 0; i < 40; i++ )
+				{
+					c64ColorRAM[ y * 40 + i ] = fadeTabStep[ c64ColorRAM[ y * 40 + i ] ][ f ];
+				}
+			}
+		}
+
+
+		if ( bFade >= 3 )
+		{
+			int fFade = 5 - max( 0, min( 5, min( showWarningTimeout, 50 - showWarningTimeout ) - 3 ) );
+			int c = fadeTabStep[ 10 ][ fFade ];
+			printC64( 0, 19, (const char*)"________________________________________", c, 0, 0, 40 );
+			printC64( 3, 19+1, (const char*)warningMessage, c, 0, 0, 39 );
+		}
+
+		showWarningTimeout ++;
+		if ( showWarningTimeout > 50 )
+			showWarningMessage = 0;
 	}
-	*/
 }
