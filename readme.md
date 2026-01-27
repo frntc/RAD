@@ -1,12 +1,16 @@
 <img  align="right"  width="280"  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/rad_logo.jpg">
   
 
-The **RAD Expansion Unit** is a cartridge/expansion for the C64 and C128 using a Raspberry Pi 3A+, 3B+ or Zero 2 to implement the actual functionality. Currently it emulates a *RAM Expansion Unit* up to 16mb (compatible to CBM 1700/1750/1764 REU, CLD Super 1750 Clone, CMD 1750/1750XL) and a *GeoRAM/NeoRAM memory expansion* up to 4mb. It also features a menu to browse, manage and launch REU- and GeoRAM-images, NUVIEs, PRGs and Vice Snapshots (VSF). The RAD is designed to not only emulate existing extensions, other things that have already been tested (but not yet included here) are, for example, MOS 6510/8500 emulation (incl. turbo mode) or using the RAD as a (co-)processor (in fact the menu runs on the ARM CPU only).
+The **RAD Expansion Unit** is a cartridge/expansion for the C64 and C128 using a Raspberry Pi 3A+, 3B+ or Zero 2 to implement the actual functionality. It emulates a *RAM Expansion Unit* up to 16mb (compatible to CBM 1700/1750/1764 REU, CLD Super 1750 Clone, CMD 1750/1750XL) and a *GeoRAM/NeoRAM memory expansion* up to 4mb. It also features a menu to browse, manage and launch REU- and GeoRAM-images, NUVIEs, PRGs and Vice Snapshots (VSF). 
+
+The RAD also supports an external disk drive and printer emulator, the [**IECBuddy**](https://github.com/dhansel/IECBuddy/), which is the result of a great cooperation with David Hansel. The IECBuddy can be used to synchronize files with the RAD and is integrated into its menu. 
+
+The RAD is designed to not only emulate existing extensions, other things that have already been tested (but not yet included here) are, for example, MOS 6510/8500 emulation (incl. turbo mode), using the RAD as a (co-)processor (in fact the menu runs on the ARM CPU only). With the RAD you can also play [Doom on your C64/C128](https://github.com/frntc/RAD-Doom).
 
   
+RAD's functionality is entirely defined by software. The connecting circuitry is quite simple and does not include any programmable ICs and is thus easy to build. It's a sibling of my other projects: [Sidekick64](https://github.com/frntc/Sidekick64), [SIDKick pico](https://github.com/frntc/SIDKick-pico) and [SIDKick](https://github.com/frntc/SIDKick).
 
-RAD's functionality is entirely defined by software. The connecting circuitry is quite simple and does not include any programmable ICs and is thus easy to build. It's a sibling of my other two projects: [Sidekick64](https://github.com/frntc/Sidekick64) and [SIDKick](https://github.com/frntc/SIDKick).
-
+The RAD has been tested with various PAL-machines (C64s, C128, C128D) and NTSC-C64s/C128s, as well as with the Ultimate64 (the inner workings of the Commodore 64 Ultimate). More in-depth tests with SX64 or C64 Reloaded boards remain to be carried out (not by me, I don't own such machines/devices, but the RAD was reported to work).
   
 
 <p  align="center"  font-size:  30px;>
@@ -25,9 +29,70 @@ RAD's functionality is entirely defined by software. The connecting circuitry is
 
   
 
-RAD has been tested with various PAL-machines (C64s, C128, C128D) and NTSC-C64s. More tests with SX64, Ultimate64 and C64 Reloaded boards, RAMLink etc. remain to be carried out (not by me, I don't own such machines/devices).
+## Using the RAD
 
-  
+Assuming you have your hardware ready and set up the SD card (see below for instructions), the RAD will boot the C64/C128 into its main menu unless configured to not do so. In the menu you can browse and select files:
+
+### Main menu 
+| key | command |
+|----------|:-------------|
+| H | display help |
+| cursor keys, F1/F3, <br> HOME / DEL | navigate files / directories <br> go to first entry, directory up |
+| RETURN | start PRG or select image, press 2x to autostart NUVIE or GeoRAM images |
+| S | mark or unmark a file for syncing (transfer to and from) the IECBuddy (*) |
+| U / N | unmount the image of the memory expansion, or name & save it to SD |
+| D / R | delete or rename a file on the SD card |
+| I | go to IECBuddy submenu (*) |
+| K | launch SIDKick (pico) configuration (only if detected) |
+| £ | timings configuration submenu | 
+
+(*) (only if IECBuddy detected)
+
+### IECBuddy submenu
+
+
+<img  align="right"  src="https://github.com/dhansel/IECBuddy/blob/main/images/IECBuddy-Mini1.jpg"  height="150">
+
+<img  align="right"  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/iecbuddy_transfer.jpg"  height="150">
+
+The IECBuddy submenu is only accessible if an IECBuddy (image shows one of the variants) has been connected to the RAD before booting. You can synchronize files on the SD card with the internal flash storage of the IECBuddy, and newly created files on the IECBuddy are transfered to the subdirectory 'IECBuddy' in the RAD's 'PRG' folder.
+
+| IECBuddy menu | command |
+|----------|:-------------|
+| T | transfer/sync files from and to IECBuddy <br> (pending transfers are shown at the bottom) (**) |
+| 1..0, <br> Q | select favorite disk-images for quick swap (button on the IECBuddy) <br> remove from favorite list, note: imagescan also be mounted using  <br> DOS commands (as with SD2IEC) |
+| W | wipe all: **remove all** synced files from IECBuddy |
+| I | initialize the IECBuddy (= 'factory reset'), **removes all files** |
+| + / - | change drive number of the IECBuddy |
+| ← | back to main menu | 
+
+(**) if you transfer disk images (D64, D71, etc.) you can provide a .gif-image (240x160 resolution) which is displayed on the IECBuddy-TFT-screen once the image is mounted.
+
+### Printer emulation with the IECBuddy
+
+<img  align="right"  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/iecbuddy_print.jpg"  height="150">
+
+The IECBuddy emulates a printer (device #4). When you print on the C64/C128 and go back to the RAD menu you can preview and save the print by pressing 'I' (go to IECBuddy submenu) in the main menu. 
+
+| print submenu | command |
+|----------|:-------------|
+| F7 | see a preview of the print |
+| RETURN | save the print (type in name before). <br> The print will be save as PDF and series of BMPs <br> on the SD-card in the sub-folder 'RAD_PRINT'. |
+| ← | back to main menu | 
+
+In the print preview you can scroll and zoom through the entire (multipage) document:
+
+| print preview | command |
+|----------|:-------------|
+| cursor keys, or WASD | scroll over printout |
+| + / - | zoom |
+| SPACE | reset scaling |
+| F1 / F3 | go one page up / down |
+| F2 / F4 | go to first / last page |
+| HOME / DEL | go to begin / end of current page |
+| F7 or ← | close preview |
+
+
 
 ## How to build a RAD Expansion Unit:
 
@@ -37,10 +102,7 @@ RAD has been tested with various PAL-machines (C64s, C128, C128D) and NTSC-C64s.
 
   
 
-This section summarizes building and setting up the hardware.
-
-  
-
+This sections summarize building and setting up the hardware.
   
 
 ### PCBs, BOM and assembly information
@@ -115,7 +177,7 @@ The bus timings and cache parameters are stored in SD:RAD/rad.cfg -- in most cas
   
 ## Vice Snapshots
 
-These VSF-files can be created using the Vice emulator (use latest release!) and are similar to what freezer cartridges do: storing the current state of the computer. The RAD will restore the memory, VIC, SID, CIA, and CPU states from the stored VSF data (however, timers and CPU-VIC-sync are not restored absolutely accurate).
+Vice snapshots are stored as VSF-files and can be created using the Vice emulator (use latest release!). They are similar to what freezer cartridges do: storing the current state of the computer. The RAD will restore the memory, VIC, SID, CIA, and CPU states from the stored VSF data (however, timers and CPU-VIC-sync are not restored absolutely accurate).
 
 Keep in mind that snapshots have to be used with care: they work for C64s and C128s in C64-mode, but a C64-VSF might not work on a C128 and vice versa. Also, for example, if you snapshot a C64 in Vice and then load the VSF on a C64 with a different kernal ROM the machine might crash (ROMs are not replaced in the real machine).
 
@@ -144,14 +206,22 @@ You've built it yourself? Cool, this project is for tinkerers!
 
 If you have questions about assembling one, don't hesitate to ask!
 
-If you can't build one yourself, you can get pre-assembled PCBs from PCBWay or from official sellers of Sidekick64/RAD/SIDKick: www.restore-store.de (all three projects), [www.retro-updates.com](http://www.retro-updates.com) (Sidekick64), ausvantage_online, stmlord and jamessahm on ebay (RAD).
+If you can't build one yourself, you can get pre-assembled PCBs from PCBWay or from official sellers of Sidekick64/RAD/SIDKick, e.g. ausvantage_online, stmlord and jamessahm on ebay (more to come).
 
 *It is also perfectly fine and appreciated* if someone sells spare PCBs (populated or not) of a PCB-order or manufactures a small batch and offers them on a forum, but I expect the price tag to be lower than that of the aforementioned official sellers.
 
-If you bought a Sidekick64/RAD/SIDKick for the same price or even more, this clearly is a violation of the license and you should ask the seller why they are not respecting open source/CC developers' licenses.   
+If you bought a Sidekick64/RAD/SIDKick for the same price as from the official sellers or even more, it's likely that someone does this for money and violates the license. It's annoying when open source/CC developers' licenses are not respected and that's why I'm starting to welcome these sellers to the RAD-Hall of Shame:
+<table>
+<tr>
+<td>  <img  height="150"  src="https://raw.githubusercontent.com/frntc/RAD/main/Images/rad_hos_1.jpg">  </td>
+<td>A very active HoS-member offering not just one, but three of my projects :-(
+</tr>
+<td>  <img  height="150"  src="https://raw.githubusercontent.com/frntc/SIDKick-pico/main/Images/hos_6.jpg">  </td>
+<td>... and another one ...
+</tr>
+</table>
 
   
-
 ## License
 
 The *source code* is licensed under *GPLv3*.
