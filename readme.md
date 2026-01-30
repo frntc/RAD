@@ -197,6 +197,7 @@ Set up your Circle44.3 and gcc-arm environment, then you can compile RAD almost 
 
 ## Disclaimer
 
+I'm a hobbyist, no electronics engineer. I'm doing my best to ensure that my projects are working at intended, but I cannot give any guarantee for anything. I am not a manufacturer or distributor, so you must ensure yourself that operation is permitted in your place of residence. 
 Be careful not to damage your RPi or 8-bit computer, or anything attached to it. I am not responsible if you or your hardware gets damaged. In principle, you can attach the RPi and other cartridges at the same time, as long as they do not conflict (e.g. in IO ranges or driving signals). I recommend to NOT do this. Again, I'm not taking any responsibility -- if you don't know what you're doing, better don't... use everything at your own risk.
 
   
