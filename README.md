@@ -5,7 +5,7 @@
 gpu64 is a cartridge that gives a C64 a second, independent screen on HDMI,
 and a command interface to draw on it. It is built on the
 [RAD](https://github.com/frntc/RAD) board (a Raspberry Pi 3A+ on the
-expansion port); gpu64 is the firmware and the SDK.
+expansion port); gpu64 is the firmware and the SDK; this repository is the SDK, examples and documentation.
 
 The C64 keeps its own VIC-II output and its own screen. The HDMI screen is a
 separate display, the way the C128's 80-column screen is: 320x200 in 256
@@ -42,7 +42,7 @@ how far it goes, but they are examples of use, not the purpose.
 
 ## Hardware
 
-- A [RAD](Gerber/) cartridge with a Raspberry Pi 3A+.
+- A [RAD cartridge](https://github.com/frntc/RAD) (design and build instructions are upstream) with a Raspberry Pi 3A+.
 - A C64 or C64 Ultimate. Tested on a C64 Ultimate and on an original
   short-board C64.
 - An HDMI display and an SD card.
@@ -52,16 +52,10 @@ clear of the REU's own `$DF00-$DF0A`.
 
 ## Quick start
 
-1. Put `kernel_rad.img` and the RAD support files on a FAT SD card (build it
-   yourself: see [Building the firmware](#building-the-firmware)).
-2. Boot the C64 with the cartridge. In the RAD menu **press `T` until it says
-   `REU`**. Without that, none of gpu64 runs.
-3. Load an example (`.prg` on a disk, SD or IEC device) and run it.
-
-```
-LOAD"GPU64_DEMO_HELLO",8,1
-RUN
-```
+Got a RAD cartridge? Download the release, unzip it onto the SD card, press
+`T` until the RAD menu says `REU`, and run `gpu64_demo_hello`. Step by step:
+[docs/guide/install.md](docs/guide/install.md). Every program is also on a
+`.d64` (`LOAD"HELLO",8,1`).
 
 To write your own, copy [`sdk/template/`](sdk/template/) and edit it.
 
@@ -98,16 +92,11 @@ which protection. The [guide](docs/guide/getting-started.md) and
 The v1 API surface is frozen: opcodes and argument layouts will not change
 meaning.
 
-## Building the firmware
+## Firmware
 
-Needs the `aarch64-none-elf` toolchain and Circle 44.3 (`external/`).
-
-```
-SDCARD=/media/you/SD  tools/build.sh      # builds and copies kernel_rad.img
-```
-
-The card boots `kernel_rad.img`, not `kernel8.img`. Details in
-[dev/hw_testing.md](dev/hw_testing.md).
+gpu64's Raspberry Pi firmware is built on RAD and Circle and is not part of
+this repository; it ships in each release. This repository holds everything you
+need to write programs for it. Maintainers: `tools/release.sh`.
 
 ## Layout
 
@@ -118,19 +107,15 @@ games/      larger programs built on the SDK
 docs/       guide and API reference
 tests/      conformance suite (self-verdicting PRGs)
 tools/      assembler wrappers, PC simulators, deploy scripts
-Source/     firmware (RAD fork)
-Gerber/     board design
 dev/        design history
 ```
 
 ## Licence and credits
 
-Firmware and SDK: GPL-3.0-or-later, © 2026 Honza Slesinger. The RAD
-hardware design (`Gerber/`) is CC BY-NC-SA 4.0. See [LICENSE](LICENSE).
+GPL-3.0-or-later, © 2026 Honza Slesinger. See [LICENSE](LICENSE).
 
-gpu64 is a fork of [RAD](https://github.com/frntc/RAD) by Carsten
-Dachsbacher (frntc) and builds on [Circle](https://github.com/rsta2/circle)
-by R. Stange. The RAD readme is kept as
-[dev/rad-upstream-readme.md](dev/rad-upstream-readme.md). Commodore 64 is a
+gpu64 builds on [RAD](https://github.com/frntc/RAD) by Carsten Dachsbacher (frntc), whose hardware
+design is CC BY-NC-SA 4.0 and whose software is GPL-3, and on
+[Circle](https://github.com/rsta2/circle) by R. Stange. Commodore 64 is a
 trademark of its owner; this project is not affiliated with Commodore. The
 Quake example needs your own copy of the game data and ships none.

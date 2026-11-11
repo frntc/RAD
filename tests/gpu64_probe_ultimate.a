@@ -74,7 +74,7 @@ OP_LOG_ENABLE = $07
 ERR_BAD_ARGS  = $04
 
 CUR	= $fb			; screen cursor, 2 bytes
-STR	= $fd			; inline string pointer, 2 bytes
+STRP	= $fd			; inline string pointer, 2 bytes
 
 JIFFY	= $a2
 
@@ -355,23 +355,23 @@ scDone	rts
 
 ; Print the zero-terminated string that follows the JSR; return past it.
 prinl	pla
-	sta STR
+	sta STRP
 	pla
-	sta STR+1
+	sta STRP+1
 	ldy #0
-plLoop	inc STR
+plLoop	inc STRP
 	bne plRd
-	inc STR+1
-plRd	lda (STR),y
+	inc STRP+1
+plRd	lda (STRP),y
 	beq plEnd
 	sta (CUR),y
 	inc CUR
 	bne plLoop
 	inc CUR+1
 	jmp plLoop
-plEnd	lda STR+1
+plEnd	lda STRP+1
 	pha
-	lda STR
+	lda STRP
 	pha
 	rts
 

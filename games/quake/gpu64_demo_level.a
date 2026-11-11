@@ -128,10 +128,7 @@ OP_GET_TRANSFORM     = $36
 ; once at start-up. gpu64_api.h has the reasoning.
 KEY_DESTRUCTIVE = $a5
 
-SEQ      = $df67
-SEQACK   = $df68
 
-ST_FRAME_READY = $10
 
 ; LEVEL_STEP's RESULT: 0..99 is percent and more remains; $ff is done.
 LEVEL_DONE = $ff

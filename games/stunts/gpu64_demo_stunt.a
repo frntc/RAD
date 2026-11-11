@@ -98,9 +98,6 @@ KEY_CHECKED	= $d0		; | n, see stage2
 CHK_TRIES	= 4
 UPLOAD_TRIES	= 4
 
-SEQ      = $df67
-SEQACK   = $df68
-ST_FRAME_READY = $10
 READY_WAIT = 20000
 
 ; --- the scene's ids ---------------------------------------------------

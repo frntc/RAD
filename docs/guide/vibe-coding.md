@@ -61,8 +61,7 @@ REU in the RAD menu. If it does not, tell it to read `docs/ai/AGENTS.md`.
   write. Short programs never notice; the agent knows to design long-running
   games around it. If you see **one** unexplained glitch, say so rather than
   asking for a fix.
-- The agent is instructed not to modify the firmware (`Source/`). If a plan
-  involves it, stop and decide whether that is what you want.
+- The firmware is not part of this repo and the agent cannot change it.
 - Do not ask it to include copyrighted game assets or music in the repo.
 
 ## Safety

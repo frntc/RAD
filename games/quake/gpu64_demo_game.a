@@ -167,10 +167,7 @@ KEY_DESTRUCTIVE = $a5
 KEY_CHECKED	= $d0		; | n, see stage2
 CHK_TRIES	= 4
 
-SEQ      = $df67
-SEQACK   = $df68
 
-ST_FRAME_READY = $10
 LEVEL_DONE = $ff
 
 MESH_BASE = 1000

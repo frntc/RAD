@@ -52,6 +52,8 @@ every readback with `SET_DMA_WINDOW` before you use one.
 
 **Guide** — [`guide/`](guide/)
 
+0. [install.md](guide/install.md) — put the release on your SD card and run
+   a program.
 1. [getting-started.md](guide/getting-started.md) — register map, what a
    command costs the C64, issuing a command, blob descriptors, building and
    running the examples. Start here.

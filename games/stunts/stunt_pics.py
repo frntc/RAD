@@ -34,8 +34,9 @@ import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, '..', 'tools'))
-sys.path.insert(0, os.path.join(HERE, '..', 'tools', 'prgsim'))
+ROOT = os.environ.get('GPU64_ROOT') or os.path.join(HERE, '..', '..')
+sys.path.insert(0, os.path.join(ROOT, 'tools'))
+sys.path.insert(0, os.path.join(ROOT, 'tools', 'prgsim'))
 
 import hondani                  # noqa: E402
 import pack_levels              # noqa: E402

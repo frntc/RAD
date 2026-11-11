@@ -91,17 +91,15 @@ the Quake game, which invites the "it's just Quake on a Pi" reaction.
 
 - **gpu64 software: GPL-3.0-or-later**, Honza Slesinger. It already is, per
   file headers; the `LICENSE` file now states which licence covers what.
-- **RAD software (frntc): GPL-3**, kept as-is. gpu64's changes to those files
-  stay GPL-3, so they can be contributed back.
-- **RAD hardware: CC BY-NC-SA 4.0**, unchanged. This restricts *commercial
-  hardware sales*, not use of the software. Say so plainly in the README so
-  nobody reads "NC" as covering the firmware.
-- If you want others to build and sell the cartridge, that is a hardware
-  licence conversation with the RAD author, not something to decide here.
+- **RAD** (software GPL-3, hardware CC BY-NC-SA 4.0) is referenced, not
+  included. The repo is no longer a fork: the firmware (`Source/`), `Gerber/`
+  and `Images/` are gitignored and stay on the maintainer's disk.
+- Decide where the firmware lives (a second repo, or release binaries of
+  `kernel_rad.img`). Until then the README says it is not part of this
+  repository. If it is ever published, it contains RAD-derived files and
+  must be GPL-3 with frntc's headers intact.
 
-Header pass still to do: ~37 `Source/Firmware/gpu64_*` files and about half of
-the files under `sdk/ examples/ tests/ games/ tools/` carry no
-"Copyright (c) 2026 Honza Slesinger / GPL-3.0-or-later" line.
+The header pass is done for everything under `sdk/ examples/ tests/ games/ tools/`.
 
 ### Fresh history
 
@@ -120,25 +118,14 @@ git push -u origin public-main:main
 Keep the old repository as a private archive. Tag the first release `v1.0`
 (the v1 API surface is frozen).
 
-## 3. Merge-back to RAD
+## 3. Relationship to RAD
 
-You want the additions upstreamed. The licensing works (everything GPL-3).
-The practical path:
-
-1. **Keep `Source/Firmware/` file-for-file compatible** with upstream paths
-   so a diff is meaningful. This is why the firmware was not moved.
-2. **Propose the smallest self-contained piece first.** gpu64 touches RAD in
-   `rad_reu.cpp` (the polling loop and IO2 decode), `rad_main.cpp`,
-   `rad_hijack.cpp` and the build rules. Offer a patch series: the register
-   window decode and the HDMI framebuffer first; the 2D API next; 3D last.
-3. **Open an issue upstream before a PR.** Describe the feature, point at the
-   demos, ask whether he wants it in-tree or as an optional module. Expect to
-   split or rewrite to fit his style.
-4. **Be upfront about the timing hazard.** The polling loop has hard-won
-   rules (`Source/Firmware/CLAUDE.md`); anything that adds work in it
-   endangers REU emulation for everyone. Offer a compile-time switch.
-5. Keep authorship clean: each commit is yours, derived files keep his
-   header, and the `LICENSE` file already carries both.
+The repository only references RAD; it contains none of its code or design.
+Credit it in the README, link upstream for hardware, and tell its author
+before announcing. If the firmware is published later and he wants the
+additions upstreamed, that is a separate discussion with its own patch
+series; the timing rules for the polling loop would be the first thing to
+explain.
 
 ## 4. Where to announce
 
@@ -154,7 +141,7 @@ threads; the video does the arguing.
 ## 5. After going public
 
 - Add a short `CONTRIBUTING.md`: bug reports welcome with a bench log; PRs for
-  examples and docs are easy; firmware PRs must read `Source/Firmware/CLAUDE.md`.
+  examples and docs are easy; firmware is out of scope for this repo.
 - Issue templates: "bench report" (hardware, firmware build id, REU mode on?)
   catches the most common false report.
 - Revisit this file after the first month and delete what the community

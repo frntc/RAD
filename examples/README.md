@@ -40,7 +40,7 @@ Class 1 programs (`cube`, the games) also leave every rendered frame in
 ```
 
 Never pass `--nostart`: it removes the load address and the program silently
-never runs. Copy the `.prg` to whatever the C64 loads from, `LOAD"HELLO",8,1`
+never runs. Copy the `.prg` to the SD card's `RAD_PRG/`, or load from `gpu64-examples.d64`: `LOAD"HELLO",8,1`
 and `RUN`. RAD must be in **REU** mode (press `T` in its menu until it says
 REU) or none of gpu64 runs.
 

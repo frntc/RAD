@@ -31,7 +31,6 @@ it onto the hardware. Read it fully before writing code.
 | `docs/api/` | Reference by class: `class0-2d-reference.md`, `class1-3d-mesh-reference.md`, `class2-raster-reference.md`, `error-codes.md`. |
 | `tools/examples.sh` | Assemble + simulate + render examples and games. |
 | `tools/prgsim/runsim.py` | The simulator it uses. |
-| `Source/` | Firmware. **Do not edit** unless asked. |
 
 Look at the closest example before you write anything. If an opcode is not in
 `sdk/gpu64.inc`, check the API reference rather than guessing a number.
@@ -111,7 +110,6 @@ device you were not told about.
 
 | What | Where on the card |
 |---|---|
-| Firmware (only if `Source/` changed) | `SDCARD=<mount> tools/build.sh` writes `kernel_rad.img` |
 | A program | `<mount>/RAD_PRG/yourname.prg` |
 | A game's REU image | `<mount>/REU/` |
 
@@ -128,8 +126,7 @@ Then tell the human exactly what to do at the machine:
 3. Pick the program from the menu and run it.
 4. Report what the HDMI screen and the C64 screen show.
 
-The card boots `kernel_rad.img`. If you rebuilt firmware, check the boot log's
-build id: stale-firmware deploys have wasted whole test rounds.
+The card boots `kernel_rad.img`; its firmware is not built from this repo.
 
 ## Reading a failed run
 
@@ -142,8 +139,8 @@ build id: stale-firmware deploys have wasted whole test rounds.
 
 ## Hard limits
 
-- Do not edit `Source/Firmware/` without being asked; its timing rules are
-  binding and violations look like random hardware failure.
+- The Pi firmware is not part of this repo. If the hardware behaves
+  differently from the documentation, report it; do not work around it silently.
 - The v1 API is frozen; do not invent opcodes.
 - 3D coordinates are 8.8 fixed point; the far plane cannot exceed 127.99
   units. Axes: +x right, +y up, +z away.

@@ -350,8 +350,6 @@ OP_SET_SCALE         = $35
 ; The sequence-number pair. Writing SEQ costs one register write and buys a
 ; detector for the dropped-write defect; SEQACK reads back the SEQ of the
 ; command gpu64 actually dispatched.
-SEQ      = $df67
-SEQACK   = $df68
 
 ; GET_HEALTH block offsets (Source/Firmware/gpu64_api.cpp, case 0x0A, and
 ; Source/Firmware/gpu64_busstats.h). The 80-byte rung is the one that
@@ -444,7 +442,6 @@ H_WIPES   = 79			; SCENE_RESETs that ran against a built scene
 ; variable under test.
 PHASES    = 16			; 8 of each, alternating, 256 frames apiece
 
-ST_FRAME_READY = $10		; STATUS bit 4: the loop has a finished frame
 
 SPR_DIRECTIONAL = $01		; the sprite's texture id is the first of
 				; eight views and its yaw picks which
