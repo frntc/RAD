@@ -1,8 +1,9 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64: the 320x200x8 framebuffer the command API draws into.
 
  This owns the HDMI display outright ("architecture A", see
- project/milestone4_2d_api_design.md#display-architecture): one CBcmFrameBuffer
+ dev/milestone4_2d_api_design.md#display-architecture): one CBcmFrameBuffer
  at 320x200, depth 8, virtual height 400, so the VideoCore gives us a real
  256-entry 24-bit palette, a real hardware page flip (SetVirtualOffset), and
  upscaling to whatever HDMI mode is attached -- none of which costs ARM time

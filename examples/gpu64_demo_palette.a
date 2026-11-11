@@ -1,0 +1,287 @@
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 demo 2 of 7 -- PALETTE: 256 colours, and animation for free.
+;
+;      The framebuffer is 8 bits per pixel and every byte is a palette
+;      index, so the 256 entries are a level of indirection sitting between
+;      what you drew and what the display shows. Change an entry and every
+;      pixel holding that index changes at once, without a single byte of
+;      the framebuffer being touched.
+;
+;      That is what this demo is about. It draws ONCE -- a hundred nested
+;      rectangles, each one a different palette index -- and then animates
+;      the whole screen with one command per frame:
+;
+;        PAL_LOAD ($31)  fetches count RGB triples from your memory into
+;                        entries first .. first+count-1.
+;
+;      The trick with the ramp is worth stealing. The 256-entry rainbow is
+;      built TWICE, back to back, into a 1536-byte buffer. Rotating the
+;      palette by k entries is then not a rotation at all: it is the same
+;      PAL_LOAD of 256 entries, reading from k triples further into the
+;      buffer. The 6502 does no work per frame beyond adding 3 to a
+;      pointer.
+;
+;      Compare the cost. Redrawing a hundred rectangles is a hundred
+;      dispatches, each halting the C64 for its own work. Reloading the
+;      palette is one dispatch that moves 768 bytes. Colour cycling was
+;      cheap on hardware from 1985 for exactly this reason, and it is cheap
+;      here for the same one.
+;
+;      Also shown: PAL_SET ($30), which sets a single entry from three bytes
+;      in the argument block -- the right call when one colour changes and
+;      you do not want to move 768 bytes to say so.
+;
+;      Run it: LOAD"GPU64-PAL",8,1 then RUN. RUN/STOP finishes.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+	.include "gpu64.inc"
+
+RAMP     = $c000		; 512 RGB triples = the 256-entry ramp, twice
+
+	#basicStub
+
+start
+	jsr dmInit
+
+	jsr buildRamp			; fill RAMP with the doubled rainbow
+
+	; --- load the ramp once, so the drawing below has colours ----------
+	; ARG0-5 blob descriptor, ARG6 first index, ARG7 count. len must be
+	; exactly count * 3 or the command answers BAD_ARGS and does nothing.
+	; count is a single byte, so one call reaches entries 0..254; entry
+	; 255 is set on its own below.
+	#argblob 0, SPACE_C64, RAMP, 255*3
+	#argb 6, 0			; first index
+	#argb 7, 255			; count
+	#cmd OP_PAL_LOAD
+
+	; Entry 255 is gpu64's on-screen log ink. Nothing stops you using it
+	; as an ordinary colour -- this is what PAL_SET is for.
+	#argb 0, 255			; index
+	#argb 1, 255			; r
+	#argb 2, 255			; g
+	#argb 3, 255			; b
+	#cmd OP_PAL_SET
+
+	#argb 0, BLACK
+	#cmd OP_SET_BORDER
+
+	; The framebuffer contents at reset are undefined -- CLEAR first, or
+	; the area the rings do not cover is whatever was in memory.
+	#argb 0, 0
+	#cmd OP_CLEAR
+
+	; --- draw the tunnel, once -----------------------------------------
+	; Rect i is inset i pixels on every side and drawn in palette index
+	; i*2, so the hundred rings walk half of the ramp. Nothing below this
+	; point writes to the framebuffer again.
+	lda #0
+	sta ring
+ringLoop
+	lda ring
+	sta rx				; x = i
+	lda #0
+	sta rx+1
+	lda ring
+	sta ry				; y = i
+	lda #0
+	sta ry+1
+
+	; w = 320 - 2i, h = 200 - 2i
+	lda ring
+	asl a				; i*2, never above 198
+	sta twice
+	lda #<320
+	sec
+	sbc twice
+	sta rw
+	lda #>320
+	sbc #0
+	sta rw+1
+	lda #<200
+	sec
+	sbc twice
+	sta rh
+	lda #0
+	sta rh+1
+
+	#argwv 0, rx
+	#argwv 2, ry
+	#argwv 4, rw
+	#argwv 6, rh
+	lda twice			; colour = i*2
+	sta ARG+8
+	#cmd OP_RECT
+
+	inc ring
+	lda ring
+	cmp #100
+	bne ringLoop
+
+	lda #1
+	jsr dmRow
+	jsr dmText
+	.text "GPU64 PALETTE   DRAWN ONCE. CYCLING"
+	.byte 0
+	lda #3
+	jsr dmRow
+	jsr dmText
+	.text "ONE PAL-LOAD PER FRAME MOVES 768"
+	.byte 0
+	lda #4
+	jsr dmRow
+	jsr dmText
+	.text "BYTES AND REPAINTS NOTHING."
+	.byte 0
+	lda #6
+	jsr dmRow
+	jsr dmText
+	.text "RUN/STOP TO FINISH."
+	.byte 0
+
+	; --- the animation loop --------------------------------------------
+	; Staged by hand rather than with #argblob, because the source address
+	; changes every frame: this is the ordinary case of a blob descriptor
+	; pointing at a moving window into a buffer.
+	lda #<RAMP
+	sta ramPtr
+	lda #>RAMP
+	sta ramPtr+1
+
+cycle
+	jsr dmVbWait			; one step per display frame
+
+	lda #SPACE_C64
+	sta ARG+0
+	lda ramPtr
+	sta ARG+1
+	lda ramPtr+1
+	sta ARG+2
+	lda #0
+	sta ARG+3			; addr is 24-bit; C64 RAM uses 16
+	lda #<(255*3)
+	sta ARG+4
+	lda #>(255*3)
+	sta ARG+5			; len = count * 3
+	lda #0
+	sta ARG+6			; first index
+	lda #255
+	sta ARG+7			; count
+	#cmd OP_PAL_LOAD
+
+	; Advance one entry, and wrap after 256 of them -- at which point the
+	; window is back at the start of the second copy of the ramp, which
+	; is byte for byte the first copy.
+	clc
+	lda ramPtr
+	adc #3
+	sta ramPtr
+	lda ramPtr+1
+	adc #0
+	sta ramPtr+1
+	inc step
+	bne cycNoWrap
+	lda #<RAMP
+	sta ramPtr
+	lda #>RAMP
+	sta ramPtr+1
+cycNoWrap
+
+	jsr dmStop
+	bne cycle
+
+	lda #8
+	jsr dmRow
+	jsr dmText
+	.text "LAST ERRCODE "
+	.byte 0
+	jsr dmErr
+	jmp dmHold
+
+; ----------------------------------------------------------------------
+; Build a 256-entry rainbow, twice over, at RAMP.
+;
+; Each channel is a triangle wave over the index, the three of them 1/3 of
+; the way around from each other -- the cheapest thing that comes out
+; smooth and closes on itself, which is what a cycling ramp has to do.
+; ----------------------------------------------------------------------
+buildRamp
+	lda #<RAMP
+	sta DST
+	lda #>RAMP
+	sta DST+1
+	lda #0
+	sta idx
+	sta copy
+brLoop
+	ldy #0
+	lda idx
+	jsr triangle
+	sta (DST),y			; r
+	iny
+	lda idx
+	clc
+	adc #85				; +1/3 of the way round
+	jsr triangle
+	sta (DST),y			; g
+	iny
+	lda idx
+	clc
+	adc #170			; +2/3
+	jsr triangle
+	sta (DST),y			; b
+
+	clc
+	lda DST
+	adc #3
+	sta DST
+	bcc +
+	inc DST+1
++
+	inc idx
+	bne brLoop
+	inc copy
+	lda copy
+	cmp #2
+	bne brLoop
+	rts
+
+; A = index, returns the triangle wave of it: 0 up to 254 and back down.
+triangle
+	cmp #128
+	bcs triDown
+	asl a
+	rts
+triDown
+	eor #$ff			; 255 - a, then double
+	asl a
+	rts
+
+; ----------------------------------------------------------------------
+ring	.byte 0
+twice	.byte 0
+idx	.byte 0
+copy	.byte 0
+step	.byte 0
+rx	.word 0
+ry	.word 0
+rw	.word 0
+rh	.word 0
+ramPtr	.word 0
+
+	.include "gpu64_rt.inc"

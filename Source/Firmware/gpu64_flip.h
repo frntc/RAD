@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64: the page flip, without the mailbox round trip.
 
@@ -92,7 +93,7 @@ struct GPU64FLIPSTATS
 	// halted for a multiple of GPU64_FLIP_*_TIMEOUT_US, which is the shape
 	// of damage the stage 16 derail leaves behind. Readable from the C64
 	// through GET_HEALTH, because LOG_ENABLE is not usable during a bench
-	// run (project/hw_testing.md).
+	// run (dev/hw_testing.md).
 	u32	drainTimeouts;	  // drains that gave up; also disarms the fast path
 	u32	postFullTimeouts; // posts abandoned with MAILBOX1 still full
 };

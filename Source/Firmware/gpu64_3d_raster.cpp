@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 6 -- the perspective-correct, z-tested triangle rasteriser,
  and the viewport clear. See gpu64_3d_render.h.

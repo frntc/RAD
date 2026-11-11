@@ -4,7 +4,7 @@
  The mechanism is Doom's: the palette stays 256 freely-chosen colours and
  lighting goes through a generated table, so textures can use every entry and
  no ramp layout is imposed on the artist. Rationale in
- project/milestone6_3d_design.md, "Lighting: a generated colormap".
+ dev/milestone6_3d_design.md, "Lighting: a generated colormap".
 
  Portable: compiled unchanged by the firmware and by tools/hostsim.
 */

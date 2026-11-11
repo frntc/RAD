@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 Milestone 20's assets: the things E1M1 is populated with, as opposed to the
 level itself. gen_quakelevel.py imports this and appends what it returns to
@@ -202,7 +203,7 @@ MODELS = [
     ('suit',    'progs/suit.mdl',     None),
     ('spike',   'progs/spike.mdl',    None),
     ('backpack','progs/backpack.mdl', None),
-    # The monsters' missiles (quake/gpu64_game_proj.inc).
+    # The monsters' missiles (games/quake/gpu64_game_proj.inc).
     ('grenade', 'progs/grenade.mdl',  None),
     ('w_spike', 'progs/w_spike.mdl',  None),
     ('zom_gib', 'progs/zom_gib.mdl',  None),

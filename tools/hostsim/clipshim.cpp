@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 //
 // clipshim.cpp - the firmware's collision trace, as a shared library, so that
 // tools/prgsim can model CLIP_MOVE ($15) without a second implementation of

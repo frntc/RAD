@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 level sim -- renders a .g64lev level file with the firmware's own
  renderer, on a PC.

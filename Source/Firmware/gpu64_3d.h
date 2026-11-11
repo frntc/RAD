@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
 
   {_______            {_          {______
@@ -10,7 +11,7 @@
 
  gpu64 milestone 6 -- the class 1 (3D) subsystem, public interface.
 
- Wire protocol: project/milestone6_3d_design.md. That document is the spec;
+ Wire protocol: dev/milestone6_3d_design.md. That document is the spec;
  this header is the firmware side of it and deliberately does not restate
  the rationale.
 
@@ -39,7 +40,7 @@
 #define GPU64_3D_ENABLED
 
 // --- class 1 opcodes ----------------------------------------------------
-// Full table with argument layouts: project/milestone6_3d_design.md. Only the
+// Full table with argument layouts: dev/milestone6_3d_design.md. Only the
 // ones a given phase implements are dispatched; the rest are BAD_OPCODE
 // until they exist, which is what keeps a half-built class honest.
 
@@ -81,7 +82,7 @@
 // transfer instead of halting the C64 for the whole load.
 //
 // Two new opcode numbers rather than arguments on UPLOAD_MESH, which is what
-// the v1 surface freeze (project/milestone17*, gpu64-v1-surface-frozen)
+// the v1 surface freeze (dev/milestone17*, gpu64-v1-surface-frozen)
 // requires of anything added after it.
 //
 // LOAD_LEVEL is keyed: it recreates the resource table and the scene from
@@ -315,7 +316,7 @@
 // moves in a Quake game -- the monsters, the items, the gun and the status
 // bar -- plus every question the game's rules need answered: can this
 // monster see the player, where did this shot land, where does this monster
-// end up if it walks. project/milestone20_quake_combat_design.md has the
+// end up if it walks. dev/milestone20_quake_combat_design.md has the
 // reasoning; in short, per-actor SET_POSITION/SET_ORIENTATION would be ~70
 // commands a frame, each one a chance for the bus to drop or flip it, and a
 // block is one DMA burst with a checksum.
@@ -468,7 +469,7 @@
 void gpu64_3dInit( void );
 
 // Session reset -- called from gpu64_apiReset(), i.e. on every resetREU().
-// Per project/milestone6_3d_design.md's Resource lifecycle section this is
+// Per dev/milestone6_3d_design.md's Resource lifecycle section this is
 // where every resource of the session is freed, so RUN/STOP+RESTORE cannot
 // leave the next program running against stale IDs.
 void gpu64_3dReset( void );
@@ -495,7 +496,7 @@ boolean gpu64_3dCommitsLive( void );
 // whatever core 1 needs to do onto the ring.
 //
 // Through Stage 15a this never blocked beyond a full ring (GPU64_ERR_QUEUE_
-// FULL). Stage 15b (project/gap_filling_plan.md) changes that: CLEAR_
+// FULL). Stage 15b (dev/gap_filling_plan.md) changes that: CLEAR_
 // VIEWPORT/DRAW_MESH/DRAW_NODE now push and return without waiting for their
 // own draw, but every *other* class 1 opcode drains the ring before it runs
 // (it is about to mutate state a still-queued render also reads), and a

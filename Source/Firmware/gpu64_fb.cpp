@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64: 320x200x8 framebuffer implementation -- see gpu64_fb.h for why this
  owns the display rather than sharing CScreenDevice's.
@@ -423,7 +424,7 @@ void CGpu64FrameBuffer::PrepareFlip( void )
 	// CommitFlip() every autonomous frame was painted into the page this
 	// call just queued for display, which then went visible mid-render --
 	// stale, torn output that looked like a freeze (Finding 2, see
-	// project/progress_tracker.md's Stage 16 section).
+	// dev/progress_tracker.md's Stage 16 section).
 	//
 	// The page picked is the same one CommitFlip() used to pick, chosen from
 	// the same two exclusions and therefore just as safe: not the page still

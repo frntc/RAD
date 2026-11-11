@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 #
 # build.sh - build the gpu64/RAD firmware (kernel8.img) from Source/Firmware.
 #
@@ -16,7 +17,7 @@
 #   5. If SDCARD is set (a mounted RAD SD card's root), copies the built image
 #      onto it under the name config.txt's "kernel=" line asks for (RAD cards
 #      use kernel_rad.img, not kernel8.img) and verifies the copy -- see
-#      project/hw_testing.md for how to make that a one-liner.
+#      dev/hw_testing.md for how to make that a one-liner.
 #
 # Usage:
 #   tools/build.sh                      # build kernel8.img
@@ -25,7 +26,7 @@
 #
 # Requires a bare-metal aarch64-none-elf toolchain on PATH (NOT
 # aarch64-linux-gnu-*, which pulls in glibc headers that clash with
-# Circle's freestanding ones). See project/hw_testing.md for where to get one.
+# Circle's freestanding ones). See dev/hw_testing.md for where to get one.
 
 set -euo pipefail
 
@@ -52,7 +53,7 @@ MAKE_ARGS=(PREFIX64="$PREFIX64" RASPPI="$RASPPI" AARCH="$AARCH")
 
 if ! command -v "${PREFIX64}gcc" >/dev/null 2>&1; then
 	echo "error: ${PREFIX64}gcc not found on PATH." >&2
-	echo "This needs a bare-metal aarch64-none-elf toolchain -- see project/hw_testing.md." >&2
+	echo "This needs a bare-metal aarch64-none-elf toolchain -- see dev/hw_testing.md." >&2
 	exit 1
 fi
 
@@ -144,7 +145,7 @@ if [ -n "${SDCARD:-}" ]; then
 	# necessarily kernel8.img. RAD's own SD cards set "kernel=kernel_rad.img",
 	# so deploying to kernel8.img writes a file the Pi never reads -- the
 	# hardware silently keeps running the previous firmware. That cost a long
-	# debugging detour (see project/progress_tracker.md): three rounds of "the
+	# debugging detour (see dev/progress_tracker.md): three rounds of "the
 	# code I just added produces no output at all" on code that was fine,
 	# because it was never actually on the machine. Always honour config.txt.
 	KERNEL_NAME="kernel8.img"

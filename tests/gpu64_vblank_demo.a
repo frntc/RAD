@@ -1,0 +1,382 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 -- vblank test PRG: exercises the frame clock both ways.
+;
+;      Phase 1, polling: a white bar sweeps across the HDMI screen, one step
+;      per display frame, double-buffered with a vblank-deferred PAGE_FLIP.
+;      Each pass waits for STATUS bit2 (vblank-pending), acknowledges it,
+;      redraws the back page, asks for a deferred flip, then waits for
+;      STATUS bit0 (busy) to clear -- which is gpu64 telling the C64 the flip
+;      landed on a real frame boundary. If the frame clock is right, the bar
+;      moves smoothly and never tears.
+;
+;      Phase 2, interrupt: CIA1's timer IRQ is switched off so gpu64's
+;      cartridge IRQ is the only source left, VBLANK_ARM is turned on, and a
+;      handler on $0314 counts interrupts until it has seen 256 of them.
+;      Bounded by a timeout, so a dead IRQ line ends the test instead of
+;      hanging the machine.
+;
+;      Results land on the C64's own screen (not the HDMI one), so a bench
+;      tester can read them without the HDMI log:
+;
+;        row 0  "G64" magic from GET_INFO, then ERRCODE   (0 = OK)
+;        row 1  measured frame period, microseconds, hex, high byte first
+;               -- 0000 means the frame clock never calibrated and every
+;               vblank feature will answer UNSUPPORTED ($06)
+;        row 2  frames counted in phase 1 (polling), hex, expect 0100
+;        row 3  interrupts counted in phase 2, hex, expect 0100
+;               -- 0000 here with a good row 1 means the IRQ path is broken
+;                  while the clock itself is fine
+;        row 4  ERRCODE at the end                        (0 = OK)
+;
+;      The run ends by turning gpu64's HDMI log back on, and LOG_ENABLE(1)
+;      makes the firmware print what the 256 flips cost -- two lines:
+;
+;        FLIP fast n=NNN h=min/avg/max us   time the C64 was halted at each
+;                                           frame boundary to commit a flip
+;                                           ("SLOW" instead of "fast" means
+;                                           the mailbox fast path was
+;                                           disarmed and every flip fell back
+;                                           to the blocking call)
+;        FLIP wait n=NNN min/avg/max us s=N time the *next* command paid
+;                                           finishing an in-flight flip;
+;                                           s = flips that fell back
+;
+;      Before milestone 4c the first line was 71/~900 us; the point of the
+;      change is that it should now read single-digit microseconds, with the
+;      wait line small too (see dev/progress_tracker.md).
+;
+;      REU emulation must be selected in RAD's menu (T key -> REU), same as
+;      every other gpu64 test PRG -- everything gpu64 does lives inside
+;      reuUsingPolling().
+;
+;      Assemble with 64tass (no --nostart: the .prg needs its 2-byte load
+;      address header, see dev/progress_tracker.md milestone 2) --
+;      64tass gpu64_vblank_demo.a -o gpu64_vblank_demo.prg
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+CMD_HI   = $df50
+CMD_LO   = $df51
+STATUS   = $df52
+ERRCODE  = $df53
+ARG      = $df56		; ARG0..ARG15 = $df56..$df65
+
+; opcodes used here (docs/api_design.md, class 0)
+OP_VBLANK_ARM  = $02
+OP_VBLANK_ACK  = $03
+OP_SET_DRAW_PG = $04
+OP_PAGE_FLIP   = $05
+OP_GET_INFO    = $06
+OP_LOG_ENABLE  = $07
+OP_SET_BORDER  = $08
+OP_CLEAR       = $10
+OP_RECT_FILL   = $23
+
+ST_BUSY    = $01
+ST_VBLANK  = $04
+
+SCREEN   = $0400
+INFOBUF  = $c000
+
+CIA1_ICR = $dc0d
+IRQVEC   = $0314
+KERNIRQ  = $ea31
+
+	* = $0801
+
+	; minimal "10 SYS 2061" BASIC stub so RUN launches the code below
+	.word next_line
+	.word 10
+	.byte $9e			; SYS token
+	.text "2061"
+	.byte 0
+next_line
+	.word 0
+
+	* = $080d			; = 2061
+
+start
+	sei
+
+	lda #0
+	sta CMD_HI			; class 0 (sticky; this is the only time we set it)
+
+	; --- GET_INFO -> $c000, for the magic and the frame period ---------
+	lda #0
+	sta ARG+0			; space = C64 RAM
+	lda #<INFOBUF
+	sta ARG+1
+	lda #>INFOBUF
+	sta ARG+2
+	lda #0
+	sta ARG+3			; addr = $00c000
+	lda #16
+	sta ARG+4
+	lda #0
+	sta ARG+5			; len = 16
+	lda #OP_GET_INFO
+	sta CMD_LO
+
+	ldx #0
+copyMagic
+	lda INFOBUF,x
+	and #$3f
+	sta SCREEN+0,x
+	inx
+	cpx #3
+	bne copyMagic
+
+	lda ERRCODE
+	and #$3f
+	sta SCREEN+3
+
+	; row 1: the measured frame period, high byte first so it reads as a
+	; normal hex number. info[14] = lo, info[15] = hi.
+	ldx #40
+	lda INFOBUF+15
+	jsr prhex
+	lda INFOBUF+14
+	jsr prhex
+
+	; A frame period of zero means calibration failed at boot -- there is
+	; nothing to test, and pressing on would just collect UNSUPPORTED.
+	lda INFOBUF+14
+	ora INFOBUF+15
+	bne haveClock
+	jmp done
+
+haveClock
+	; --- set the scene -------------------------------------------------
+	lda #0
+	sta ARG+0
+	lda #OP_SET_BORDER		; black border
+	sta CMD_LO
+
+	lda #1				; draw into page 1 first; every PAGE_FLIP
+	sta ARG+0			; after this swaps the pages for us
+	lda #OP_SET_DRAW_PG
+	sta CMD_LO
+
+	lda #0
+	sta framec
+	sta framec+1
+	sta xpos
+
+	; ================= phase 1: polled vblank =========================
+pollLoop
+	; wait for the next frame boundary
+waitVb
+	lda STATUS
+	and #ST_VBLANK
+	beq waitVb
+
+	lda #OP_VBLANK_ACK
+	sta CMD_LO
+
+	; redraw the back page: blue field, white bar at xpos
+	lda #6
+	sta ARG+0
+	lda #OP_CLEAR
+	sta CMD_LO
+
+	lda xpos
+	sta ARG+0
+	lda #0
+	sta ARG+1			; x = xpos (0..255, so the high byte is 0)
+	lda #80
+	sta ARG+2
+	lda #0
+	sta ARG+3			; y = 80
+	lda #40
+	sta ARG+4
+	lda #0
+	sta ARG+5			; w = 40
+	lda #40
+	sta ARG+6
+	lda #0
+	sta ARG+7			; h = 40
+	lda #1				; white
+	sta ARG+8
+	lda #OP_RECT_FILL
+	sta CMD_LO
+
+	; ask for the flip to happen at the next boundary, then wait for it
+	lda #1
+	sta ARG+0
+	lda #OP_PAGE_FLIP
+	sta CMD_LO
+
+waitFlip
+	lda STATUS
+	and #ST_BUSY
+	bne waitFlip
+
+	inc xpos
+
+	inc framec
+	bne noCarry1
+	inc framec+1
+noCarry1
+	lda framec+1			; run until the count reaches 256
+	beq pollLoop
+
+	ldx #80
+	lda framec+1
+	jsr prhex
+	lda framec
+	jsr prhex
+
+	; ================= phase 2: vblank IRQ ============================
+	lda #0
+	sta irqc
+	sta irqc+1
+
+	; Silence CIA1's timer interrupt so gpu64's cartridge IRQ is the only
+	; thing that can reach the handler below -- otherwise every count would
+	; be ambiguous. Reading the register clears any interrupt already
+	; latched.
+	lda #$7f
+	sta CIA1_ICR
+	lda CIA1_ICR
+
+	lda IRQVEC
+	sta oldirq
+	lda IRQVEC+1
+	sta oldirq+1
+
+	lda #<irqHandler
+	sta IRQVEC
+	lda #>irqHandler
+	sta IRQVEC+1
+
+	lda #1
+	sta ARG+0
+	lda #OP_VBLANK_ARM
+	sta CMD_LO
+
+	lda #0
+	sta timeout
+	sta timeout+1
+	sta timeout+2
+
+	cli
+
+; Spin until the handler has counted 256 interrupts, or until the timeout
+; runs out -- a dead IRQ line must end the test, not wedge the machine.
+irqWait
+	lda irqc+1
+	bne irqDone
+	inc timeout
+	bne irqWait
+	inc timeout+1
+	bne irqWait
+	inc timeout+2
+	lda timeout+2
+	cmp #$20
+	bne irqWait
+irqDone
+	sei
+
+	lda #0
+	sta ARG+0
+	lda #OP_VBLANK_ARM		; disarm
+	sta CMD_LO
+
+	lda oldirq
+	sta IRQVEC
+	lda oldirq+1
+	sta IRQVEC+1
+
+	lda #$81			; CIA1 timer A interrupt back on
+	sta CIA1_ICR
+
+	ldx #120
+	lda irqc+1
+	jsr prhex
+	lda irqc
+	jsr prhex
+
+done
+	lda ERRCODE
+	and #$3f
+	sta SCREEN+160
+
+	; Put gpu64's log overlay back on. The firmware hides it as soon as a
+	; program engages the API -- otherwise it would paint firmware text over
+	; the animation on every flip -- and a test PRG should leave the machine
+	; the way it found it. LOG_ENABLE is exempt from the auto-hide, so this
+	; sticks.
+	lda #1
+	sta ARG+0
+	lda #OP_LOG_ENABLE
+	sta CMD_LO
+
+	cli
+	rts
+
+; --- the vblank interrupt handler ------------------------------------
+; Only counts an interrupt gpu64 actually claims (STATUS bit2), and
+; acknowledges it, which is also what releases the cartridge IRQ line.
+irqHandler
+	lda STATUS
+	and #ST_VBLANK
+	beq notOurs
+
+	inc irqc
+	bne noCarry2
+	inc irqc+1
+noCarry2
+
+	lda #OP_VBLANK_ACK
+	sta CMD_LO
+notOurs
+	jmp KERNIRQ
+
+; --- print A as two hex digits at SCREEN,x; x advances by 2 -----------
+prhex
+	pha
+	lsr
+	lsr
+	lsr
+	lsr
+	jsr nibble
+	sta SCREEN,x
+	inx
+	pla
+	and #$0f
+	jsr nibble
+	sta SCREEN,x
+	inx
+	rts
+
+; nibble in A -> C64 screen code. '0'-'9' are $30-$39, 'A'-'F' are $01-$06.
+nibble
+	cmp #10
+	bcs nibLetter
+	ora #$30
+	rts
+nibLetter
+	sec
+	sbc #9
+	rts
+
+xpos	.byte 0
+framec	.word 0
+irqc	.word 0
+timeout	.byte 0,0,0
+oldirq	.word 0

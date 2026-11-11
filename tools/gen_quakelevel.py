@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 Converts a Quake BSP out of PAK0.PAK into a gpu64 class-1 level file.
 
@@ -980,7 +981,7 @@ def build_vis(bsp, world_chunks, owner, stats):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--pak', default='quake/ID1/PAK0.PAK')
+    ap.add_argument('--pak', default='games/quake/ID1/PAK0.PAK')
     ap.add_argument('--map', default='e1m1')
     ap.add_argument('--out', default=None)
     ap.add_argument('--flip-winding', action='store_true',

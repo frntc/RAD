@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """check_combat.py - milestone 20 stage D: did the C64 fight?
 
 A picture of a grunt proves nothing about a shotgun. What stage D claims is
@@ -43,7 +44,7 @@ import gpu64level                                       # noqa: E402
 
 ONE = 65536.0
 
-# The door route's first two legs (tools/demos.sh) end at 8, 1.4, 18 facing
+# The door route's first two legs (tools/examples.sh) end at 8, 1.4, 18 facing
 # +z, eight units east of the grunt. A turns 2/256 a frame: 32 frames is a
 # quarter turn, to face -x.
 TO_GRUNT = ['--key=LSHIFT:20-207', '--key=W:20-43', '--key=E:44-55',
@@ -119,7 +120,7 @@ def main():
     if not (prg and level):
         sys.exit('check_combat.py: --prg and --level are required')
 
-    demos = os.path.join(REPO, 'quake')
+    demos = os.path.join(REPO, 'games', 'quake')
     c = consts(os.path.join(demos, 'gpu64_quake_actors.inc'))
     base = consts(os.path.join(demos, 'gpu64_demo_game.a'))['MESH_BASE']
     lev = gpu64level.Level(open(level, 'rb').read())

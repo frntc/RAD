@@ -1,10 +1,11 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64: how close together do two DMA holds get?
 
  Built 2026-09-06 as a *measurement*, not a fix. The Stage 16 derail has now
  survived three confident fixes (the class-0 re-warm, the mailbox bounds, and
  three separate power supplies), so this time the instrument goes first --
- see project/hw_testing.md.
+ see dev/hw_testing.md.
 
  What it is for. The gpu64_probe_latch ladder has eliminated every hold type
  individually:
@@ -68,7 +69,7 @@
 
 // One 64-byte cache line, written only by core 0. Deliberately no section()
 // attribute -- see the milestone-14 linker-orphan regression in
-// project/progress_tracker.md.
+// dev/progress_tracker.md.
 typedef struct
 {
 	u64	lastRelease;			// armCycleCounter at the last SET_GPIO( bDMA_OUT )

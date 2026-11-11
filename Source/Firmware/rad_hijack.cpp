@@ -2689,7 +2689,7 @@ restartHijacking:
 		}
 #endif
 		// gpu64: on-screen diagnostic for the open "SID digi music is silent
-		// on real hardware" investigation (project/hw_testing.md's Open item) --
+		// on real hardware" investigation (dev/hw_testing.md's Open item) --
 		// confirms what RAD's own SID/SIDKick auto-detection actually saw on
 		// this hardware, to compare against what the original firmware
 		// detects on the same setup.

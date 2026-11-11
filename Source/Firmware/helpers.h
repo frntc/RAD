@@ -48,7 +48,7 @@ extern void strupr( char *d, char *s );
 
 // gpu64: m_Serial is brought up FIRST, before the framebuffer/anything else that can
 // fail, so the earliest possible boot log reaches GPIO14/15 -- this is the
-// Tier 1 (bare RPi + UART) debug channel from project/hw_testing.md. Note that
+// Tier 1 (bare RPi + UART) debug channel from dev/hw_testing.md. Note that
 // gpioInit() below reprograms GPIO14/15 to their cartridge-latch ALT
 // functions (OE_Dx/LATCH_A0), so serial output goes dark again after this
 // macro returns -- expected, not a bug; it's evidence the code reached that

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 8 -- class 2's wire layer: the register decode, the blob
  pulls, the texture table and its arena.
@@ -7,7 +8,7 @@
  portable and compiled by tools/rastercheck on a PC. Keeping the two apart is
  what makes a pixel bug findable without a bench round.
 
- Reference: docs/api_design.md. Rationale: project/milestone8_raster_design.md.
+ Reference: docs/api_design.md. Rationale: dev/milestone8_raster_design.md.
 */
 #include "gpu64_raster.h"
 
@@ -597,7 +598,7 @@ static u8 opUploadTexinfo( void )
 
 // DRAW_POLYS. Unlike DRAW_SECTORS this does NOT clear the depth buffer: a
 // Quake frame may be several batches, and FILL_VIEW is the op that owns the
-// clear -- see project/milestone9_poly_design.md.
+// clear -- see dev/milestone9_poly_design.md.
 static u8 opDrawPolys( void )
 {
 	u32 count;

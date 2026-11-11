@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 A reference model of the gpu64 class 1 command API -- the retained scene
 graph, its resources, and Stage 16's handshake commit loop.
@@ -14,7 +15,7 @@ gpu64_3dSceneRender(). The frame stream between the two is the whole
 interface; see FRAME_STREAM_DOC below for its format.
 
 Written from docs/class1-3d-mesh-reference.md and
-project/milestone6_3d_design.md, same second-opinion rule the rest of the
+dev/milestone6_3d_design.md, same second-opinion rule the rest of the
 model follows.
 """
 

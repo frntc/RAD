@@ -1,0 +1,374 @@
+;
+;      gpu64 -- power and thermal probe.
+;
+;      WHAT THIS IS FOR
+;
+;      Twice now the bench has produced a failure that no gpu64 command can
+;      explain: mis-sampled register traffic, an ERRCODE that is not in the
+;      firmware's table at all, a torn RAD menu on entry -- which a PRG has
+;      no way to cause -- and finally a 6502 scribbling over its own screen
+;      RAM. Reseating the Pi's power cable made it go away once. The second
+;      time nobody touched the cable.
+;
+;      So stop guessing and ask the Pi. The VideoCore knows whether its
+;      supply has sagged, and it latches that answer: GET_THROTTLED's bits
+;      16-19 are sticky since boot, so a once-a-second poll here cannot miss
+;      an event however brief. This program does nothing but poll it.
+;
+;      HOW TO READ IT
+;
+;        THROTTLE  the live word. 0 is healthy.
+;        STICKY    the same bits, ORed over every sample since boot. A bit
+;                  here that is not in THROTTLE means it happened and went
+;                  away -- which is exactly the event a hang would hide.
+;        UNDERVOLT NOW/EVER   bits 0 and 16 decoded. EVER=1 is the verdict:
+;                  the supply is not delivering 5V under load. That is a
+;                  power supply or cable problem, not a gpu64 defect.
+;        FREQCAP / THROTTLED / SOFTLIMIT   bits 1,2,3 and 17,18,19.
+;        TEMP      core temperature now, and the highest seen.
+;        SAMPLES   polls taken. ERRS counts polls that did not return OK --
+;                  those are register traffic going wrong, the other
+;                  symptom of the same fault.
+;
+;      AND IF THE C64 HANGS
+;
+;      A hung C64 cannot print anything, so the firmware does not rely on
+;      it: the first time the VideoCore admits to an under-voltage, gpu64
+;      turns the HDMI border RED and leaves it that way. The border is
+;      painted into every page, so it survives page flips and it survives
+;      the C64 dying. Red border after a hang = it was power. Border
+;      unchanged after a hang = it was not, and the fault is ours.
+;
+;      Leave this running for as long as the hang usually takes.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+	.include "gpu64.inc"
+
+; Put the cursor at a column of the row in pwRow. dmRow lands on column 0
+; and the hex printer walks the cursor forward, so every field is placed
+; from the row start rather than from wherever the last one ended.
+at	.macro	col
+	lda #\col
+	jsr pwAtA
+	.endm
+
+	#basicStub
+
+start
+	jsr dmInit
+
+	lda #0
+	jsr dmRow
+	jsr dmText
+	.null "GPU64 POWER PROBE"
+	lda #1
+	jsr dmRow
+	jsr dmText
+	.null "RED HDMI BORDER = UNDERVOLT SEEN"
+
+	; Static labels, printed once. Only the numbers are rewritten each
+	; second, so the screen does not flicker while it sits here for an
+	; hour.
+	lda #4
+	jsr dmRow
+	jsr dmText
+	.null "THROTTLE"
+	lda #5
+	jsr dmRow
+	jsr dmText
+	.null "STICKY"
+	lda #7
+	jsr dmRow
+	jsr dmText
+	.null "UNDERVOLT  NOW    EVER"
+	lda #8
+	jsr dmRow
+	jsr dmText
+	.null "FREQ CAP   NOW    EVER"
+	lda #9
+	jsr dmRow
+	jsr dmText
+	.null "THROTTLED  NOW    EVER"
+	lda #10
+	jsr dmRow
+	jsr dmText
+	.null "SOFT LIMIT NOW    EVER"
+	lda #12
+	jsr dmRow
+	jsr dmText
+	.null "TEMP      C   MAX      C"
+	lda #14
+	jsr dmRow
+	jsr dmText
+	.null "SAMPLES        ERRS       ER"
+	lda #24
+	jsr dmRow
+	jsr dmText
+	.null "RUN/STOP TO EXIT"
+
+; ----------------------------------------------------------------------
+; The poll loop. One sample a second: GET_HEALTH costs a mailbox round
+; trip to the VideoCore -- the same order as the blocking page flip that
+; milestone 4d removed -- so it is housekeeping, never per-frame work.
+; ----------------------------------------------------------------------
+poll
+	; Poison the buffer, so a GET_HEALTH that wrote nothing cannot be
+	; read as a healthy zero.
+	ldx #11
+	lda #$5a
+pwPoison
+	sta HEALTH,x
+	dex
+	bpl pwPoison
+
+	#argblob 0, SPACE_C64, HEALTH, 12
+	#cmd0 OP_GET_HEALTH
+
+	lda ERRCODE
+	beq pwOk
+	inc pwErrs
+	bne +
+	inc pwErrs+1
++
+	sta pwLast
+	jmp pwShow
+pwOk
+	inc pwSamples
+	bne +
+	inc pwSamples+1
++
+pwShow
+	lda #4
+	sta pwRow
+	#at 10
+	lda HEALTH+3
+	jsr dmHexA
+	lda HEALTH+2
+	jsr dmHexA
+	lda HEALTH+1
+	jsr dmHexA
+	lda HEALTH+0
+	jsr dmHexA
+
+	lda #5
+	sta pwRow
+	#at 10
+	lda HEALTH+7
+	jsr dmHexA
+	lda HEALTH+6
+	jsr dmHexA
+	lda HEALTH+5
+	jsr dmHexA
+	lda HEALTH+4
+	jsr dmHexA
+
+	; The four conditions, live bit from byte 0 and sticky bit from
+	; byte 2 (bits 16-19 of the word).
+	lda #0
+	sta pwIdx
+pwBits
+	lda pwIdx
+	clc
+	adc #7
+	sta pwRow
+	#at 15
+	ldx pwIdx
+	lda HEALTH+0
+	jsr pwBitAt
+	jsr pwYesNo
+	#at 23
+	ldx pwIdx
+	lda HEALTH+2
+	jsr pwBitAt
+	jsr pwYesNo
+	inc pwIdx
+	lda pwIdx
+	cmp #4
+	bcc pwBits
+
+	; Temperature, tenths of a degree, printed as decimal so it reads
+	; like a thermometer rather than like a register.
+	lda #12
+	sta pwRow
+	#at 5
+	lda HEALTH+8
+	sta pwT
+	lda HEALTH+9
+	sta pwT+1
+	jsr pwTemp
+	lda #12
+	sta pwRow
+	#at 18
+	lda HEALTH+10
+	sta pwT
+	lda HEALTH+11
+	sta pwT+1
+	jsr pwTemp
+
+	lda #14
+	sta pwRow
+	#at 8
+	lda pwSamples+1
+	jsr dmHexA
+	lda pwSamples
+	jsr dmHexA
+	#at 20
+	lda pwErrs+1
+	jsr dmHexA
+	lda pwErrs
+	jsr dmHexA
+	#at 28
+	lda pwLast
+	jsr dmHexA
+
+	; Roughly a second: 50 frames on PAL. dmVbWait syncs to the gpu64
+	; frame clock when the display has one and free-runs when it does
+	; not, so this works either way.
+	ldx #50
+pwWait
+	txa
+	pha
+	jsr dmVbWait
+	jsr dmStop
+	beq pwEnd
+	pla
+	tax
+	dex
+	bne pwWait
+	jmp poll
+
+pwEnd
+	pla
+	jsr dmHold
+	rts
+
+; A = column. Sets the cursor to that column of row pwRow.
+pwAtA
+	sta pwCol
+	lda pwRow
+	jsr dmRow
+	lda pwCol
+	clc
+	adc DST
+	sta DST
+	bcc +
+	inc DST+1
++
+	rts
+
+; ----------------------------------------------------------------------
+; A = a byte of the throttle word, X = which of the four conditions.
+; Returns with Z set when that condition's bit is clear.
+; ----------------------------------------------------------------------
+pwBitAt
+	stx pwTmp
+	ldy pwTmp
+	beq pwbTest
+pwbShift
+	lsr a
+	dey
+	bne pwbShift
+pwbTest
+	and #1
+	rts
+
+; A = 0 or 1, printed as NO or YES at the cursor.
+pwYesNo
+	beq pwynNo
+	ldy #0
+	lda #$19			; 'Y'
+	sta (DST),y
+	iny
+	lda #$05			; 'E'
+	sta (DST),y
+	iny
+	lda #$13			; 'S'
+	sta (DST),y
+	rts
+pwynNo
+	ldy #0
+	lda #$0e			; 'N'
+	sta (DST),y
+	iny
+	lda #$0f			; 'O'
+	sta (DST),y
+	iny
+	lda #$20			; blank the S of a previous YES
+	sta (DST),y
+	rts
+
+; ----------------------------------------------------------------------
+; pwT = tenths of a degree. Prints "dd.d" at the cursor. Values are well
+; under 100C, so this is three digits and a point -- repeated subtraction
+; is plenty for one number a second.
+; ----------------------------------------------------------------------
+pwTemp
+	lda #0
+	sta pwD
+	; whole degrees = pwT / 10
+pwtDiv
+	lda pwT
+	sec
+	sbc #10
+	tay
+	lda pwT+1
+	sbc #0
+	bcc pwtDone
+	sty pwT
+	sta pwT+1
+	inc pwD
+	jmp pwtDiv
+pwtDone
+	; pwD = whole degrees (< 100), pwT = remaining tenths (< 10)
+	lda pwD
+	ldx #0
+	sta pwTmp
+pwtTens
+	cmp #10
+	bcc pwtUnits
+	sec
+	sbc #10
+	inx
+	jmp pwtTens
+pwtUnits
+	sta pwTmp
+	txa
+	clc
+	adc #$30
+	ldy #0
+	sta (DST),y
+	lda pwTmp
+	clc
+	adc #$30
+	ldy #1
+	sta (DST),y
+	lda #$2e			; '.'
+	ldy #2
+	sta (DST),y
+	lda pwT
+	clc
+	adc #$30
+	ldy #3
+	sta (DST),y
+	rts
+
+pwSamples .word 0
+pwErrs	.word 0
+pwLast	.byte 0
+pwT	.word 0
+pwD	.byte 0
+pwTmp	.byte 0
+pwIdx	.byte 0
+pwRow	.byte 0
+pwCol	.byte 0
+
+HEALTH	.fill 12, 0
+
+	.include "gpu64_rt.inc"

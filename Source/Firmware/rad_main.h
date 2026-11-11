@@ -182,7 +182,7 @@ private:
 	// gpu64: milestone 4 -- gpu64's own 320x200x8 framebuffer owns the HDMI
 	// display now (CScreenDevice used to, at COLOR16 and full HDMI
 	// resolution). Only one framebuffer can own it; see
-	// project/milestone4_2d_api_design.md#display-architecture for the choice
+	// dev/milestone4_2d_api_design.md#display-architecture for the choice
 	// and what it costs. Declared before m_HDMIConsole, which points at it.
 	CGpu64FrameBuffer	m_Gpu64FB;
 	// gpu64: Tier 1 bring-up -- CRAD previously never instantiated a serial

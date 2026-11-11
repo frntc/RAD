@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 6 -- the store-burst budget and the yield that enforces it.
 
@@ -9,7 +10,7 @@
  at most 7 consecutive cache lines (448 bytes) before yielding, or core 0's
  PHI-locked polling loop misses its deadline and the C64 derails. Rate is not
  an axis and neither is working-set size; only the length of an unbroken run
- of stores is. Full measurements: project/milestone6_3d_design.md, "The real
+ of stores is. Full measurements: dev/milestone6_3d_design.md, "The real
  risk: store bursts".
 */
 #ifndef _gpu64_3d_span_h

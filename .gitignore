@@ -19,7 +19,7 @@ tools/rastercheck/.scenario.bin
 __pycache__/
 
 # reference copy of shareware Quake, not part of the project
-/quake/ID1/
+/games/quake/ID1/
 
 # sim output written into the repo root
 /*.ppm
@@ -31,7 +31,15 @@ __pycache__/
 /loops/
 
 # 64tass listings (-L), rebuilt with the PRG
-/Source/Demos/*.lst
+*.lst
 
-# Unfinished stuff
-million
+# Unfinished, not part of the public tree
+/million/
+# built programs and data: `make examples` / `make games` rebuild them
+*.prg
+/games/*/*.reu
+/games/*/gpu64_tune.bin
+/examples/out/
+/tests/out/
+/out/
+/.claude/

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """pack_levels.py: every .g64lev in one REU image, the level pack.
 
     tools/pack_levels.py OUT.reu E1M1=build/e1m1.g64lev E1M2=build/e1m2.g64lev

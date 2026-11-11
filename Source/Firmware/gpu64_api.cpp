@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64: IO2 command API register file, dispatcher and class-0 opcodes.
  See gpu64_api.h and docs/api_design.md.
@@ -106,7 +107,7 @@ void gpu64_apiReset( void )
 	gpu64_vsyncResetState();
 
 	// Class 1's session state goes the same way: ring emptied, every
-	// uploaded resource freed. See project/milestone6_3d_design.md's Resource
+	// uploaded resource freed. See dev/milestone6_3d_design.md's Resource
 	// lifecycle -- without this a RUN/STOP+RESTORE leaks the whole arena and
 	// the next program starts against stale IDs.
 #ifdef GPU64_3D_ENABLED
@@ -828,7 +829,7 @@ static u8 doSystem( u8 op )
 		// gpu64: bytes 12-19, added 2026-09-06, are the flip path's
 		// "impossible" counters. They live here rather than behind
 		// LOG_ENABLE because a bench program cannot turn the log on without
-		// changing the thing it is measuring (project/hw_testing.md), and
+		// changing the thing it is measuring (dev/hw_testing.md), and
 		// GET_HEALTH is already the one opcode whose job is "tell me what
 		// the Pi thinks of its own state". Saturated to 16 bits: the
 		// question is zero-or-not, not how many.
@@ -1660,7 +1661,7 @@ static u8 doMath( u8 op )
 
 void gpu64_apiDispatch( u8 op )
 {
-	// gpu64: reliability-protocol detector-only build (project/reliability_protocol_design.md).
+	// gpu64: reliability-protocol detector-only build (dev/reliability_protocol_design.md).
 	// Publish the SEQ this dispatch is acting on unconditionally, before
 	// anything can early-return -- the C64 side wrote SEQ (and, ordering
 	// permitting, its args) before CMD_LO, so whatever value sits in
@@ -1777,7 +1778,7 @@ void gpu64_apiDispatch( u8 op )
 	if ( sCmdHi == 1 )
 	{
 		// Class 1 does not execute here -- it stages a command and hands it
-		// to core 1 (project/milestone6_3d_design.md, Architecture). What comes
+		// to core 1 (dev/milestone6_3d_design.md, Architecture). What comes
 		// back is the *acceptance* result, not the command's outcome: a
 		// class 1 OK means core 1 has the command, and STATUS bit4 or RESULT
 		// is what says it finished. That is the whole point of the split.
@@ -1790,7 +1791,7 @@ void gpu64_apiDispatch( u8 op )
 		// Class 2 executes here and now, on core 0, exactly like a class 0
 		// draw op -- the C64 is halted for the dispatch, so there is nothing
 		// for another core to overlap with. See
-		// project/milestone8_raster_design.md.
+		// dev/milestone8_raster_design.md.
 		res = gpu64_rasterDispatch( op );
 	} else
 #endif
@@ -1904,7 +1905,7 @@ void gpu64_apiDispatch( u8 op )
 	// RESTART_CYCLE_COUNTER and the GPIO write takes or releases the bus at an
 	// undefined phase -- polling-loop rule 3.
 	//
-	// BENCH, 2026-09-06, gpu64_probe_latch (project/hw_testing.md): the FLI0
+	// BENCH, 2026-09-06, gpu64_probe_latch (dev/hw_testing.md): the FLI0
 	// rung -- 2000 *immediate* flips, no armed window -- ran 2000/2000 clean
 	// twice. The FLIW rung -- 300 deferred flips, each one polled to
 	// completion so the armed window stays empty -- ran 300/300 clean twice,

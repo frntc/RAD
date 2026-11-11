@@ -11,21 +11,21 @@
 # list at the bench is a way to waste a round on a stale program, which has
 # already happened once with a stale kernel image.
 #
-# So this copies every .prg from Source/TestPRG, Source/Demos, quake/ and
-# stunts/, and then removes any *gpu64* .prg on the card that this tree does
+# So this copies every .prg from tests/, examples/ and
+# games/*/, and then removes any *gpu64* .prg on the card that this tree does
 # not build. It never touches anything that is not gpu64's: the games, the
 # monitors, the memory tester and readme.txt are left exactly where they are.
 #
-# It also puts the games' REU images (build/quake.reu, stunts/stunts.reu) in
+# It also puts the games' REU images (build/quake.reu, games/stunts/stunts.reu) in
 # the card's REU directory when they exist, because a game ships as its PRG
 # plus its REU image and the two are one deploy: the card kept a stale level
 # through a whole bench round once, and data that disagrees with the program
 # looks like a rendering bug and not like a copy that never happened. The
 # firmware reads levels and pictures from the selected REU image only.
 #
-# It does NOT build anything. Run tools/testprg.sh and tools/demos.sh first
+# It does NOT build anything. Run tools/testprg.sh and tools/examples.sh first
 # if you want the .prg files to be current -- they are what assembles them.
-# tools/gen_quakelevel.py + pack_levels.py and stunts/gen_stunt.py build the images, and the firmware image is
+# tools/gen_quakelevel.py + pack_levels.py and games/stunts/gen_stunt.py build the images, and the firmware image is
 # tools/build.sh's job; neither is this one's.
 #
 # Usage:
@@ -65,18 +65,18 @@ fi
 
 # What this tree builds, by basename.
 built=()
-for f in "$REPO_ROOT"/Source/TestPRG/*.prg "$REPO_ROOT"/Source/Demos/*.prg "$REPO_ROOT"/quake/*.prg "$REPO_ROOT"/stunts/*.prg; do
+for f in "$REPO_ROOT"/tests/*.prg "$REPO_ROOT"/examples/*.prg "$REPO_ROOT"/games/*/*.prg; do
 	[ -e "$f" ] || continue
 	built+=("$(basename "$f")")
 done
 if [ ${#built[@]} -eq 0 ]; then
-	echo "error: no .prg files in Source/TestPRG, Source/Demos, quake or stunts." >&2
-	echo "Run tools/testprg.sh and tools/demos.sh first." >&2
+	echo "error: no .prg files in tests/, examples/ or games/." >&2
+	echo "Run `make examples games tests` first." >&2
 	exit 1
 fi
 
 echo "==> copying ${#built[@]} programs to $DEST"
-for f in "$REPO_ROOT"/Source/TestPRG/*.prg "$REPO_ROOT"/Source/Demos/*.prg "$REPO_ROOT"/quake/*.prg "$REPO_ROOT"/stunts/*.prg; do
+for f in "$REPO_ROOT"/tests/*.prg "$REPO_ROOT"/examples/*.prg "$REPO_ROOT"/games/*/*.prg; do
 	[ -e "$f" ] || continue
 	if [ $DRY -eq 1 ]; then
 		echo "    would copy $(basename "$f")"
@@ -114,7 +114,7 @@ done
 # The REU images. Verified by content, not by exit status: these are the
 # files whose staleness is invisible at the bench -- the game uses whatever
 # image is selected and reports success.
-for REU_SRC in "$REPO_ROOT/build/quake.reu" "$REPO_ROOT/stunts/stunts.reu"; do
+for REU_SRC in "$REPO_ROOT/build/quake.reu" "$REPO_ROOT/games/stunts/stunts.reu"; do
 	name="$(basename "$REU_SRC")"
 	if [ ! -f "$REU_SRC" ]; then
 		echo "==> no $name -- left as it is on the card"

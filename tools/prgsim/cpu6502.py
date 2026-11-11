@@ -1,8 +1,9 @@
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 A cycle-inexact NMOS 6502 core, enough to run a C64 .prg on a PC.
 
 Written for one job: desk-checking the gpu64 API conformance suite
-(Source/TestPRG/gpu64_test_*.prg) against a reference model of the API,
+(tests/gpu64_test_*.prg) against a reference model of the API,
 so a test that asserts the wrong value is found on a PC and not on the
 bench. Bench access is the scarce resource; this is not.
 

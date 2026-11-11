@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 Builds the class-1 mesh blobs for gpu64_demo_quake3d from the same room
 gpu64_demo_quake.a draws with class 2.
@@ -19,7 +20,7 @@ coordinate goes negative is biased by a multiple of the 32-texel texture --
 which shifts it by a whole number of tiles and so cannot change how it lines
 up with its neighbours.
 
-Writes quake/gpu64_demo_quake3d.inc. Regenerate with:
+Writes games/quake/gpu64_demo_quake3d.inc. Regenerate with:
     python3 tools/gen_quakemesh.py
 """
 
@@ -135,7 +136,7 @@ for t in tris:
                % (i0, i1, i2, u0, v0, u1, v1, u2, v2, tex, flags, name))
 out.append("")
 
-open("quake/gpu64_demo_quake3d.inc", "w").write("\n".join(out))
+open("games/quake/gpu64_demo_quake3d.inc", "w").write("\n".join(out))
 
 # The same bytes again for tools/hostsim, so what the PC renders is the blob
 # the C64 uploads and not a second transcription of the room that can drift
@@ -163,5 +164,5 @@ h.append("};")
 h.append("")
 open("tools/hostsim/quake_level.h", "w").write("\n".join(h))
 
-print("%d verts, %d tris -> quake/gpu64_demo_quake3d.inc, tools/hostsim/quake_level.h"
+print("%d verts, %d tris -> games/quake/gpu64_demo_quake3d.inc, tools/hostsim/quake_level.h"
       % (len(verts), len(tris)))

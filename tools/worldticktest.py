@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 worldticktest -- milestone 20 stage B's PC gate for WORLD_TICK ($6C).
 

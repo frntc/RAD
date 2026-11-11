@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 host sim -- drives the portable half of the milestone 6 renderer with
  a native g++, and writes what it produces out as PPM images.
@@ -463,7 +464,7 @@ int main( int argc, char **argv )
 		printf( "flat-colour test: %u tris, checksum %08x\n", n, checksum() );
 	}
 
-	// --- exactly what Source/TestPRG/gpu64_3d_cube.a asks for -----------
+	// --- exactly what tests/gpu64_3d_cube.a asks for -----------
 	// The C64-side demo has no camera opcode -- CREATE_CAMERA is phase 2 --
 	// so its view is the identity at the origin and the elevation comes from
 	// a negative model pitch. Rendering that same setup here gives the bench

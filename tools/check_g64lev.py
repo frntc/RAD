@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """Validate a .g64lev level file produced by tools/gen_quakelevel.py.
 
 Checks the header, that every table and blob offset lands inside the file,
@@ -201,7 +202,7 @@ def main(path):
             fail('gpu64_catalog says %d meshes %d textures; the file has %d %d'
                  % (cmesh, ctex, nmesh, ntex))
         inc = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
-                           'quake', 'gpu64_quake_actors.inc')
+                           'games', 'quake', 'gpu64_quake_actors.inc')
         if os.path.exists(inc):
             sym = {}
             for ln in open(inc):

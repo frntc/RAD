@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """check_nighthawk.py - the autopilot checkride: one circuit, one landing.
 
-tools/demos.sh runs gpu64_demo_nighthawk for 1500 frames and leaves the
+tools/examples.sh runs gpu64_demo_nighthawk for 1500 frames and leaves the
 verdict to whoever looks at the picture. That proves the scene draws, but
 the claim the demo actually makes is that a C64 flies the aeroplane: the
 flight model, the terrain height under the wheels, the touchdown rules and
@@ -35,7 +36,7 @@ work; "M4 HIT" and the landing as before. It is the long one, most of ten
 minutes, so all four rides run at once.
 
 Usage:
-  tools/check_nighthawk.py --prg=Source/Demos/gpu64_demo_nighthawk.prg
+  tools/check_nighthawk.py --prg=games/nighthawk/gpu64_demo_nighthawk.prg
 """
 
 import os

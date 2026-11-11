@@ -1,0 +1,205 @@
+;
+;      gpu64 example -- CUBE: the 3D pipeline in about a hundred lines.
+;
+;      A lit, z-buffered cube tumbling in the middle of the HDMI screen.
+;      The 6502 does no 3D maths: it uploads eight vertices and twelve
+;      triangles once, creates a camera and an object, and then each
+;      frame sends ONE command -- "turn the cube to here" -- and
+;      SCENE_COMMIT. gpu64 transforms, culls, shades, rasterises and
+;      flips pages.
+;
+;      This is class 1's retained scene graph, the way every game uses it.
+;      (There is also an immediate mode, DRAW_MESH, for one-off draws; see
+;      docs/class1-3d-mesh-reference.md and tests/gpu64_3d_cube.a.)
+;
+;      What to take from it:
+;
+;        SET_VIEWPORT     where on the page 3D draws. Here: all of it.
+;        SET_PERSPECTIVE  field of view, near and far plane.
+;        SET_LIGHT        one directional light plus an ambient floor.
+;        BUILD_COLORMAP   the shading table. Call it after the palette is
+;                         final and never per frame -- it takes milliseconds.
+;        UPLOAD_MESH      two blobs in C64 RAM: vertices, then faces.
+;        CREATE_*         nodes: a camera and an object that instances a mesh.
+;        LOOP_START       gpu64 starts rendering the scene by itself.
+;        SCENE_COMMIT     publish this frame's edits; wait for FRAME_READY
+;                         (STATUS bit 4) before sending the next.
+;
+;      Coordinates are 8.8 fixed point (256 = 1.0), +x right, +y up, +z
+;      away from the camera. Angles are 16 bit: 65536 = one full turn.
+;
+;      Run it: LOAD"GPU64_DEMO_CUBE",8,1 then RUN. RUN/STOP finishes.
+;      RAD must be in REU mode (press T in its menu until it reads REU).
+;
+;      Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later.
+;
+
+	.include "gpu64.inc"
+
+MESH_ID	= 1			; resource IDs and node IDs are chosen by the C64
+CAM_ID	= 1
+CUBE_ID	= 2
+
+	#basicStub
+
+start
+	jsr dmInit
+
+	; Shading darkens a colour by picking a darker palette entry, so the
+	; palette must contain the ramps. 7 hues x 8 brightnesses, index
+	; hue*8 + level; level 7 is the full colour. See "palette" below.
+	#argblob 0, SPACE_C64, palette, 56*3
+	#argb 6, 0			; first index
+	#argb 7, 56			; count
+	#cmd OP_PAL_LOAD
+
+	; The whole page is the viewport. 320*200*3 stays under the 3D budget.
+	#argw 0, 0			; x
+	#argw 2, 0			; y
+	#argw 4, 320			; w
+	#argw 6, 200			; h
+	#cmdc1 C1_SET_VIEWPORT
+
+	; 60 degrees ($2AAB of 65536), near 1.0, far 100.0. Near and far are
+	; 8.8, so the far plane cannot exceed 127.99 units.
+	#argw 0, $2aab
+	#argw 2, $0100
+	#argw 4, $6400
+	#cmdc1 C1_SET_PERSPECTIVE
+
+	; The direction points TOWARDS the light; the firmware normalises it.
+	; Ambient 4 of 15 keeps the faces the light misses readable.
+	#argw 0, -1280
+	#argw 2, 1792
+	#argw 4, -1536
+	#argb 6, 4
+	#cmdc1 C1_SET_LIGHT
+
+	#argb 0, 0			; palette index 0 = black
+	#cmdc1 C1_SET_BACKGROUND
+	#cmdc1 C1_BUILD_COLORMAP
+
+	; Vertices: 8 x 6 bytes. Faces: 12 x 12 bytes. Descriptors are
+	; (space, 24-bit address, 16-bit length); space 0 = C64 RAM.
+	#id16 MESH_ID
+	#argblob 0, SPACE_C64, vertices, 8*6
+	#argblob 6, SPACE_C64, faces, 12*12
+	#cmdc1 C1_UPLOAD_MESH
+	jsr errLine
+
+	; The scene: a camera, and one object that instances mesh 1. Nodes live
+	; in gpu64 until destroyed -- the C64 never re-sends them.
+	#id16 CAM_ID
+	#cmdc1 C1_CREATE_CAMERA
+	#id16 CAM_ID
+	#cmdc1 C1_SET_ACTIVE_CAMERA
+
+	#id16 CUBE_ID
+	#argw 0, MESH_ID
+	#cmdc1 C1_CREATE_OBJECT
+
+	#id16 CUBE_ID			; 16.16 position: x=0, y=0, z=6.0
+	#arg1616 0, 0
+	#arg1616 4, 0
+	#arg1616 8, $0600
+	#cmdc1 C1_SET_POSITION
+
+	; LOOP_START hands the screen to gpu64: from here on it renders the
+	; whole scene by itself, on its second core, and flips pages.
+	#argb 0, 0			; 0 = handshake: we commit each frame
+	#cmdc1 C1_LOOP_START
+
+frame
+	#id16 CUBE_ID			; the only thing that changes per frame
+	#argwv 0, yaw			; yaw: spin about the vertical axis
+	#argwv 2, pitch			; pitch: tip about the cube's own x axis
+	#argw 4, 0			; roll
+	#cmdc1 C1_SET_ORIENTATION
+
+	#cmdc1 C1_SCENE_COMMIT		; publish the edits; render the next frame
+
+wait	lda STATUS			; one commit per finished frame
+	and #ST_FRAME_READY
+	beq wait
+
+	clc				; 2.8 degrees of yaw, 1.4 of pitch a frame
+	lda yaw+1
+	adc #2
+	sta yaw+1
+	clc
+	lda pitch+1
+	adc #1
+	sta pitch+1
+
+	jsr dmStop			; Z set while RUN/STOP is down
+	beq done
+	jmp frame
+done	jmp dmHold
+
+; Print the last ERRCODE on row 1 so a failed upload is visible without
+; reading the HDMI screen.
+errLine
+	lda #1
+	jsr dmRow
+	jsr dmText
+	.text "GPU64 CUBE   UPLOAD_MESH ERRCODE "
+	.byte 0
+	jmp dmErr
+
+yaw	.word 0
+pitch	.word 0
+
+; ----------------------------------------------------------------------
+; The cube: corners at +-1.0, 8.8 fixed point (-1.0 = $ff00).
+;
+;        7--------6        y
+;       /|       /|        |  z
+;      4--------5 |        | /
+;      | 3------|-2        +---x
+;      |/       |/
+;      0--------1
+;
+; Faces are wound so the cross product (v1-v0) x (v2-v0) points OUT of the
+; cube. The face record is: i0 i1 i2, u0 v0 u1 v1 u2 v2, texid, flags, pad.
+; Flag bit 1 makes texid a palette index instead of a texture, so no texture
+; upload is needed.
+; ----------------------------------------------------------------------
+; Palette: a black entry for hue 0, then six hues, each in eight steps
+; from dark to full. 64tass builds it at assembly time.
+hues = [0,0,0, 255,40,40, 40,230,230, 40,220,60, 240,230,40, 90,120,255, 255,140,30]
+palette
+	.for h = 0, h < 7, h += 1
+	.for l = 1, l <= 8, l += 1
+	.byte hues[h*3]*l/8, hues[h*3+1]*l/8, hues[h*3+2]*l/8
+	.next
+	.next
+
+vertices
+	.sint -256, -256, -256		; 0
+	.sint  256, -256, -256		; 1
+	.sint  256, 256, -256		; 2
+	.sint -256, 256, -256		; 3
+	.sint -256, -256, 256		; 4
+	.sint  256, -256, 256		; 5
+	.sint  256, 256, 256		; 6
+	.sint -256, 256, 256		; 7
+
+face	.macro	a, b, c, colour
+	.byte \a, \b, \c, 0,0,0,0,0,0, \colour, 2, 0
+	.endm
+
+faces
+	#face 0,3,2, 1*8+7		; -z
+	#face 0,2,1, 1*8+7
+	#face 4,5,6, 2*8+7		; +z
+	#face 4,6,7, 2*8+7
+	#face 0,4,7, 3*8+7		; -x
+	#face 0,7,3, 3*8+7
+	#face 1,2,6, 4*8+7		; +x
+	#face 1,6,5, 4*8+7
+	#face 0,1,5, 5*8+7		; -y
+	#face 0,5,4, 5*8+7
+	#face 3,7,6, 6*8+7		; +y
+	#face 3,6,2, 6*8+7
+
+	.include "gpu64_rt.inc"

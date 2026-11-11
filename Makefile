@@ -1,5 +1,5 @@
 # Top-level convenience wrapper around tools/build.sh -- lets you run
-# plain `make` instead of `tools/build.sh`. See docs/hw_testing.md for
+# plain `make` instead of `tools/build.sh`. See dev/hw_testing.md for
 # the full build/deploy story and toolchain requirements.
 #
 # Usage:
@@ -7,6 +7,8 @@
 #   make libs                   # also (re)build the Circle libraries
 #   make clean                  # remove the Circle app/Firmware build tree
 #   make SDCARD=/media/you/RAD  # build + deploy to a mounted SD card
+#   make examples               # assemble + simulate every example and game
+#   make tests                  # the conformance suite, on the PC model
 #   make copy                   # copy last build onto the RAD SD card + unmount it
 #
 # PREFIX64/RASPPI/AARCH/JOBS are forwarded to tools/build.sh the same way
@@ -22,12 +24,19 @@ BUILD_ENV = SDCARD="$(SDCARD)" PREFIX64="$(PREFIX64)" RASPPI="$(RASPPI)" AARCH="
 
 # `make copy` targets the RAD SD card directly -- config.txt on it boots
 # whatever file "kernel=" names, which is kernel_rad.img, not Circle's
-# default kernel8.img -- see docs/hw_testing.md.
+# default kernel8.img -- see dev/hw_testing.md.
 KERNEL_IMG = external/Circle/app/Firmware/kernel8.img
 SD_MOUNT  ?= /media/$(USER)/SIDEKICK
 SD_KERNEL ?= kernel_rad.img
 
-.PHONY: all libs clean copy
+.PHONY: all libs clean copy examples tests
+
+# PC-side checks: assemble and simulate. No hardware needed.
+examples:
+	@tools/examples.sh
+
+tests:
+	@tools/testprg.sh
 
 all:
 	@$(BUILD_ENV) tools/build.sh

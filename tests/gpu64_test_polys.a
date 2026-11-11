@@ -1,0 +1,840 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
+;
+;      gpu64 API conformance -- class 2 polygons: DRAW_POLYS.
+;
+;      WHAT THIS IS FOR
+;
+;      DRAW_SECTORS renders a Doom level: vertical walls standing between
+;      horizontal floors. DRAW_POLYS has neither assumption in it -- a face
+;      is a convex polygon anywhere in space at any angle -- which is what a
+;      Quake level is made of, and what a ramp, a skylight and a bridge over
+;      the room you are standing in need.
+;
+;      The arithmetic is not what this program checks; tools/rastercheck
+;      does that far better, 64000 pixels at a time against an independently
+;      written model. What this checks is what exists only on hardware: that
+;      the vertex pool, the texinfo table and the face records the C64 wrote
+;      are the ones the core was handed, and that the depth buffer really is
+;      the one DRAW_SECTORS and DRAW_THINGS use.
+;
+;      THE GEOMETRY, WORKED OUT BY HAND
+;
+;      Every expected number below comes from this and nothing else, so a
+;      red line here is a firmware defect and not a disagreement about what
+;      was expected.
+;
+;        camera at the origin, yaw 0 (looking along +x), pitch 0, eye at
+;        world z = 0, projecting 160 pixels across a 320-wide view. So the
+;        view centre is column 160, row 100, and with yaw and pitch both 0
+;        the transform is simply
+;
+;            view right = -y      view up = z      view depth = x
+;
+;        A vertex at world (x,y,z) therefore lands at
+;
+;            column = 160 - y*160/x        row = 100 - z*160/x
+;
+;      THE FAR WALL, vertices 0..3: x = 4.0, y = +-2.0, z = +-1.0.
+;
+;            y = +2.0 -> column  80      z = +1.0 -> row  60
+;            y = -2.0 -> column 240      z = -1.0 -> row 140
+;
+;      and the rule is half-open -- a pixel belongs to the polygon whose
+;      interior contains its top-left corner -- so it covers columns
+;      80..239 and rows 60..139 exactly: 160 x 80 = 12800 pixels.
+;
+;      Wound top-left, top-right, bottom-right, bottom-left it is clockwise
+;      on screen, which is the front face. Vertices 4..7 are the same four
+;      the other way round, which is the back of it.
+;
+;      THE NEAR WALL, vertices 8..11: x = 2.0, y = +-0.5, z = +-1.0.
+;
+;            y = +0.5 -> column 120      z = +1.0 -> row  20
+;            y = -0.5 -> column 200      z = -1.0 -> row 180
+;
+;      so it covers columns 120..199, rows 20..179 -- a rectangle wholly
+;      inside the far wall's columns and taller than it, which is what makes
+;      the depth assertions unambiguous whichever order the two arrive in.
+;
+;      THE TEXTURE is 4x4 with texel( u, v ) = 20 + u*4 + v, so every texel
+;      is a different byte and an assertion names exactly one of them. The
+;      texinfo maps s = -y and t = -z, so across the far wall
+;
+;            columns  80..119 -> u = 2      rows  60..99  -> v = 3
+;            columns 120..159 -> u = 3      rows 100..139 -> v = 0
+;            columns 160..199 -> u = 0
+;            columns 200..239 -> u = 1
+;
+;      PITCH is the one thing a Doom renderer's horizon cannot do. At
+;      pitch 8 (11.25 degrees up) the far wall's four corners transform to
+;
+;            top    corners: depth 1054, up  51 -> row  93, column  82.28
+;            bottom corners: depth  954, up -451 -> row 176, column  74.13
+;
+;      -- the top edge is FURTHER AWAY than the bottom one, so the wall
+;      projects as a trapezoid that is narrower at the top. A y-shear would
+;      have moved it down the screen and left it a rectangle. That is the
+;      whole difference between this camera and SET_CAMERA's horizon, and
+;      the four assertions at the end are it.
+;
+;      Requires the RAD menu switched to REU mode with T.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+	.include "gpu64_testkit.inc"
+
+STATS	= $3300				; RASTER_STATS reads back here
+RB	= $3380				; READ_RECT reads back here
+TEX	= $3400			        ; the texture is built here
+CMAP	= $4000				; the 16-level colormap is built here
+NLEV	= 16				; levels in it; map[ l*256+c ] = l+1
+
+BG	= 0				; the colour the page is cleared to
+WFAR	= 7				; the far wall
+WNEAR	= 5				; the near wall
+WBOTH	= 4				; the two-sided face
+TEXBASE	= 20				; texel( u, v ) = TEXBASE + u*4 + v
+
+IDT	= 1				; the texture id
+TI	= 1				; the texinfo id
+
+* = $0801
+	.byte $0b, $08, $0a, $00, $9e
+	.text "2064"
+	.byte $00, $00, $00
+
+* = $0810
+
+start
+	jsr kitInit
+	#title "GPU64 API TEST 11 - POLYGONS"
+
+	; Is class 2 there at all? GET_INFO byte 11 bit 2 says so, and if it
+	; is clear then every line below fails as BAD_CLASS for a reason
+	; that is not a defect. Ask first.
+	#poison RB, 16, $aa
+	#argblob 0, SPACE_C64, RB, 16
+	lda #OP_GET_INFO
+	jsr cmd0
+	#wantOk
+	#check "GET INFO"
+
+	#clracc
+	lda RB+11
+	and #$04
+	bne +
+	jsr kitBad
++
+	#useacc
+	#check "CLASS 2 BIT"
+
+	#argb 0, BG
+	lda #OP_CLEAR
+	jsr cmd0
+
+	; RESET drops the vertex pool, the texinfo table and the 3D camera
+	; along with everything else, so nothing below can inherit the state
+	; of whatever program ran before this one.
+	lda #R2_RESET
+	jsr cmd2
+	#wantOk
+	#check "RESET"
+
+	#argw 0, 0
+	#argw 2, 0
+	#argw 4, 320
+	#argw 6, 200
+	lda #R2_SET_VIEW
+	jsr cmd2
+	#argblob 0, SPACE_C64, 0, 0
+	#argb 6, 0
+	lda #R2_SET_COLORMAP
+	jsr cmd2
+	#wantOk
+	#check "POLY SETUP"
+
+	; ---------------------------------------------------------------
+	; Nothing is set up yet, so a batch has nothing to mean. Both
+	; missing pieces are the same verdict: the command fails and draws
+	; nothing, rather than every record being rejected one at a time.
+	; ---------------------------------------------------------------
+
+	#r2batchp polyFar, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#wantErr ERR_BAD_ARGS
+	#check "POLYS NO CAMERA"
+
+	; ---------------------------------------------------------------
+	; The two level tables.
+	; ---------------------------------------------------------------
+
+	#r2verts vertTab, NVERT
+	lda #R2_UPLOAD_VERTS
+	jsr cmd2
+	#wantOk
+	#check "UPLOAD VERTS"
+
+	; A length that does not match the count is the one thing an upload
+	; can be told about a transfer that lost bytes -- rule 3 in
+	; CLAUDE.md. It must reject and leave the table that was working.
+	#argblob 0, SPACE_C64, vertTab, NVERT*R2_VERT
+	#argw 6, NVERT-1
+	lda #R2_UPLOAD_VERTS
+	jsr cmd2
+	#wantErr ERR_BAD_ARGS
+	#check "VERTS BAD LEN"
+
+	#r2texinfo texinfoTab, NTI
+	lda #R2_UPLOAD_TEXINFO
+	jsr cmd2
+	#wantOk
+	#check "UPLOAD TEXINFO"
+
+	; ---------------------------------------------------------------
+	; The camera. A projection distance of zero cannot be projected
+	; through, and saying so once here beats rejecting every record in
+	; every batch after it.
+	; ---------------------------------------------------------------
+
+	#r2cam3 0, 0, 0, 0, 0, 0
+	lda #R2_SET_CAMERA3D
+	jsr cmd2
+	#wantErr ERR_BAD_ARGS
+	#check "CAM3 ZERO PROJ"
+
+	#r2cam3 0, 0, 0, 0, 0, $a000
+	lda #R2_SET_CAMERA3D
+	jsr cmd2
+	#wantOk
+	#check "SET CAMERA3D"
+
+	jsr buildTexture
+	#clracc
+	#uptex IDT, TEX, 4, 4
+	#useacc
+	#check "UPLOAD TEX"
+
+	; ---------------------------------------------------------------
+	; One face, and where its edges land. An off-by-one in the
+	; projection or in the fill rule is what this is looking for; a
+	; check that only sampled the middle would never see one.
+	; ---------------------------------------------------------------
+
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyFar, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#wantOk
+	#check "DRAW POLYS"
+
+	#argblob 0, SPACE_C64, STATS, 16
+	lda #R2_STATS
+	jsr cmd2
+	#clracc
+	#expectw STATS+2, 1		; accepted
+	#expectw STATS+4, 0		; rejected
+	#expectw STATS+6, 1		; requested
+	#useacc
+	#check "POLY ACCEPTED"
+
+	; 160 columns x 80 rows, and not one pixel more: the half-open fill
+	; rule is what keeps two faces sharing an edge from drawing it twice.
+	#clracc
+	#expectw STATS+8, 12800
+	#expectb STATS+10, 0
+	#expectb STATS+11, 0
+	#useacc
+	#check "POLY PIXELS"
+
+	#stgRead RB, 78, 100, 4, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, BG		; x=78
+	#expectb RB+1, BG		; x=79
+	#expectb RB+2, WFAR		; x=80, first column
+	#expectb RB+3, WFAR
+	#useacc
+	#check "POLY LEFT EDGE"
+
+	#stgRead RB, 238, 100, 4, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, WFAR
+	#expectb RB+1, WFAR		; x=239, last column
+	#expectb RB+2, BG
+	#expectb RB+3, BG
+	#useacc
+	#check "POLY RIGHT EDGE"
+
+	#stgRead RB, 160, 58, 1, 4
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, BG		; y=58
+	#expectb RB+1, BG		; y=59
+	#expectb RB+2, WFAR		; y=60, first row
+	#expectb RB+3, WFAR
+	#useacc
+	#check "POLY TOP EDGE"
+
+	#stgRead RB, 160, 138, 1, 4
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, WFAR
+	#expectb RB+1, WFAR		; y=139, last row
+	#expectb RB+2, BG
+	#expectb RB+3, BG
+	#useacc
+	#check "POLY BOT EDGE"
+
+	; ---------------------------------------------------------------
+	; Winding. The same four vertices the other way round are the back
+	; of the wall, and a level is closed: the back faces are half of it
+	; and drawing them would cost half the frame for nothing.
+	; ---------------------------------------------------------------
+
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyBack, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#wantOk
+	#argblob 0, SPACE_C64, STATS, 16
+	lda #R2_STATS
+	jsr cmd2
+	#clracc
+	#expectw STATS+2, 0		; accepted
+	#expectw STATS+4, 1		; rejected -- a back face is a mistake
+	#expectw STATS+8, 0		; and drew nothing
+	#useacc
+	#check "POLY BACKFACE"
+
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyBoth, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#argblob 0, SPACE_C64, STATS, 16
+	lda #R2_STATS
+	jsr cmd2
+	#clracc
+	#expectw STATS+2, 1		; TWOSIDED: accepted from either side
+	#expectw STATS+4, 0
+	#expectw STATS+8, 12800
+	#useacc
+	#check "POLY TWOSIDED"
+
+	; ---------------------------------------------------------------
+	; Malformed records. Each is one rejected record and no pixels --
+	; never a failed command, because one bad face in a batch of three
+	; hundred must not lose the other 299.
+	; ---------------------------------------------------------------
+
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp badPolys, NBAD
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#wantOk
+	#argblob 0, SPACE_C64, STATS, 16
+	lda #R2_STATS
+	jsr cmd2
+	#clracc
+	#expectw STATS+2, 0
+	#expectw STATS+4, NBAD
+	#expectw STATS+6, NBAD
+	#expectw STATS+8, 0
+	#useacc
+	#check "POLY REJECTS"
+
+	; ---------------------------------------------------------------
+	; Depth. The near wall is inside the far one's columns and taller
+	; than it, and the picture must be the same whichever order the two
+	; records arrive in -- that is what the per-pixel depth buffer is
+	; for, and it is why nothing here ever sorts anything.
+	; ---------------------------------------------------------------
+
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyNF, 2
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#wantOk
+	#stgRead RB, 160, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, WNEAR		; the near wall owns the centre
+	#useacc
+	#check "POLY DEPTH NEAR"
+
+	#stgRead RB, 100, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, WFAR		; outside its columns, the far one
+	#useacc
+	#check "POLY DEPTH FAR"
+
+	#stgRead RB, 160, 30, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, WNEAR		; above the far wall entirely
+	#useacc
+	#check "POLY DEPTH ABOVE"
+
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyFN, 2
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#stgRead RB, 160, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, WNEAR		; the other order, the same picture
+	#useacc
+	#check "POLY ORDER FREE"
+
+	#stgRead RB, 100, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, WFAR
+	#useacc
+	#check "POLY ORDER FAR"
+
+	; FILL_VIEW empties the depth buffer over what it paints. Without
+	; that, last frame's near wall would go on occluding this frame's
+	; far one -- geometry that is no longer drawn hiding geometry that
+	; is.
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyFar, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#stgRead RB, 160, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, WFAR
+	#useacc
+	#check "FILL CLEARS DEPTH"
+
+	; ---------------------------------------------------------------
+	; Texture and texinfo. Four texels across and two down, each a
+	; different byte, so a sample says exactly which texel it read.
+	; ---------------------------------------------------------------
+
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyTex, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#wantOk
+	#check "DRAW TEXTURED"
+
+	#stgRead RB, 90, 70, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, TEXBASE+2*4+3	; u=2 v=3
+	#useacc
+	#check "TEXEL 2 3"
+
+	#stgRead RB, 140, 70, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, TEXBASE+3*4+3	; u=3 v=3
+	#useacc
+	#check "TEXEL 3 3"
+
+	#stgRead RB, 180, 120, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, TEXBASE+0*4+0	; u=0 v=0, the wrap
+	#useacc
+	#check "TEXEL 0 0"
+
+	#stgRead RB, 220, 120, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, TEXBASE+1*4+0	; u=1 v=0
+	#useacc
+	#check "TEXEL 1 0"
+
+	; ---------------------------------------------------------------
+	; Pitch. The four numbers in the header, and they are what a
+	; y-shear cannot produce: the top of the wall is further away than
+	; the bottom, so it is narrower.
+	; ---------------------------------------------------------------
+
+	#r2cam3 0, 0, 0, 0, 8, $a000
+	lda #R2_SET_CAMERA3D
+	jsr cmd2
+	#wantOk
+	#check "PITCH CAMERA"
+
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyFar, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#stgRead RB, 160, 92, 1, 2
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, BG		; y=92
+	#expectb RB+1, WFAR		; y=93, the wall has moved down
+	#useacc
+	#check "PITCH TOP ROW"
+
+	#stgRead RB, 160, 175, 1, 2
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, WFAR		; y=175
+	#expectb RB+1, BG		; y=176
+	#useacc
+	#check "PITCH BOT ROW"
+
+	#stgRead RB, 82, 93, 2, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, BG		; x=82 at the top row
+	#expectb RB+1, WFAR		; x=83
+	#useacc
+	#check "PITCH TOP EDGE"
+
+	#stgRead RB, 74, 175, 2, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, BG		; x=74 at the bottom row
+	#expectb RB+1, WFAR		; x=75 -- wider than the top, a
+	#useacc				;         rotation and not a shear
+	#check "PITCH TRAPEZOID"
+
+	; ---------------------------------------------------------------
+	; Milestone 12: SET_LIGHT, a dynamic point light.
+	;
+	; The colormap is built so that a pixel names its own light level:
+	; every colour in level l reads back as l+1. The face is drawn
+	; R2_POLY_FLATLIT at light 8, so with no light live every pixel of
+	; it is 9, and a light can only ever make it smaller.
+	;
+	; The light sits at the middle of the far wall, (4.0, 0, 0), with
+	; radius 1.0 and strength 8. Falloff is linear in d squared:
+	;
+	;     sub = strength * ( r2 - d2 ) / r2,  truncated
+	;
+	; and on the wall d is the distance from column 160, row 100 in
+	; world units, 40 pixels to the unit. Every number below is that
+	; arithmetic and nothing else:
+	;
+	;   col 143, row 100 -> y = 0.425, d2 = 11837 -> sub 6 -> level 2
+	;   col 134, row 100 -> y = 0.650, d2 = 27689 -> sub 4 -> level 4
+	;   col 160, row  83 -> z = 0.425, d2 = 11837 -> sub 6 -> level 2
+	;   col 160, row  70 -> z = 0.750, d2 = 36864 -> sub 3 -> level 5
+	;   col  90, row 100 -> y = 1.750, outside the radius -> level 8
+	;
+	; Each sample sits in the middle of its band -- the nearest one is
+	; over 1000 in d2 from the level either side of it -- so a pixel
+	; landing a fixed-point LSB out still asserts the same byte, and
+	; a red line here is a defect and not a rounding argument.
+	; ---------------------------------------------------------------
+
+	#r2cam3 0, 0, 0, 0, 0, $a000
+	lda #R2_SET_CAMERA3D
+	jsr cmd2
+
+	jsr buildColormap
+	#argblob 0, SPACE_C64, CMAP, NLEV*256
+	#argb 6, NLEV
+	lda #R2_SET_COLORMAP
+	jsr cmd2
+	#wantOk
+	#check "LIGHT COLORMAP"
+
+	; No light yet. The whole face is level 8, which is the reading
+	; every assertion after this is measured against.
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyLit, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#wantOk
+	#stgRead RB, 143, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, 9		; level 8 -> 8+1
+	#useacc
+	#check "LIGHT BASE LEVEL"
+
+	; A slot past the last one is a rejected command, not a silently
+	; ignored one.
+	#r2light NLEV, $0400, 0, 0, $0100, 8
+	lda #R2_SET_LIGHT
+	jsr cmd2
+	#wantErr ERR_BAD_ARGS
+	#check "LIGHT BAD SLOT"
+
+	#r2light 0, $0400, 0, 0, $0100, 8
+	lda #R2_SET_LIGHT
+	jsr cmd2
+	#wantOk
+	#check "SET LIGHT"
+
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyLit, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#wantOk
+	#check "DRAW POLYS LIT"
+
+	#stgRead RB, 143, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, 3		; sub 6 -> level 2
+	#useacc
+	#check "LIGHT NEAR CENTRE"
+
+	#stgRead RB, 134, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, 5		; sub 4 -> level 4
+	#useacc
+	#check "LIGHT FALLOFF"
+
+	#stgRead RB, 90, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, 9		; outside the radius, untouched
+	#useacc
+	#check "LIGHT RADIUS EDGE"
+
+	; The same distance measured up the wall instead of across it. A
+	; light that had lost its z would read 1 here, not 3.
+	#stgRead RB, 160, 83, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, 3		; sub 6 -> level 2
+	#useacc
+	#check "LIGHT Z AXIS"
+
+	#stgRead RB, 160, 70, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, 6		; sub 3 -> level 5
+	#useacc
+	#check "LIGHT Z FALLOFF"
+
+	; Two half-strength lights in the same place. They accumulate, but
+	; each truncates on its own: 4*(65536-11837)/65536 is 3.27 twice,
+	; so 3+3 = 6 and not the 6.55 one strength-8 light gave. Getting
+	; that wrong is how a two-light scene ends up a level too bright.
+	#r2light 0, $0400, 0, 0, $0100, 4
+	lda #R2_SET_LIGHT
+	jsr cmd2
+	#r2light 1, $0400, 0, 0, $0100, 4
+	lda #R2_SET_LIGHT
+	jsr cmd2
+	#wantOk
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyLit, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#stgRead RB, 143, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, 3		; 3 + 3 -> level 2
+	#useacc
+	#check "TWO LIGHTS ADD"
+
+	; The light moved two units back along x, so the wall is now
+	; outside its radius. Nothing but the x term can produce this.
+	#r2light 0, $0600, 0, 0, $0100, 4
+	lda #R2_SET_LIGHT
+	jsr cmd2
+	#r2light 1, $0600, 0, 0, $0100, 4
+	lda #R2_SET_LIGHT
+	jsr cmd2
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyLit, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#stgRead RB, 143, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, 9		; out of reach along x
+	#useacc
+	#check "LIGHT X AXIS"
+
+	; Turning them off, the two ways a game has of doing it: strength
+	; zero and radius zero. After both the face must read exactly what
+	; it read before any light existed.
+	#r2light 0, $0400, 0, 0, $0100, 0
+	lda #R2_SET_LIGHT
+	jsr cmd2
+	#wantOk
+	#r2light 1, $0400, 0, 0, 0, 4
+	lda #R2_SET_LIGHT
+	jsr cmd2
+	#wantOk
+	#argb 0, BG
+	lda #R2_FILL_VIEW
+	jsr cmd2
+	#r2batchp polyLit, 1
+	lda #R2_DRAW_POLYS
+	jsr cmd2
+	#stgRead RB, 143, 100, 1, 1
+	lda #OP_READ_RECT
+	jsr cmd0
+	#clracc
+	#expectb RB+0, 9
+	#useacc
+	#check "LIGHTS OFF"
+
+	jmp kitFinish
+
+; ----------------------------------------------------------------------
+; The texture, built at run time so the file carries no blob.
+; Column-major: texel( u, v ) is at [ u * h + v ].
+; ----------------------------------------------------------------------
+; ----------------------------------------------------------------------
+; NLEV levels of colormap, every colour in level l mapping to l+1, so a
+; pixel read back names the level it was drawn at.
+; ----------------------------------------------------------------------
+buildColormap
+	lda #<CMAP
+	sta P1
+	lda #>CMAP
+	sta P1+1
+	lda #1				; level 0 -> 1
+bcLevel
+	ldy #0
+bcByte
+	sta (P1),y
+	iny
+	bne bcByte
+	inc P1+1
+	clc
+	adc #1
+	cmp #NLEV+1
+	bne bcLevel
+	rts
+
+buildTexture
+	ldx #0
+-	txa
+	clc
+	adc #TEXBASE
+	sta TEX,x
+	inx
+	cpx #16
+	bne -
+	rts
+
+; ----------------------------------------------------------------------
+; The level. Static, which is the whole argument for class 2: uploaded
+; once, and a frame after that costs the camera alone.
+; ----------------------------------------------------------------------
+
+vertTab
+	; 0..3 -- the far wall at x = 4.0, wound clockwise on screen
+	#r2vertd $0400, $0200, $0100
+	#r2vertd $0400, $fe00, $0100
+	#r2vertd $0400, $fe00, $ff00
+	#r2vertd $0400, $0200, $ff00
+	; 4..7 -- the same four the other way round: the back of it
+	#r2vertd $0400, $0200, $ff00
+	#r2vertd $0400, $fe00, $ff00
+	#r2vertd $0400, $fe00, $0100
+	#r2vertd $0400, $0200, $0100
+	; 8..11 -- the near wall at x = 2.0
+	#r2vertd $0200, $0080, $0100
+	#r2vertd $0200, $ff80, $0100
+	#r2vertd $0200, $ff80, $ff00
+	#r2vertd $0200, $0080, $ff00
+NVERT	= 12
+
+; s = -y, t = -z, both in texels: the wall is four texels wide and two
+; tall, and any other face given this texinfo would align with it.
+texinfoTab
+	#r2texinfod $0000, $ff00, $0000, $0000,  $0000, $0000, $ff00, $0000
+NTI	= 1
+
+; The faces. Each written once where two batches must be the same records:
+; an order assertion is worth nothing if the two batches are not.
+farFace	.macro
+	#r2polyd 0, 4, 0, 0, WFAR, 0
+	.endm
+nearFace .macro
+	#r2polyd 8, 4, 0, 0, WNEAR, 0
+	.endm
+
+polyFar	#farFace
+polyBack #r2polyd 4, 4, 0, 0, WFAR, 0
+polyBoth #r2polyd 4, 4, 0, 0, WBOTH, 0, R2_POLY_TWOSIDED
+polyTex	#r2polyd 0, 4, TI, IDT, 0, 0
+
+; Flat-lit at level 8: the base every milestone-12 assertion measures a
+; dynamic light against.
+polyLit	#r2polyd 0, 4, 0, 0, WFAR, 8, R2_POLY_FLATLIT
+
+polyNF	#nearFace
+	#farFace
+polyFN	#farFace
+	#nearFace
+
+badPolys
+	#r2polyd 0, 0, 0, 0, WFAR, 0		; no vertices
+	#r2polyd 0, 2, 0, 0, WFAR, 0		; not a polygon
+	#r2polyd 0, 17, 0, 0, WFAR, 0		; more than the limit
+	#r2polyd 4000, 4, 0, 0, WFAR, 0		; past the end of the pool
+	#r2polyd 0, 4, TI, 99, 0, 0		; unknown texture
+	#r2polyd 0, 4, 0, IDT, 0, 0		; textured with no texinfo
+	#r2polyd 0, 4, 9, IDT, 0, 0		; texinfo past the table
+NBAD	= 7
+
+	.include "gpu64_testkit_rt.inc"

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 8 -- the class 2 raster core: columns, spans and scaled
  sprites.
@@ -10,7 +11,7 @@
  is findable on a PC.
 
  Wire formats and semantics: docs/api_design.md (class 2). Rationale:
- project/milestone8_raster_design.md. Neither is restated here.
+ dev/milestone8_raster_design.md. Neither is restated here.
 */
 #ifndef _gpu64_raster_core_h
 #define _gpu64_raster_core_h
@@ -33,7 +34,7 @@
 
 // DRAW_POLYS' face record, and the two tables it indexes. Milestone 9: a
 // convex polygon in world space, which is the primitive a wall record and a
-// sector both are special cases of -- see project/milestone9_poly_design.md.
+// sector both are special cases of -- see dev/milestone9_poly_design.md.
 #define GPU64_RASTER_POLY_BYTES		16
 #define GPU64_RASTER_VERT_BYTES		8
 #define GPU64_RASTER_TEXINFO_BYTES	16

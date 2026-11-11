@@ -1,0 +1,1091 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 demo 7 of 7 -- RAYCAST: the class 2 raster layer.
+;
+;      A textured, lit, first-person view, rendered at 320x160 by a stock
+;      1MHz 6502. This is the demo the class exists for, and the point of
+;      it is what the C64 does NOT do: it never touches a pixel.
+;
+;      THE IDEA
+;
+;      Class 0 draws one shape per command. That is the right shape for a
+;      chart or a sprite, and the wrong one for a first-person renderer,
+;      which produces hundreds of primitives a frame -- and every command
+;      costs a register write per argument byte and halts the C64 while it
+;      runs. Class 2 turns that round. You fill an array of 16-BYTE RECORDS
+;      in your own RAM and hand gpu64 the whole array at once:
+;
+;        DRAW_COLUMNS ($20)  one textured vertical strip per record --
+;                            Doom's R_DrawColumn, the wall
+;        DRAW_SPANS   ($21)  one horizontal strip per record --
+;                            Doom's R_DrawSpan, the floor and ceiling
+;        DRAW_SPRITE  ($22)  one texture scaled into a screen rectangle,
+;                            with a transparent key -- the weapon
+;
+;      This frame is 480 primitives and FOUR dispatches. As one command per
+;      primitive it would be some five thousand register writes, which at
+;      1MHz is most of a frame gone before any pixel is drawn.
+;
+;      WHAT THE 6502 ACTUALLY DOES
+;
+;      It casts 40 rays across a 16x16 map, marching each one a quarter of
+;      a cell at a time until it meets a wall -- 16-bit adds and a table
+;      lookup, no multiply and no divide anywhere. From the step count it
+;      reads the wall height, the texture v step and the light level out of
+;      three tables, and writes eight identical records (the ray is eight
+;      screen columns wide). Then it says "draw these 320".
+;
+;      Everything else is gpu64's problem, and deliberately so:
+;
+;        * clipping. A wall one cell away is 2560 pixels tall. The record
+;          says y0=-1200, y1=1359 and gpu64 clips it AND advances v across
+;          the rows it threw away, so the texture does not slide when you
+;          walk into a wall. Getting that right on the 6502 is the classic
+;          raycaster bug; here it is not your code.
+;        * lighting. SET_COLORMAP ($02) hands over 16 shades of the whole
+;          256-colour palette. A record then carries a light LEVEL, not a
+;          colour, and distance fog costs the 6502 one table lookup.
+;        * texture wrap, perspective v stepping, and the pixels.
+;
+;      TWO THINGS WORTH COPYING
+;
+;      The floor and ceiling batch is built ONCE, at start-up, and sent
+;      unchanged every frame -- 160 solid-colour spans, dark at the horizon
+;      and bright underfoot. Because it never changes, its checksum never
+;      changes either, so this one is sent with R2_BATCH_SUM set: gpu64
+;      verifies all 2560 bytes arrived and answers BAD_ARGS if they did
+;      not. The wall batch is rebuilt every frame and is not checksummed --
+;      summing 5120 bytes on a 6502 would cost more than the drawing. That
+;      is the trade, and RASTER_STATS ($03) is the other half of it: the
+;      ACC/REJ counters at the bottom of the C64 screen are read back from
+;      gpu64 every frame, and REJ is the number that would move if a batch
+;      ever arrived damaged.
+;
+;      Row 23 is the same information made readable. ACC/REJ on row 22 are
+;      one frame's snapshot and cannot be read off a screen that is
+;      changing sixty times a second; BAD, ERRS and LAST only ever go up,
+;      so they can be read off a photograph of a display that is
+;      misbehaving. All three staying at zero while the picture is wrong
+;      means the records arrived, were parsed and were drawn -- and the
+;      problem is somewhere after that.
+;
+;      Run it: LOAD"GPU64-RAYCAST",8,1 then RUN. RUN/STOP finishes.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+	.include "gpu64.inc"
+
+; ----------------------------------------------------------------------
+; Geometry.
+; ----------------------------------------------------------------------
+VIEW_H	 = 160			; the 3D view; the status bar owns the rest
+HORIZON	 = 80
+
+RAYS	 = 40			; rays across the view
+COLW	 = 8			; screen columns each ray fills
+NCOLS	 = RAYS * COLW		; 320 column records per frame
+NSPANS	 = VIEW_H		; one span record per row of the view
+
+STEPS	 = 80			; ray march limit, in quarter cells = 20 cells
+TEXW	 = 32
+TEXH	 = 32			; a power of two: gpu64 masks v with h-1
+TEXLEN	 = TEXW * TEXH
+
+TEX_BRICK = 1			; texture ids
+TEX_STONE = 2
+TEX_GUN	  = 3
+
+CMAP_LEVELS = 16
+
+; Where the two batches are built. Both are ours, in ordinary C64 RAM; the
+; blob descriptor tells gpu64 to come and fetch them.
+COLS	= $6000			; 320 * 16 = 5120 bytes
+SPANS	= $7600			; 160 * 16 + 2 = 2562 bytes
+
+; Zero page. $f7-$fe is the RS232 area every gpu64 program uses; $57-$5a is
+; BASIC's numeric work area, which is free while machine code is running
+; and is not touched by the two KERNAL calls this demo makes.
+posX	= $f7			; the marching ray, 8.8 map units
+posY	= $f9
+stepX	= $fb			; a quarter cell along the ray, 8.8
+stepY	= $fd
+colPtr	= $57			; the record being written
+fixPtr	= $59			; this ray's fisheye correction table
+
+	#basicStub
+
+; ======================================================================
+; Start-up
+; ======================================================================
+start
+	jsr dmInit
+
+	#argb 0, BLACK
+	#cmd OP_SET_BORDER
+	#argb 0, BLACK
+	#cmd OP_CLEAR
+
+	; --- the palette: 8 hues x 32 brightnesses ------------------------
+	; A colormap darkens by walking DOWN a hue's 32 shades, so the
+	; palette has to be laid out that way: index = hue * 32 + shade.
+	; PAL_LOAD's count is a byte, so 256 entries take two calls.
+	#argblob 0, SPACE_C64, palData, 128*3
+	#argb 6, 0
+	#argb 7, 128
+	#cmd OP_PAL_LOAD
+	#argblob 0, SPACE_C64, palData+128*3, 128*3
+	#argb 6, 128
+	#argb 7, 128
+	#cmd OP_PAL_LOAD
+
+	; --- class 2 from here on -----------------------------------------
+	lda #2
+	sta CMD_HI
+	#cmd R2_RESET
+
+	; The 3D view is the top 160 rows. Every class 2 primitive is
+	; clipped to it, so the status bar cannot be drawn over -- which is
+	; why the wall records below can say y0=-1200 and mean it.
+	#argw 0, 0
+	#argw 2, 0
+	#argw 4, FB_W
+	#argw 6, VIEW_H
+	#cmd R2_SET_VIEW
+
+	; --- the textures --------------------------------------------------
+	; Stored column-major, texel(u,v) at u*h+v, which is the order a
+	; wall column reads them in. flags bit0 would transpose a row-major
+	; source on the way in; ours is already the right way round.
+	#argblob 0, SPACE_C64, brickTex, TEXLEN
+	#argw 6, TEXW
+	#argw 8, TEXH
+	#argb 10, 0
+	lda #TEX_BRICK
+	sta ID_LO
+	lda #0
+	sta ID_HI
+	#cmd R2_UPLOAD_TEX
+
+	#argblob 0, SPACE_C64, stoneTex, TEXLEN
+	#argw 6, TEXW
+	#argw 8, TEXH
+	#argb 10, 0
+	lda #TEX_STONE
+	sta ID_LO
+	#cmd R2_UPLOAD_TEX
+
+	#argblob 0, SPACE_C64, gunTex, TEXLEN
+	#argw 6, TEXW
+	#argw 8, TEXH
+	#argb 10, 0
+	lda #TEX_GUN
+	sta ID_LO
+	#cmd R2_UPLOAD_TEX
+
+	; --- lighting -------------------------------------------------------
+	; 16 levels x 256 entries. Level 0 is the palette unchanged, level 15
+	; is black. After this a record carries a light level and gpu64 does
+	; the lookup per pixel.
+	#argblob 0, SPACE_C64, cmapData, CMAP_LEVELS*256
+	#argb 6, CMAP_LEVELS
+	#cmd R2_SET_COLORMAP
+
+	jsr buildSpans
+
+	lda #0
+	sta bob
+	sta frameLo
+
+; ======================================================================
+; The frame
+; ======================================================================
+frame
+	; 1. floor and ceiling -- 160 records, built once, checksummed.
+	#r2batch SPANS, NSPANS, R2_BATCH_SUM
+	#cmd2 R2_DRAW_SPANS
+
+	; 2. the walls -- 320 records, rebuilt every frame.
+	jsr castRays
+	#r2batch COLS, NCOLS
+	#cmd2 R2_DRAW_COLUMNS
+	; Latch the outcome now. ERRCODE is overwritten by the next dispatch,
+	; and by the time the status bar has been drawn there have been four
+	; more of them -- so a wall batch that failed would leave no trace at
+	; all on a screen that is only readable between failures.
+	lda ERRCODE
+	beq +
+	sta lastErr
+	inc errCnt
+	bne +
+	inc errCnt+1
++
+
+	; 3. what gpu64 made of that batch. Read back every frame: REJ is
+	;    the counter that moves if records ever arrive damaged.
+	#argblob 0, SPACE_C64, statBuf, 16
+	#cmd2 R2_STATS
+
+	; 4. the weapon: a 32x32 texture scaled to 96x96, index 0 keyed out.
+	;    It bobs with the walk. clipY0/clipY1 are the sprite's own clip
+	;    range on top of the view -- Doom uses them to hide a sprite
+	;    behind a wall; here they just keep the muzzle inside the view.
+	lda bob
+	lsr a
+	lsr a
+	and #$03
+	sta bobT
+	clc
+	adc #64
+	sta sprY
+	#argw 0, 112
+	lda sprY
+	sta ARG+2
+	lda #0
+	sta ARG+3
+	#argw 4, 96
+	#argw 6, 96
+	#argb 8, 1			; a touch darker than the near wall
+	#argb 9, 0			; key: palette index 0 is transparent
+	#argw 10, 0
+	#argw 12, VIEW_H-1
+	#argb 14, R2_SPR_MASKED
+	lda #TEX_GUN
+	sta ID_LO
+	lda #0
+	sta ID_HI
+	#cmd2 R2_DRAW_SPRITE
+
+	; 5. the status bar, in class 0 -- the two classes share the page.
+	jsr statusBar
+
+	jsr dmFlip
+	jsr dmVbWait
+	jsr report
+	jsr movePlayer
+
+	inc frameLo
+	jsr dmStop
+	beq frDone
+	jmp frame
+frDone
+	; Leave the last frame on the HDMI screen -- clearing it here would
+	; throw away the thing the demo was for.
+	lda #0
+	sta CMD_HI
+	jsr dmHold
+	rts
+
+; ======================================================================
+; The raycaster
+;
+; 40 rays. Each is marched a quarter cell at a time until the map cell it
+; is standing in is not empty, which takes at most STEPS tries. The step
+; count IS the distance, and three tables turn it into everything a wall
+; column record needs.
+; ======================================================================
+castRays
+	lda #<COLS
+	sta colPtr
+	lda #>COLS
+	sta colPtr+1
+	lda #<fixTab
+	sta fixPtr
+	lda #>fixTab
+	sta fixPtr+1
+
+	lda #0
+	sta rayIdx
+	sta recX
+	sta recX+1
+
+crRay
+	; --- this ray's direction ------------------------------------------
+	; angle = player angle + this ray's offset. The offsets are a fan
+	; across a 66 degree field of view.
+	ldx rayIdx
+	lda angOff,x
+	clc
+	adc plAng
+	tax
+	lda stepXLo,x
+	sta stepX
+	lda stepXHi,x
+	sta stepX+1
+	lda stepYLo,x
+	sta stepY
+	lda stepYHi,x
+	sta stepY+1
+
+	; --- march ----------------------------------------------------------
+	lda plX
+	sta posX
+	lda plX+1
+	sta posX+1
+	lda plY
+	sta posY
+	lda plY+1
+	sta posY+1
+
+	ldy #STEPS
+crStep
+	clc
+	lda posX
+	adc stepX
+	sta posX
+	lda posX+1
+	adc stepX+1
+	sta posX+1
+
+	clc
+	lda posY
+	adc stepY
+	sta posY
+	lda posY+1
+	adc stepY+1
+	sta posY+1
+
+	; cell = map[ (posY>>8) * 16 + (posX>>8) ]. The map's border is
+	; solid, so neither high byte can leave 0..15 before the ray stops.
+	lda posY+1
+	asl a
+	asl a
+	asl a
+	asl a
+	ora posX+1
+	tax
+	lda mapData,x
+	bne crHit
+	dey
+	bne crStep
+
+	; Ran out of range without meeting anything. Draw the far wall.
+	lda #TEX_STONE
+	sta recTex
+	lda #0
+	sta recU
+	sta recU+1
+	ldy #0
+	beq crDist
+
+crHit
+	sta recTex
+
+	; Which face did we cross? Whichever of the two fractions is nearest
+	; a cell boundary is the axis we just stepped over, so the OTHER one
+	; runs along the wall and is the texture coordinate.
+	lda posX
+	cmp #$80
+	bcc +
+	eor #$ff
++
+	sta faceDX
+	lda posY
+	cmp #$80
+	bcc +
+	eor #$ff
++
+	cmp faceDX
+	bcc crFaceY
+
+	; x is nearer a boundary: a north/south facing wall, textured by y.
+	lda posY
+	lsr a
+	lsr a
+	lsr a
+	sta recU
+	lda #0
+	sta recU+1
+	lda #1				; one shade darker, so corners read
+	sta faceLit
+	jmp crDist
+crFaceY
+	lda posX
+	lsr a
+	lsr a
+	lsr a
+	sta recU
+	lda #0
+	sta recU+1
+	sta faceLit
+
+crDist
+	; distance = STEPS - Y, then corrected for the fan: a ray at the
+	; edge of the view travels further to reach the same wall, and
+	; uncorrected that bows a flat wall outwards.
+	tya
+	eor #$ff
+	sec
+	adc #STEPS			; A = STEPS - Y
+	tay
+	lda (fixPtr),y
+	tay
+
+	; --- the record ------------------------------------------------------
+	lda heightLo,y
+	sta wallH
+	lda heightHi,y
+	sta wallH+1
+	lda dvLo,y
+	sta recTmpl+12
+	lda dvHi,y
+	sta recTmpl+13
+	lda lightTab,y
+	clc
+	adc faceLit
+	sta recTmpl+7
+
+	; y0 = HORIZON - wallH/2, y1 = y0 + wallH - 1. Both are signed and
+	; both are routinely off the screen; gpu64 clips them and advances v
+	; over the rows it dropped, which is the whole reason this is a
+	; 16-bit signed field and not a byte.
+	lda wallH+1
+	lsr a
+	sta tmp+1
+	lda wallH
+	ror a
+	sta tmp			; tmp = wallH / 2
+	sec
+	lda #HORIZON
+	sbc tmp
+	sta recTmpl+2
+	lda #0
+	sbc tmp+1
+	sta recTmpl+3
+	clc
+	lda recTmpl+2
+	adc wallH
+	sta recTmpl+4
+	lda recTmpl+3
+	adc wallH+1
+	sta recTmpl+5
+	sec
+	lda recTmpl+4
+	sbc #1
+	sta recTmpl+4
+	lda recTmpl+5
+	sbc #0
+	sta recTmpl+5
+
+	lda recTex
+	sta recTmpl+6
+	lda recU
+	sta recTmpl+8
+	lda recU+1
+	sta recTmpl+9
+	lda #0
+	sta recTmpl+10		; v starts at the top of the texture
+	sta recTmpl+11
+	sta recTmpl+14		; no flags: walls are opaque
+	sta recTmpl+15
+
+	; --- eight identical columns, one per screen column ------------------
+	ldx #COLW
+crCopy
+	lda recX
+	sta recTmpl+0
+	lda recX+1
+	sta recTmpl+1
+	ldy #15
+crByte
+	lda recTmpl,y
+	sta (colPtr),y
+	dey
+	bpl crByte
+	clc
+	lda colPtr
+	adc #R2_REC
+	sta colPtr
+	bcc +
+	inc colPtr+1
++
+	inc recX
+	bne +
+	inc recX+1
++
+	dex
+	bne crCopy
+
+	; next ray: the fisheye table advances by one row of STEPS+1 bytes
+	clc
+	lda fixPtr
+	adc #STEPS+1
+	sta fixPtr
+	bcc +
+	inc fixPtr+1
++
+	inc rayIdx
+	lda rayIdx
+	cmp #RAYS
+	bcs +
+	jmp crRay
++
+	rts
+
+; ======================================================================
+; The floor and ceiling batch, built once.
+;
+; One solid-colour span per row of the view. texid 0 means "no texture":
+; the palette index is the low byte of the record's u field, and the light
+; level still applies -- so this is a lit gradient for the price of a byte
+; per row. A real renderer would put a floor texture here and step u,v
+; across the row instead; the records are the same 16 bytes either way.
+; ======================================================================
+buildSpans
+	lda #<SPANS
+	sta colPtr
+	lda #>SPANS
+	sta colPtr+1
+	lda #0
+	sta spanY
+
+bsRow
+	ldy #0
+	lda spanY
+	sta (colPtr),y		; y, low
+	iny
+	lda #0
+	sta (colPtr),y		; y, high -- rows 0..159
+	iny
+	lda #0
+	sta (colPtr),y		; x0 = 0
+	iny
+	sta (colPtr),y
+	iny
+	lda #<(FB_W-1)
+	sta (colPtr),y		; x1 = 319
+	iny
+	lda #>(FB_W-1)
+	sta (colPtr),y
+	iny
+	lda #R2_SOLID
+	sta (colPtr),y		; texid 0 -- solid colour
+	iny
+
+	; distance from the horizon, as a light level: dark at the horizon,
+	; bright underfoot. Level 15 is black, level 0 is the palette itself.
+	lda spanY
+	sec
+	sbc #HORIZON
+	bcs +
+	eor #$ff
+	clc
+	adc #1
++
+	lsr a
+	lsr a
+	sta tmp
+	lda #15
+	sec
+	sbc tmp
+	bcs +
+	lda #0
++
+	sta (colPtr),y		; light
+	iny
+
+	lda spanY
+	cmp #HORIZON
+	bcs bsFloor
+	lda #6*32+31		; ceiling: the brightest steel blue
+	bne bsColour
+bsFloor
+	lda #4*32+31		; floor: the brightest sand
+bsColour
+	sta (colPtr),y		; u low = the palette index
+	iny
+	lda #0
+	sta (colPtr),y		; u high
+	iny
+	sta (colPtr),y		; v
+	iny
+	sta (colPtr),y
+	iny
+	sta (colPtr),y		; du
+	iny
+	sta (colPtr),y
+	iny
+	sta (colPtr),y		; dv
+	iny
+	sta (colPtr),y
+
+	clc
+	lda colPtr
+	adc #R2_REC
+	sta colPtr
+	bcc +
+	inc colPtr+1
++
+	inc spanY
+	lda spanY
+	cmp #NSPANS
+	bcc bsRow
+
+	; The checksum: a plain 16-bit sum of the record bytes, in the two
+	; bytes after them. This batch never changes, so this is computed
+	; once and R2_BATCH_SUM can then be free every frame.
+	lda #<SPANS
+	sta colPtr
+	lda #>SPANS
+	sta colPtr+1
+	lda #0
+	sta tmp
+	sta tmp+1
+	ldx #>(NSPANS*R2_REC)	; whole pages
+bsPage
+	ldy #0
+bsByte
+	clc
+	lda tmp
+	adc (colPtr),y
+	sta tmp
+	bcc +
+	inc tmp+1
++
+	iny
+	bne bsByte
+	inc colPtr+1
+	dex
+	bne bsPage
+
+	lda tmp
+	sta SPANS + NSPANS*R2_REC
+	lda tmp+1
+	sta SPANS + NSPANS*R2_REC + 1
+	rts
+
+; ======================================================================
+; Walking
+;
+; Look one cell ahead along the current heading; if it is solid, turn.
+; Otherwise step a sixteenth of a cell. No collision radius and no
+; sliding -- this is a demo of the drawing, not of the walking.
+; ======================================================================
+movePlayer
+	ldx plAng
+	lda stepXLo,x
+	sta stepX
+	lda stepXHi,x
+	sta stepX+1
+	lda stepYLo,x
+	sta stepY
+	lda stepYHi,x
+	sta stepY+1
+
+	; one cell ahead = four quarter-cell steps
+	lda stepX
+	sta tmp
+	lda stepX+1
+	sta tmp+1
+	asl tmp
+	rol tmp+1
+	asl tmp
+	rol tmp+1
+	clc
+	lda plX
+	adc tmp
+	lda plX+1
+	adc tmp+1
+	and #$0f
+	sta lookX
+
+	lda stepY
+	sta tmp
+	lda stepY+1
+	sta tmp+1
+	asl tmp
+	rol tmp+1
+	asl tmp
+	rol tmp+1
+	clc
+	lda plY
+	adc tmp
+	lda plY+1
+	adc tmp+1
+	and #$0f
+	asl a
+	asl a
+	asl a
+	asl a
+	ora lookX
+	tax
+	lda mapData,x
+	beq mpWalk
+
+	; blocked: turn, and do not move this frame
+	lda plAng
+	clc
+	adc #5
+	sta plAng
+	rts
+
+mpWalk
+	; a sixteenth of a cell: the quarter-cell step, arithmetically
+	; halved twice.
+	lda stepX+1
+	sta tmp+1
+	lda stepX
+	sta tmp
+	jsr asrTmp
+	jsr asrTmp
+	clc
+	lda plX
+	adc tmp
+	sta plX
+	lda plX+1
+	adc tmp+1
+	sta plX+1
+
+	lda stepY+1
+	sta tmp+1
+	lda stepY
+	sta tmp
+	jsr asrTmp
+	jsr asrTmp
+	clc
+	lda plY
+	adc tmp
+	sta plY
+	lda plY+1
+	adc tmp+1
+	sta plY+1
+
+	inc bob
+	rts
+
+; tmp = tmp >> 1, signed.
+asrTmp
+	lda tmp+1
+	cmp #$80
+	ror tmp+1
+	ror tmp
+	rts
+
+; ======================================================================
+; The status bar, in class 0 -- proof that the two classes share a page.
+; It sits below the class 2 view rectangle, so nothing class 2 draws can
+; reach it and it needs no clipping of its own.
+; ======================================================================
+statusBar
+	lda #0
+	sta CMD_HI
+
+	#argw 0, 0
+	#argw 2, VIEW_H
+	#argw 4, FB_W
+	#argw 6, FB_H-VIEW_H
+	#argb 8, 0*32+7			; near black
+	#cmd OP_RECT_FILL
+
+	#argw 0, 8
+	#argw 2, VIEW_H+8
+	#argw 4, 120
+	#argw 6, 10
+	#argb 8, 5*32+26		; a red bar
+	#cmd OP_RECT_FILL
+
+	#argw 0, 8
+	#argw 2, VIEW_H+22
+	#argw 4, 80
+	#argw 6, 10
+	#argb 8, 4*32+28		; and a sand one
+	#cmd OP_RECT_FILL
+
+	#argw 0, 200
+	#argw 2, VIEW_H+8
+	#argw 4, 112
+	#argw 6, 24
+	#argb 8, 7*32+20
+	#cmd OP_RECT_FILL
+
+	; Leave CMD_HI on class 0: the page flip and the vblank wait that
+	; follow are class 0 opcodes, and the #cmd2 macro puts the class
+	; back on its own next frame.
+	rts
+
+; ======================================================================
+; What gpu64 said about the last batch, on the C64's own screen.
+; ======================================================================
+report
+	lda #22
+	jsr dmRow
+	jsr dmText
+	.text "GPU64 RAYCAST  ACC "
+	.byte 0
+	lda statBuf+3
+	jsr dmHexA
+	lda statBuf+2
+	jsr dmHexA
+	jsr dmText
+	.text "  REJ "
+	.byte 0
+	lda statBuf+5
+	jsr dmHexA
+	lda statBuf+4
+	jsr dmHexA
+
+	; The sticky line. The two lines above are a snapshot of one frame and
+	; are unreadable on a display that is changing sixty times a second;
+	; these three numbers only ever go up, so they can be read off a photo
+	; of a screen that is misbehaving.
+	jsr countBad
+	lda #23
+	jsr dmRow
+	jsr dmText
+	.text "BAD "
+	.byte 0
+	lda badCnt+1
+	jsr dmHexA
+	lda badCnt
+	jsr dmHexA
+	; A and R are the accepted/rejected counts from the FIRST bad frame,
+	; latched by countBad. Row 22's copy is a live snapshot and is
+	; unreadable while the screen is misbehaving; this one holds still.
+	jsr dmText
+	.text " A "
+	.byte 0
+	lda badAcc+1
+	jsr dmHexA
+	lda badAcc
+	jsr dmHexA
+	jsr dmText
+	.text " R "
+	.byte 0
+	lda badRej+1
+	jsr dmHexA
+	lda badRej
+	jsr dmHexA
+	jsr dmText
+	.text " E "
+	.byte 0
+	lda errCnt+1
+	jsr dmHexA
+	lda errCnt
+	jsr dmHexA
+	jsr dmText
+	.text " L "
+	.byte 0
+	lda lastErr
+	jsr dmHexA
+
+	lda #24
+	jsr dmRow
+	jsr dmText
+	.text "RUN/STOP TO END   ERR "
+	.byte 0
+	jsr dmErr
+	rts
+
+; A frame in which gpu64 did not report back exactly the batch that was
+; sent. Counted rather than displayed, because the interesting quantity is
+; how often it happens, not what it was on the frame you happened to see.
+countBad
+	lda statBuf+2
+	cmp #<NCOLS
+	bne cbBad
+	lda statBuf+3
+	cmp #>NCOLS
+	bne cbBad
+	lda statBuf+4
+	ora statBuf+5
+	beq cbDone
+cbBad
+	; Latch the first one. What ACC and REJ were on a frame that went
+	; wrong is the whole question; after that they are just noise.
+	lda badCnt
+	ora badCnt+1
+	bne cbCount
+	lda statBuf+2
+	sta badAcc
+	lda statBuf+3
+	sta badAcc+1
+	lda statBuf+4
+	sta badRej
+	lda statBuf+5
+	sta badRej+1
+cbCount
+	inc badCnt
+	bne cbDone
+	inc badCnt+1
+cbDone
+	rts
+
+	.include "gpu64_rt.inc"
+
+; ======================================================================
+; Variables
+; ======================================================================
+plX	.word $0280		; the player, 8.8 map units
+plY	.word $0d80
+plAng	.byte 0		; 0..255 around the circle; 0 looks east
+
+rayIdx	.byte 0
+recX	.word 0
+recTex	.byte 0
+recU	.word 0
+faceDX	.byte 0
+faceLit	.byte 0
+wallH	.word 0
+tmp	.word 0
+spanY	.byte 0
+lookX	.byte 0
+bob	.byte 0
+bobT	.byte 0
+sprY	.byte 0
+frameLo	.byte 0
+badCnt	.word 0
+badAcc	.word 0
+badRej	.word 0
+errCnt	.word 0
+lastErr	.byte 0
+recTmpl	.fill 16, 0
+statBuf	.fill 16, 0
+
+; ======================================================================
+; Tables, all built by the assembler.
+; ======================================================================
+
+; --- the map ------------------------------------------------------------
+; 16x16 cells, 0 empty, otherwise the texture id of the wall. The border is
+; solid, which is what lets the marcher skip its bounds check.
+mapData
+	.byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+	.byte 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+	.byte 1,0,0,0,2,2,2,0,0,0,0,1,1,1,0,1
+	.byte 1,0,0,0,2,0,0,0,0,0,0,0,0,0,0,1
+	.byte 1,0,0,0,2,0,0,0,1,1,1,0,0,0,0,1
+	.byte 1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1
+	.byte 1,0,0,2,0,0,0,0,1,0,0,0,2,0,0,1
+	.byte 1,0,0,2,0,0,0,0,0,0,0,0,2,0,0,1
+	.byte 1,0,0,2,2,2,2,0,0,0,0,0,2,0,0,1
+	.byte 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+	.byte 1,0,0,0,0,1,1,1,1,1,1,0,0,0,0,1
+	.byte 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+	.byte 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1
+	.byte 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+	.byte 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+	.byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+
+; --- the ray fan --------------------------------------------------------
+; 66 degrees of field of view across RAYS rays, in units of 1/256 turn.
+angOff
+	.for i = 0, i < RAYS, i += 1
+	.byte round((i - (RAYS-1) / 2.0) * 66.0 / RAYS / 360.0 * 256.0) & 255
+	.next
+
+; --- a quarter cell along a heading, 8.8 --------------------------------
+stepXLo
+	.for a = 0, a < 256, a += 1
+	.byte round(64.0 * cos(a * 2 * 3.14159265358979 / 256)) & 255
+	.next
+stepXHi
+	.for a = 0, a < 256, a += 1
+	.byte (round(64.0 * cos(a * 2 * 3.14159265358979 / 256)) >> 8) & 255
+	.next
+stepYLo
+	.for a = 0, a < 256, a += 1
+	.byte round(64.0 * sin(a * 2 * 3.14159265358979 / 256)) & 255
+	.next
+stepYHi
+	.for a = 0, a < 256, a += 1
+	.byte (round(64.0 * sin(a * 2 * 3.14159265358979 / 256)) >> 8) & 255
+	.next
+
+; --- distance to wall height -------------------------------------------
+; A wall one cell away (4 quarter-cell steps) exactly fills the 160-row
+; view, so height = 2560 / steps. At one step that is 2560 pixels, which is
+; a perfectly legal record: gpu64 clips it.
+heightLo
+	.for n = 0, n <= STEPS, n += 1
+	.byte (n < 1 ? 2560 : 2560 / n) & 255
+	.next
+heightHi
+	.for n = 0, n <= STEPS, n += 1
+	.byte ((n < 1 ? 2560 : 2560 / n) >> 8) & 255
+	.next
+
+; --- and to the texture v step, 8.8 ------------------------------------
+; dv = TEXH * 256 / height, which cancels down to 3.2 per step.
+dvLo
+	.for n = 0, n <= STEPS, n += 1
+	.byte round(n * 3.2) & 255
+	.next
+dvHi
+	.for n = 0, n <= STEPS, n += 1
+	.byte (round(n * 3.2) >> 8) & 255
+	.next
+
+; --- and to a light level ----------------------------------------------
+lightTab
+	.for n = 0, n <= STEPS, n += 1
+	.byte (n / 5) > 14 ? 14 : (n / 5)
+	.next
+
+; --- fisheye correction -------------------------------------------------
+; Ray i is cast at an angle off the heading, so the distance it travelled
+; is longer than the distance straight ahead by 1/cos of that angle. One
+; row of STEPS+1 bytes per ray turns the step count into the corrected one
+; the height tables want. A multiply the 6502 does not have to do.
+fixTab
+	.for i = 0, i < RAYS, i += 1
+	  .for n = 0, n <= STEPS, n += 1
+	  .byte round(n * cos((i - (RAYS-1) / 2.0) * 66.0 / RAYS * 3.14159265358979 / 180.0)) < 1 ? 1 : round(n * cos((i - (RAYS-1) / 2.0) * 66.0 / RAYS * 3.14159265358979 / 180.0))
+	  .next
+	.next
+
+; --- the palette: 8 hues x 32 brightnesses ------------------------------
+palHues = [[144,144,144],[184,88,56],[72,80,120],[56,128,56],[192,168,80],[168,56,56],[96,112,168],[216,208,184]]
+palData
+	.for h = 0, h < 8, h += 1
+	  .for s = 0, s < 32, s += 1
+	  .byte round(palHues[h][0] * s / 31.0), round(palHues[h][1] * s / 31.0), round(palHues[h][2] * s / 31.0)
+	  .next
+	.next
+
+; --- the colormap: 16 levels, each two shades darker than the last ------
+cmapData
+	.for l = 0, l < CMAP_LEVELS, l += 1
+	  .for c = 0, c < 256, c += 1
+	  .byte (c & $e0) | ((c & 31) - 2 * l < 0 ? 0 : (c & 31) - 2 * l)
+	  .next
+	.next
+
+; --- the textures, column-major: texel(u,v) at u * TEXH + v -------------
+; Brick, in hue 1: mortar every eight rows and every sixteen columns, with
+; the courses offset on alternate rows.
+brickTex
+	.for u = 0, u < TEXW, u += 1
+	  .for v = 0, v < TEXH, v += 1
+	  .byte ((v % 8) == 0) || (((u + ((v / 8) % 2) * 8) % 16) < 2) ? 0*32+20 : 1*32+18+((u*5+v*3) % 6)
+	  .next
+	.next
+
+; Cut stone, in hue 2: bigger blocks, deeper joints.
+stoneTex
+	.for u = 0, u < TEXW, u += 1
+	  .for v = 0, v < TEXH, v += 1
+	  .byte ((v % 16) < 1) || ((u % 16) < 1) ? 0*32+10 : 2*32+18+((u*7+v*11) % 8)
+	  .next
+	.next
+
+; The weapon. Index 0 is the key, so everything outside the shape is
+; transparent and DRAW_SPRITE leaves those pixels alone.
+gunTex
+	.for u = 0, u < TEXW, u += 1
+	  .for v = 0, v < TEXH, v += 1
+	  .byte (u >= 13 && u < 19 && v >= 2 && v < 11) ? 0*32+30-(u < 16 ? 16-u : u-16) : ((u >= 9 && u < 23 && v >= 11) ? 7*32+30-(u < 16 ? 16-u : u-16) : 0)
+	  .next
+	.next

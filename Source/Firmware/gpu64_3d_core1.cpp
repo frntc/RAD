@@ -1,6 +1,7 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 6 -- the ring buffer both cores talk through, and core 1's
- drain loop. See gpu64_3d.h and project/milestone6_3d_design.md.
+ drain loop. See gpu64_3d.h and dev/milestone6_3d_design.md.
 
  Through Stage 14, what core 1 did was count: every class 1 opcode ran
  synchronously on core 0, inside the dispatch window where the C64 is already
@@ -8,7 +9,7 @@
  traffic so the timing question milestone 6a opened stayed measurable while
  the pipeline was built.
 
- Stage 15a (project/gap_filling_plan.md) gave execute() below a real job for
+ Stage 15a (dev/gap_filling_plan.md) gave execute() below a real job for
  three opcodes: CLEAR_VIEWPORT, DRAW_MESH and DRAW_NODE run for real on core
  1, via gpu64_3dExecuteRender() (gpu64_3d_class1.cpp, which still owns all
  the session state this needs and cannot export). 15a stalled the whole

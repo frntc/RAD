@@ -1,3 +1,31 @@
+gpu64 licensing
+=======================================================================
+
+gpu64 is a fork of the RAD Expansion Unit by Carsten Dachsbacher (frntc),
+https://github.com/frntc/RAD. Three licences apply, by file:
+
+1. gpu64 software -- every file carrying "Copyright (c) 2026 Honza
+   Slesinger" (the gpu64_* sources under Source/Firmware, sdk/, examples/,
+   games/, tests/, tools/, docs/): GNU GPL version 3 or (at your option)
+   any later version. The full GPL-3.0 text is below.
+
+2. RAD software -- files carrying Carsten Dachsbacher's header, including
+   the modifications gpu64 makes to them: GNU GPL version 3, as published
+   by the author (see his statement below). Modifications to those files
+   are Copyright (c) 2026 Honza Slesinger and offered under the same terms,
+   so that they can be contributed back upstream.
+
+3. RAD hardware design (Gerber/, Images/ of the board) -- Creative Commons
+   Attribution-NonCommercial-ShareAlike 4.0 International. Commercial use is
+   forbidden. This applies to the hardware only, not to the software.
+
+Third-party material is not included: no Commodore ROMs, no game data, no
+music. The Quake examples need your own copy of the game data.
+
+The text below is RAD's original licence file, unchanged.
+
+=======================================================================
+
 *** The RAD-hardware (PCB, design) is work licensed under the 
 Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License 
 (commercial use forbidden). ***

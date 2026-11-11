@@ -1,0 +1,203 @@
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 -- milestone 4 test PRG: drives the 2D command API.
+;
+;      Draws with SET_BORDER / CLEAR / RECT_FILL / LINE / BLIT, then calls
+;      GET_INFO, which
+;      makes gpu64 DMA-*write* 16 bytes back into C64 RAM at $C000 -- the
+;      first time gpu64 pushes data back to the C64 rather than reading it.
+;      The result is shown on the C64's own screen (not the HDMI one) so a
+;      hardware tester can check it without reading the HDMI log:
+;
+;        $0400  ERRCODE after the drawing commands   (0 = OK)
+;        $0402..$0404  the "G64" magic GET_INFO wrote to $C000
+;        $0406  ERRCODE after GET_INFO                (0 = OK)
+;
+;      The three magic characters appearing on screen mean write-direction DMA
+;      worked end to end. Screen codes: values are ANDed with $3f, which maps
+;      ASCII uppercase to the C64's screen codes and leaves digits alone.
+;
+;      REU emulation must be selected in RAD's menu (T key -> REU), same as
+;      milestone 3's mirror -- everything gpu64 does lives inside
+;      reuUsingPolling().
+;
+;      Assemble with 64tass (no --nostart: the .prg needs its 2-byte load
+;      address header, see dev/progress_tracker.md milestone 2) --
+;      64tass gpu64_api_demo.a -o gpu64_api_demo.prg
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+CMD_HI   = $df50
+CMD_LO   = $df51
+STATUS   = $df52
+ERRCODE  = $df53
+ARG      = $df56		; ARG0..ARG15 = $df56..$df65
+
+SCREEN   = $0400
+INFOBUF  = $c000
+
+	* = $0801
+
+	; minimal "10 SYS 2061" BASIC stub so RUN launches the code below
+	.word next_line
+	.word 10
+	.byte $9e			; SYS token
+	.text "2061"
+	.byte 0
+next_line
+	.word 0
+
+	* = $080d			; = 2061
+
+start
+	sei
+
+	lda #0
+	sta CMD_HI			; class 0 (sticky; this is the only time we set it)
+
+	; --- SET_BORDER light blue -----------------------------------------
+	lda #14
+	sta ARG+0
+	lda #$08			; SET_BORDER
+	sta CMD_LO
+
+	; --- CLEAR to blue -------------------------------------------------
+	lda #6
+	sta ARG+0
+	lda #$10			; CLEAR
+	sta CMD_LO
+
+	; --- RECT_FILL 100,50 80x40 white ----------------------------------
+	lda #<100
+	sta ARG+0
+	lda #>100
+	sta ARG+1
+	lda #<50
+	sta ARG+2
+	lda #>50
+	sta ARG+3
+	lda #<80
+	sta ARG+4
+	lda #>80
+	sta ARG+5
+	lda #<40
+	sta ARG+6
+	lda #>40
+	sta ARG+7
+	lda #1				; white
+	sta ARG+8
+	lda #$23			; RECT_FILL
+	sta CMD_LO
+
+	; --- LINE 0,0 -> 319,199 yellow ------------------------------------
+	lda #0
+	sta ARG+0
+	sta ARG+1
+	sta ARG+2
+	sta ARG+3
+	lda #<319
+	sta ARG+4
+	lda #>319
+	sta ARG+5
+	lda #<199
+	sta ARG+6
+	lda #>199
+	sta ARG+7
+	lda #7				; yellow
+	sta ARG+8
+	lda #$21			; LINE
+	sta CMD_LO
+
+	; --- BLIT the 8x8 pattern below to 10,10 ---------------------------
+	lda #0
+	sta ARG+0			; space = C64 RAM
+	lda #<sprite
+	sta ARG+1
+	lda #>sprite
+	sta ARG+2
+	lda #0
+	sta ARG+3			; addr = sprite (24-bit, high byte 0)
+	lda #64
+	sta ARG+4
+	lda #0
+	sta ARG+5			; len = 8*8
+	lda #10
+	sta ARG+6
+	lda #0
+	sta ARG+7			; dstX = 10
+	lda #10
+	sta ARG+8
+	lda #0
+	sta ARG+9			; dstY = 10
+	lda #8
+	sta ARG+10
+	lda #0
+	sta ARG+11			; w = 8
+	lda #8
+	sta ARG+12
+	lda #0
+	sta ARG+13			; h = 8
+	lda #$40			; BLIT
+	sta CMD_LO
+
+	; --- report ERRCODE so far -----------------------------------------
+	lda ERRCODE
+	and #$3f
+	sta SCREEN+0
+
+	; --- GET_INFO -> $c000 (gpu64 writes into C64 RAM) -----------------
+	lda #0
+	sta ARG+0			; space = C64 RAM
+	lda #<INFOBUF
+	sta ARG+1
+	lda #>INFOBUF
+	sta ARG+2
+	lda #0
+	sta ARG+3			; addr = $00c000
+	lda #16
+	sta ARG+4
+	lda #0
+	sta ARG+5			; len = 16
+	lda #$06			; GET_INFO
+	sta CMD_LO
+
+	; the magic bytes gpu64 wrote, straight onto the C64's own screen
+	ldx #0
+copyMagic
+	lda INFOBUF,x
+	and #$3f
+	sta SCREEN+2,x
+	inx
+	cpx #3
+	bne copyMagic
+
+	lda ERRCODE
+	and #$3f
+	sta SCREEN+6
+
+	cli
+	rts
+
+; 8x8 palette-index pattern: a red frame around a light-green centre
+sprite
+	.byte 2,2,2,2,2,2,2,2
+	.byte 2,13,13,13,13,13,13,2
+	.byte 2,13,13,13,13,13,13,2
+	.byte 2,13,13,13,13,13,13,2
+	.byte 2,13,13,13,13,13,13,2
+	.byte 2,13,13,13,13,13,13,2
+	.byte 2,13,13,13,13,13,13,2
+	.byte 2,2,2,2,2,2,2,2

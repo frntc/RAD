@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """check_exit.py - milestone 20 stage F: the counter, the exit, the flash.
 
 gpu64_game_exit.inc adds four things a picture of a corridor cannot show:

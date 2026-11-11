@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 //
 // gpu64_sniff.h - IO2 bus sniffer for bringing gpu64 up on a new machine
 //

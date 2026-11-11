@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 6 -- class 1 internals: the core-0-to-core-1 ring buffer,
  the resource arena's bump allocator, and the store-burst yield.
@@ -166,7 +167,7 @@ void gpu64_3dExecuteRenderScene( Gpu64_3dCmd *pCmd );
 
 // --- the resource arena -------------------------------------------------
 //
-// A bump allocator over one static block, per project/milestone6_3d_design.md's
+// A bump allocator over one static block, per dev/milestone6_3d_design.md's
 // Resource lifecycle: explicit free only, no automatic eviction, and the
 // whole thing is reclaimed on resetREU(). Phase 0 only brings it up; phase 1
 // is what actually allocates out of it.

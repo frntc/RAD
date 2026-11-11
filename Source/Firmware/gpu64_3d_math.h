@@ -1,7 +1,8 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 6 -- fixed-point maths for the 3D pipeline.
 
- Wire formats are the ones project/milestone6_3d_design.md settled on and this
+ Wire formats are the ones dev/milestone6_3d_design.md settled on and this
  file does not restate the reasoning:
 
 	angles		u16 binary, 65536 = one turn

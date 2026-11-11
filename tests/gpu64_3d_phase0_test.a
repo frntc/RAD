@@ -1,0 +1,1441 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 -- milestone 6 phase 0 bench: the class 1 command path.
+;
+;      WHAT THIS TESTS
+;
+;      Phase 0 of the 3D subsystem builds the plumbing and nothing else: a
+;      ring buffer from core 0 to core 1, a worker loop that drains it, and
+;      the class 1 branch of the dispatcher. No triangle is drawn and none
+;      can be -- the render loop is phase 4 and the rasteriser is phase 3.
+;
+;      So this PRG does not test rendering. It tests the two claims phase 0
+;      actually makes:
+;
+;        1. Class 1 commands reach core 1 and are answered correctly --
+;           accepted when implemented, BAD_OPCODE when not, BAD_CLASS for a
+;           class that does not exist, QUEUE_FULL when the ring is full.
+;        2. Bringing core 1 up and driving it does not disturb core 0.
+;
+;      HOW TO READ THE RESULT -- and the one row that matters
+;
+;      Milestone 6a closed with a caveat that applies to every bench from
+;      here on (dev/progress_tracker.md, "Milestone 6a: the answer"):
+;
+;        "A clean metric is necessary, not sufficient. Any future render
+;         loop needs a real REU round-trip running underneath it as the
+;         positive control, and the C64 staying alive is the only ground
+;         truth there is."
+;
+;      Every fatal ladder rung scored a perfect L=0/0 right up to the moment
+;      the C64 died, because the instrument sampled loop period at a
+;      resynchronisation point and a mid-pass stall corrupts the bus while
+;      the period still reads healthy. That is why this PRG has no timing
+;      metric at all. It runs a verified REU round trip every frame, and the
+;      pass condition is:
+;
+;        row 6 reads 0000, and the machine is still running when it ends.
+;
+;      Rows 1-3 confirm the command path works. Row 6 confirms the command
+;      path did not cost anything. A run with rows 1-3 perfect and row 6
+;      non-zero is a FAILED run -- core 1 is disturbing core 0 -- and is far
+;      more interesting than a clean one.
+;
+;      A run that drops back to the RAD menu partway is also a failure, and
+;      rows 4-6 are updated live every 16 frames so it still tells you how
+;      far it got.
+;
+;      SCREEN LAYOUT (the C64's own screen, not the HDMI one)
+;
+;      The screen is cleared and every field is labelled, because the first
+;      run of this PRG drew four bare hex digits at fixed offsets over the
+;      BASIC startup screen and the one row that mattered could not be told
+;      apart from the leftovers around it. A result you have to count screen
+;      lines to read is a result you can misread.
+;
+;        GPU64 3D PHASE 0
+;
+;        MAGIC   G64 ERR 0      expect G64 and 0
+;        ACCEPT  0000           expect 0000
+;        REJECT  0102           expect 0102
+;        QFULL   nnnn           any value is legal, see the flood test
+;        PASS    08  OF  08    expect 08 -- 8 x 45000 = 2 hours
+;        FRAMES  AFC8           expect AFC8 (per pass)
+;        REU OK  AFC8           expect AFC8 (per pass)
+;        REU ERR 0000  <== THE GROUND TRUTH
+;        BAD FR  0000 AT 0000   frames that saw a mismatch, and the first
+;        WORST   0000           most mismatches inside any one frame
+;        FINAL   00             expect 00
+;
+;        VERDICT PASS           or FAIL
+;
+;      VERDICT is computed on the C64 from every field above except QFULL
+;      (whose every value is legal). It is the whole result: PASS means each
+;      field matched, so there is nothing left to read off a photograph.
+;      FAIL means read the fields to see which one moved.
+;
+;      FRAMES / REU OK / REU ERR still update live every 16 frames, so a run
+;      that dies partway still says how far it got -- in that case VERDICT
+;      stays blank, which is itself the signal that the run never finished.
+;
+;      REU emulation must be selected in RAD's menu (T key -> REU), same as
+;      every other gpu64 test PRG -- without it reuUsingPolling() never runs
+;      and no cartridge register access is serviced at all.
+;
+;      Requires a firmware built with GPU64_3D_ENABLED (Source/Firmware/
+;      gpu64_3d.h). Against a firmware without it, row 1 reads 0202 --
+;      BAD_CLASS twice -- which is the correct answer for that build and is
+;      how you tell the two apart.
+;
+;      Assemble with 64tass (no --nostart: the .prg needs its 2-byte load
+;      address header, see dev/progress_tracker.md milestone 2) --
+;      64tass gpu64_3d_phase0_test.a -o gpu64_3d_phase0_test.prg
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+CMD_HI   = $df50
+CMD_LO   = $df51
+STATUS   = $df52
+ERRCODE  = $df53
+ID       = $df54		; ID_LO/ID_HI = $df54/$df55
+ARG      = $df56		; ARG0..ARG15 = $df56..$df65
+RESULT   = $df66		; class 1 only
+
+; class 0
+OP_GET_INFO    = $06
+OP_LOG_ENABLE  = $07
+
+; class 1 (dev/milestone6_3d_design.md)
+OP_SCENE_RESET = $00
+OP_LOOP_STOP   = $07
+OP_DRAW_MESH   = $41		; deliberately NOT implemented in phase 0
+
+ERR_OK          = $00
+ERR_BAD_OPCODE  = $01
+ERR_BAD_CLASS   = $02
+ERR_QUEUE_FULL  = $09
+
+; REU registers (RAD's emulation, $df00-$df0a)
+REU_STATUS  = $df00
+REU_COMMAND = $df01
+REU_C64LO   = $df02
+REU_C64HI   = $df03
+REU_REULO   = $df04
+REU_REUHI   = $df05
+REU_BANK    = $df06
+REU_LENLO   = $df07
+REU_LENHI   = $df08
+REU_CTRL    = $df0a
+
+; execute + FF00-decode disabled + direction
+REU_TO_REU = $90
+REU_TO_C64 = $91
+
+VIC_CTRL1 = $d011		; bit 7 = raster line bit 8
+VIC_RASTER = $d012
+
+SCREEN   = $0400
+INFOBUF  = $c000
+SRCBUF   = $c200
+DSTBUF   = $c300
+
+; Landing zones for the discrimination test. A whole lost transfer looks the
+; same whichever setup register write was the one that got dropped -- the
+; destination is untouched either way -- so before each real setup every
+; register is first planted with a *distinguishable wrong value*. If one of
+; the real writes is then dropped, the transfer still runs, but it runs
+; somewhere we can name:
+;
+;   C64LO dropped   -> lands at WIT1
+;   C64HI dropped   -> lands at WIT2
+;   REU addr dropped-> reads REU offset $0100, which holds $aa, not the pattern
+;   LENLO dropped   -> transfers 4 bytes, i.e. CNT $000c at IX $04 (self-evident)
+;   COMMAND dropped -> nothing is written anywhere at all
+;
+; A landing always begins at the first byte of its region, so poisoning and
+; checking one byte per region is enough and costs almost nothing.
+WIT1     = $c380
+AABUF    = $c3f0		; the $aa block, copied into REU $0100 at start-up
+WIT2     = $c400
+
+; Transfer length, and round trips per frame.
+;
+; The bench used to do one 256-byte round trip per frame and then idle for
+; the rest of the frame. The transfer itself is DMA and costs almost nothing;
+; what filled the frame was the 256-iteration compare loop, about 5ms of a
+; 20ms frame. So 97% of every frame bought no exposure at all, and at roughly
+; one dropped transfer per 25000 transfers a useful run took two hours.
+;
+; If the defect is a mis-sampled register write, its rate is per *transfer*,
+; not per second. Shrinking the transfer to 16 bytes makes a round trip cheap
+; enough to do a batch of them per frame, for the same test at many times the
+; events per minute. If the rate per transfer does NOT come out near 1 in
+; 25000, that is a real result too: it would mean the drop is not per-command.
+;
+; TRIPS was sized in VICE. The loop stays at one iteration per frame all the
+; way to 24 trips and only starts overrunning at 32, so 24 is the ceiling and
+; 16 leaves room -- on hardware the per-frame gpu64 command halts the C64 for
+; a while, which VICE does not model. Overrunning is not fatal (framec stays
+; truthful, the run just takes longer in wall clock) but it makes the run
+; length unpredictable, which is the one thing bench time cannot afford.
+;
+; The fingerprint survives the change. SRCBUF[x] = x EOR $5a, so for x = 0..15
+; the source bytes are $5a..$55 and none of them is $ff. DSTBUF is poisoned to
+; $ff, so a transfer that never happens mismatches in all XLEN places:
+;   count $10 at index $00  -> whole transfer lost
+;   count $10-N at index N  -> truncated after N bytes
+;   count $01 at index N    -> one corrupted byte
+XLEN  = 16
+TRIPS = 16
+
+; Run length. This started at 1500 frames (~30s), then 15000 (~5min). The
+; 15000-frame runs put the real rate at roughly one dropped REU transfer per
+; 15000 frames, which is the awkward regime: a run scores 0, 1 or 2 and no
+; single run separates "core 1 is at fault" from "it isn't". The exposure
+; has to grow, and growing it per run rather than per bench trip is what
+; matters here -- every extra run costs a card swap, a reboot and a photo,
+; while extra frames cost only time. 45000 frames is 15 minutes and about
+; three expected events, so two runs a side is enough to draw a line from.
+;
+; With TRIPS round trips per frame that arithmetic collapses: 15000 frames is
+; 5 minutes and 240000 transfers, about 10 expected events, and the two-pass
+; run below is 30000 frames and roughly 19 -- enough to fill the 20-entry log
+; in ten minutes instead of two hours.
+FRAMES_HI = $3a			; 15000 frames = $3a98, ~5 minutes at 50Hz
+FRAMES_LO = $98
+
+; Passes. framec is 16 bit and one pass is already 45000 frames, so a run
+; longer than about 22 minutes needs an outer loop rather than a wider
+; counter -- and an outer loop is the smaller change to a program that is
+; currently working. 2 x 15000 = 30000 frames = 10 minutes at 50Hz, and the
+; second pass is margin: if the rate turns out not to be per-transfer after
+; all, 30000 frames is still exposure comparable to the old 45000-frame runs,
+; so the run cannot come back with nothing to say.
+; The error counters (errc, badfr, worst) accumulate across all passes; only
+; framec and reuc reset, and each pass verifies that reuc reached FRAMES
+; before the next one starts, so a pass that ends short cannot hide.
+PASSES = 2
+
+; Per-event log. The two-hour run gave 14 events summing to 3062 mismatches,
+; which is not 14 x 255 -- so at least one event was NOT a whole transfer
+; vanishing, and a sum plus a maximum cannot say which or how many. This logs
+; each event instead of accumulating it: pass, frame, mismatch count, and the
+; index of the first mismatching byte.
+;
+; That last number is the one that separates the two failure modes. DSTBUF is
+; poisoned to $ff, so a transfer truncated at byte N leaves a contiguous bad
+; tail: first index N and a count of about 256-N. A single corrupted byte
+; gives a count of 1 at an arbitrary index. Same total, completely different
+; cause, and one number apart.
+;
+; 20 entries in two columns of 10 covers a two-hour run with room to spare at
+; the observed rate.
+LOGN = 20
+
+FLOOD_HI = $01			; 300 = $012c commands, more than the 256-entry ring
+FLOOD_LO = $2c
+
+; --- screen plumbing ---------------------------------------------------
+; $fb-$fe are the free zero page bytes on a stock C64; BASIC and the KERNAL
+; do not use them, and this PRG runs with interrupts off anyway.
+SCRPTR   = $fb			; -> start of the row being written
+STRPTR   = $fd			; -> the label string being printed
+COLOR    = $d800
+COL_TEXT = $01			; white -- the fields have to be legible on a
+COL_MARK = $07			; photo, and yellow marks the row that matters
+
+; Screen rows the fields live on. Values print at column 8, which is clear
+; of every label.
+ROW_TITLE  = 0
+ROW_PASS   = 1			; live progress through the outer loop
+ROW_MAGIC  = 2
+ROW_ACCEPT = 3
+ROW_REJECT = 4
+ROW_QFULL  = 5
+ROW_FRAMES = 6
+ROW_REUOK  = 7
+ROW_REUERR = 8
+ROW_BADFR  = 9			; frames that saw at least one mismatch
+ROW_WORST  = 10			; most mismatches inside a single frame
+ROW_FINAL  = 11
+ROW_PROBE  = 12			; the REU's own registers, read back at a failure
+ROW_VERDICT = 13
+ROW_LOGHDR = 14
+LOG_ROW0   = 15			; entries 0-9 here, 10-19 on the same rows
+LOG_COL2   = 20			; ...but starting at this column
+COL_VAL    = 8
+
+	* = $0801
+
+	; minimal "10 SYS 2061" BASIC stub so RUN launches the code below
+	.word next_line
+	.word 10
+	.byte $9e			; SYS token
+	.text "2061"
+	.byte 0
+next_line
+	.word 0
+
+	* = $080d			; = 2061
+
+start
+	sei
+
+	jsr initScreen
+
+	; --- the REU test pattern ------------------------------------------
+	; SRCBUF gets a pattern that is not constant and not the low byte of
+	; its own address either, so a transfer that lands one byte off, or
+	; leaves the destination untouched, both show up as mismatches.
+	ldx #0
+fillLoop
+	txa
+	eor #$5a
+	sta SRCBUF,x
+	lda #$ff
+	sta DSTBUF,x
+	inx
+	bne fillLoop
+
+	; A second, distinguishable block at REU offset $0100. If the real
+	; setup's REU-address write is the one that gets dropped, the transfer
+	; still runs but reads from the stale address planted in reuRoundTrip,
+	; and the destination fills with $aa. That is not the same thing as a
+	; transfer that never happened, and until now the log could not tell
+	; the two apart.
+	ldx #XLEN-1
+aaFill
+	lda #$aa
+	sta AABUF,x
+	dex
+	bpl aaFill
+
+	lda #<AABUF
+	sta REU_C64LO
+	lda #>AABUF
+	sta REU_C64HI
+	lda #0
+	sta REU_REULO
+	lda #1
+	sta REU_REUHI
+	lda #0
+	sta REU_BANK
+	sta REU_CTRL
+	lda #XLEN
+	sta REU_LENLO
+	lda #0
+	sta REU_LENHI
+	lda #REU_TO_REU
+	sta REU_COMMAND
+
+	; Baseline. The failure snapshot on row 12 is only readable against
+	; what the same five registers look like after a transfer that worked,
+	; and this is the first one the program ever does.
+	jsr probeRegs
+	ldx #4
+pgGood
+	lda pnow,x
+	sta pgood,x
+	dex
+	bpl pgGood
+
+	lda #0
+	sta framec
+	sta framec+1
+	sta reuc
+	sta reuc+1
+	sta errc
+	sta errc+1
+	sta qfull
+	sta qfull+1
+	sta badfr
+	sta badfr+1
+	sta firstfr
+	sta firstfr+1
+	sta firstps
+	sta passc
+	sta worst
+	sta worst+1
+
+; ===================== test 1: class 0 still works ====================
+; The regression check, and it comes first on purpose. GPU64_3D_ENABLED
+; brings CMultiCoreSupport::Initialize() up in every build, which the
+; milestone 4 releases did not do -- if that alone broke class 0, nothing
+; below is worth reading.
+	lda #0
+	sta CMD_HI			; class 0
+
+	lda #0
+	sta ARG+0			; space = C64 RAM
+	lda #<INFOBUF
+	sta ARG+1
+	lda #>INFOBUF
+	sta ARG+2
+	lda #0
+	sta ARG+3			; addr = $00c000
+	lda #16
+	sta ARG+4
+	lda #0
+	sta ARG+5			; len = 16
+	lda #OP_GET_INFO
+	sta CMD_LO
+
+	lda #ROW_MAGIC
+	jsr setrow
+
+	ldx #0
+copyMagic
+	lda INFOBUF,x
+	and #$3f
+	ldy scrcol,x			; COL_VAL, +1, +2
+	sta (SCRPTR),y
+	inx
+	cpx #3
+	bne copyMagic
+
+	; Kept for the verdict: the raw PETSCII, not the screen code, so the
+	; comparison below is against the bytes GET_INFO actually returned.
+	lda INFOBUF+0
+	sta v_magic+0
+	lda INFOBUF+1
+	sta v_magic+1
+	lda INFOBUF+2
+	sta v_magic+2
+
+	lda ERRCODE
+	sta v_info
+	and #$3f
+	ldy #COL_VAL+8
+	sta (SCRPTR),y
+
+; ===================== test 2: class 1 accepts ========================
+; The two opcodes phase 0 implements. Both should answer OK. CMD_HI is
+; sticky, so this one write puts us in class 1 for everything that follows
+; -- the REU registers below are a separate window and are unaffected.
+	lda #1
+	sta CMD_HI
+
+	lda #0
+	sta ID
+	sta ID+1
+
+	lda #ROW_ACCEPT
+	jsr setrow
+	ldy #COL_VAL
+
+	; Both of these are destructive opcodes and carry the one-shot key in
+	; ARG15 -- gpu64_api.h. Staged separately for each, because the
+	; firmware spends ARG15 on every dispatch: the key the SCENE_RESET
+	; used is already gone by the time LOOP_STOP is written.
+	lda #$a5
+	sta ARG+15
+	lda #OP_SCENE_RESET
+	sta CMD_LO
+	lda ERRCODE
+	sta v_acc1
+	jsr prhex			; first pair -- expect 00
+
+	lda #$a5
+	sta ARG+15
+	lda #OP_LOOP_STOP
+	sta CMD_LO
+	lda ERRCODE
+	sta v_acc2
+	jsr prhex			; second pair -- expect 00
+
+; ===================== test 3: class 1 rejects ========================
+; An opcode from the frozen table that phase 0 has no handler for. It must
+; come back BAD_OPCODE and not be silently swallowed: a class that accepts
+; what it cannot do gives the C64 side no signal and sends the next person
+; debugging the wrong layer.
+	lda #ROW_REJECT
+	jsr setrow
+	ldy #COL_VAL
+
+	lda #OP_DRAW_MESH
+	sta CMD_LO
+	lda ERRCODE
+	sta v_rej1
+	jsr prhex			; first pair -- expect 01
+
+; A class that does not exist at all, to prove the dispatcher's class check
+; still runs ahead of the opcode check.
+	lda #2
+	sta CMD_HI
+	lda #OP_SCENE_RESET
+	sta CMD_LO
+	lda ERRCODE
+	sta v_rej2
+	jsr prhex			; second pair -- expect 02
+
+; ===================== test 4: flood the ring =========================
+; 300 commands back to back with no pacing, against a 256-entry ring. What
+; this proves is NOT that QUEUE_FULL happens -- it is that core 0 answers
+; immediately either way. The design's rule is that a full ring is rejected
+; rather than waited on, because core 0's cycle-predictability outranks any
+; one command's completion; a build that blocked here would hang the C64
+; instead of returning $09, and that is the failure this catches.
+;
+; Any count in row 3 is legal. 0000 means core 1 drained faster than the
+; 6502 could fill -- which at ~30 cycles a command is entirely plausible
+; and is the good outcome. A non-zero count means the ring filled and the
+; rejection path works. Both are passes; a hang is not.
+	lda #1
+	sta CMD_HI
+
+	lda #0
+	sta floodn
+	sta floodn+1
+
+floodLoop
+	; Re-staged every iteration: the key is one-shot and the previous
+	; dispatch spent it -- gpu64_api.h. Two instructions, inside the loop
+	; this test is timing, and that is the honest shape of the command.
+	lda #$a5
+	sta ARG+15
+	lda #OP_LOOP_STOP
+	sta CMD_LO
+
+	lda ERRCODE
+	cmp #ERR_QUEUE_FULL
+	bne floodNext
+	inc qfull
+	bne floodNext
+	inc qfull+1
+floodNext
+
+	inc floodn
+	bne floodNoCarry
+	inc floodn+1
+floodNoCarry
+
+	lda floodn+1
+	cmp #FLOOD_HI
+	bne floodLoop
+	lda floodn
+	cmp #FLOOD_LO
+	bne floodLoop
+
+	lda #ROW_QFULL
+	jsr setrow
+	ldy #COL_VAL
+	lda qfull+1
+	jsr prhex
+	lda qfull
+	jsr prhex
+
+; ===================== the run ========================================
+; One verified REU round trip per frame, plus one class 1 command, paced
+; off the raster. This is the actual experiment: everything above runs once
+; and proves the path exists, and this runs 1500 times and proves driving
+; it costs core 0 nothing.
+;
+; The class 1 command in here is deliberate, and it is the one thing the
+; milestone 6a ladder could not do. That workload had to stop touching
+; cartridge registers inside its loop, because a mis-sampled IO2 write
+; derails the run and a bad rung is exactly what causes one -- the
+; instrument would have destroyed the run that found the first real result.
+; Phase 0 is not that experiment: core 1 writes four counters and nothing
+; else, so there is no fatal traffic to trip over, and a command per frame
+; is precisely the traffic we need to characterise.
+passLoop
+	; Only the per-pass counters reset. errc, badfr, worst and firstfr/firstps
+	; are cumulative -- they are the result of the whole run.
+	lda #0
+	sta framec
+	sta framec+1
+	sta reuc
+	sta reuc+1
+
+mainLoop
+	jsr waitFrame
+
+	; TRIPS round trips back to back, then one frame's accounting. reuc
+	; still counts frames, not trips, so the end-of-pass and verdict checks
+	; that compare it against FRAMES are unchanged.
+	lda #TRIPS
+	sta tripn
+tripLoop
+	jsr reuRoundTrip
+	dec tripn
+	bne tripLoop
+
+	inc reuc
+	bne noCarry2
+	inc reuc+1
+noCarry2
+
+	lda #$a5
+	sta ARG+15
+	lda #OP_LOOP_STOP
+	sta CMD_LO
+
+	inc framec
+	bne noCarry1
+	inc framec+1
+noCarry1
+
+	; Live progress, every 16 frames. Cheap, and it is what turns a run
+	; that dies partway into a data point instead of a shrug.
+	lda framec
+	and #$0f
+	bne noReport
+	jsr report
+noReport
+
+	lda framec+1
+	cmp #FRAMES_HI
+	bne mainLoop
+	lda framec
+	cmp #FRAMES_LO
+	bne mainLoop
+
+	; End of pass. reuc must have tracked framec exactly; if it did not, a
+	; round trip was skipped rather than merely wrong, and that is a failure
+	; the byte compare would never see.
+	lda reuc+1
+	cmp #FRAMES_HI
+	bne passShort
+	lda reuc
+	cmp #FRAMES_LO
+	beq passOk
+passShort
+	jsr markFail
+passOk
+
+	inc passc
+	jsr report
+
+	lda passc
+	cmp #PASSES
+	bne passLoop
+
+done
+	lda ERRCODE
+	sta v_final
+
+	lda #ROW_FINAL
+	jsr setrow
+	ldy #COL_VAL
+	lda v_final
+	jsr prhex
+
+	jsr verdict
+
+	; Put gpu64's log overlay back on -- LOG_ENABLE(1) is what makes the
+	; firmware print its own counters. It is a class 0 opcode, so CMD_HI
+	; has to go back first.
+	lda #0
+	sta CMD_HI
+	lda #1
+	sta ARG+0
+	lda #OP_LOG_ENABLE
+	sta CMD_LO
+
+	; Stop here rather than returning to BASIC. The log now fills rows 15-24,
+	; so there is nowhere left to park the cursor: "READY." would either land
+	; on an entry or, printed on the last row, scroll the whole report up by
+	; one. Interrupts stay off and the screen stays exactly as written, which
+	; is what a two-hour run's result needs to survive being photographed.
+	; Reset or power-cycle to get the machine back.
+halt
+	jmp halt
+
+; --- wait for one VIC frame -------------------------------------------
+; Line 250 happens exactly once per frame and is comfortably clear of the
+; badline region. VIC_CTRL1 bit 7 is raster bit 8, so it has to be low for
+; VIC_RASTER to mean what it says.
+waitFrame
+	lda VIC_CTRL1
+	bmi waitFrame
+	lda VIC_RASTER
+	cmp #250
+	bne waitFrame
+wfLeave
+	lda VIC_RASTER
+	cmp #250
+	beq wfLeave
+	rts
+
+; --- 256 bytes C64 -> REU -> C64, then compare ------------------------
+; Both halves set every register every time: a transfer auto-advances the
+; address registers, and reusing them would test a different thing each
+; frame.
+;
+; This is the positive control the milestone 6a caveat asks for. It is not
+; a timing measurement and must not be turned into one -- round 7 of the
+; ladder learned that an REU transfer is a DMA hold, the longest
+; uninterruptible thing core 0 ever does, so any instrument that samples
+; around it charges DMA re-entry to whatever else was running. What is
+; being read here is only whether the bytes came back intact.
+reuRoundTrip
+	lda #<SRCBUF
+	sta REU_C64LO
+	lda #>SRCBUF
+	sta REU_C64HI
+	lda #0
+	sta REU_REULO
+	sta REU_REUHI
+	sta REU_BANK
+	sta REU_CTRL			; increment both addresses
+	lda #XLEN
+	sta REU_LENLO
+	lda #0
+	sta REU_LENHI			; length = XLEN
+	lda #REU_TO_REU
+	sta REU_COMMAND
+
+	; Plant the stale values -- the C64-side address only.
+	;
+	; The first version of this planted all nine registers the real setup is
+	; about to write, and it broke the machine: 5747 failing transfers in
+	; 13008 frames, a 2.8% failure rate against the 1-in-35000 measured an
+	; hour earlier, with an abrupt onset at frame 98 that never recovered.
+	; The same build ran 512 frames under VICE's reference REU with zero
+	; errors, so the test's logic is sound and what the plant found is a
+	; property of RAD's emulation under IO2 write pressure -- nine extra
+	; register writes per round trip was enough to trigger it.
+	;
+	; That is worth chasing on its own, but not while it is also destroying
+	; the measurement it was added to make. Two writes carry the whole
+	; command-versus-address question, so only those two are planted now:
+	;
+	;   C64LO dropped -> lands at WIT1
+	;   C64HI dropped -> lands at WIT2
+	;   neither, and nothing anywhere -> the COMMAND write was the one lost
+	;
+	; What is given up is the REU-address case (bit 2, the $aa block), which
+	; needed REULO/REUHI/BANK planted to detect. AABUF and the $0100 seed
+	; stay put so re-arming it is a three-line change.
+	lda #<WIT1
+	sta REU_C64LO
+	lda #>WIT2
+	sta REU_C64HI
+
+	lda #$ff
+	sta WIT1
+	sta WIT2
+
+	lda #<DSTBUF
+	sta REU_C64LO
+	lda #>DSTBUF
+	sta REU_C64HI
+	lda #0
+	sta REU_REULO
+	sta REU_REUHI
+	sta REU_BANK
+	sta REU_CTRL
+	lda #XLEN
+	sta REU_LENLO
+	lda #0
+	sta REU_LENHI
+	lda #REU_TO_C64
+	sta REU_COMMAND
+
+	; Where did it land? One byte says which of the five cases this was,
+	; and it has to be read before the compare loop re-poisons DSTBUF.
+	lda #0
+	sta fmwit
+	lda WIT1
+	cmp #$ff
+	beq wNo1
+	lda #$01			; C64LO write lost
+	sta fmwit
+wNo1
+	lda WIT2
+	cmp #$ff
+	beq wNo2
+	lda fmwit
+	ora #$02			; C64HI write lost
+	sta fmwit
+wNo2
+	lda DSTBUF
+	cmp #$aa
+	bne wNoAA
+	lda fmwit
+	ora #$04			; REU-address write lost
+	sta fmwit
+wNoAA
+	lda DSTBUF
+	cmp #$ff
+	bne wNoFF
+	lda fmwit
+	ora #$08			; nothing reached DSTBUF at all
+	sta fmwit
+wNoFF
+
+	; Per-transfer accounting as well as the running total. fmerr resets
+	; here, so one "event" is one round trip, not one frame -- XLEN
+	; mismatches in a single trip and XLEN trips with one each are
+	; completely different failures, the first a transfer that never
+	; happened and the second corruption, and the running total alone
+	; cannot tell them apart.
+	lda #0
+	sta fmerr
+	sta fmerr+1
+
+	ldx #0
+cmpLoop
+	lda SRCBUF,x
+	cmp DSTBUF,x
+	beq cmpNext
+	; First mismatch of this frame? fmerr is still zero if so, and X is the
+	; byte index. Only the mismatch path pays for this.
+	lda fmerr
+	ora fmerr+1
+	bne cmpErr1
+	stx fmfirst
+cmpErr1
+	inc errc
+	bne cmpErr2
+	inc errc+1
+cmpErr2
+	inc fmerr
+	bne cmpNext
+	inc fmerr+1
+cmpNext
+	; Poison the destination again, so a transfer that silently does
+	; nothing next frame cannot pass on the bytes this one left behind.
+	lda #$ff
+	sta DSTBUF,x
+	inx
+	cpx #XLEN
+	bne cmpLoop
+
+	; Did this frame see anything at all?
+	lda fmerr
+	ora fmerr+1
+	bne rtBad
+	rts				; the log push below put rtClean out of
+rtBad					; branch range, so take the early exit here
+	; PROBE. This test has written REU registers ten thousand times and
+	; never once read one back, which is why a run that fails 100% of its
+	; transfers still cannot say whether the Pi is alive. Five reads answer
+	; that, and they only ever run on the failure path:
+	;
+	;   all $ff        -> the Pi is not answering IO2 at all; the polling
+	;                     loop is gone, and nothing about the REU matters
+	;   LEN still $10  -> the Pi is alive and holding what we wrote, but the
+	;                     transfer never executed
+	;   LEN 0          -> the transfer DID execute; it went somewhere else
+	;   ID = "g"       -> the gpu64 side still answers even if REU does not,
+	;                     which localises the fault to the REU path
+	;
+	; Reading $df00 clears its VERIFY/END-OF-BLOCK/IRQ bits as a side
+	; effect -- that is the real REU's behaviour and the emulation copies
+	; it, so the value is a snapshot, not a running total.
+	jsr probeRegs
+	lda pgot
+	bne pgHave
+	inc pgot
+	ldx #4
+pgCopy
+	lda pnow,x
+	sta pfirst,x
+	dex
+	bpl pgCopy
+pgHave
+
+	inc badfr
+	bne rtLog
+	inc badfr+1
+
+rtLog
+	; Log the event itself, while everything about it is still in hand. X is
+	; free here -- the compare loop finished with it.
+	ldx lognum
+	cpx #LOGN
+	bcs rtFirst			; log full; the totals still count it
+	lda passc
+	sta logps,x
+	lda framec
+	sta logfrlo,x
+	lda framec+1
+	sta logfrhi,x
+	lda fmerr
+	sta logcnlo,x
+	lda fmerr+1
+	sta logcnhi,x
+	lda fmfirst
+	sta logix,x
+	lda fmwit
+	sta logwit,x
+	inc lognum
+	lda #1
+	sta logdirty			; report() redraws; drawing here would be per-event
+				; work inside the frame for no reason
+
+rtFirst
+	; Frame number of the first bad frame. framec is still the count of
+	; *completed* frames here -- mainLoop increments it after this call --
+	; so this is a 0-based index of the frame that failed.
+	lda firstfr
+	ora firstfr+1
+	bne rtWorst
+	lda framec
+	sta firstfr
+	lda framec+1
+	sta firstfr+1
+	; framec restarts every pass, so the frame number alone does not locate
+	; the event in a two-hour run. Keep the pass it happened in with it.
+	lda passc
+	sta firstps
+	; A first bad frame of 0 is indistinguishable from "none" in the test
+	; above, so bias by one and print it back out the same way.
+	inc firstfr
+	bne rtWorst
+	inc firstfr+1
+
+rtWorst
+	; Keep the worst single frame. 16-bit compare, high byte first.
+	lda fmerr+1
+	cmp worst+1
+	bcc rtClean
+	bne rtNewWorst
+	lda fmerr
+	cmp worst
+	bcc rtClean
+	beq rtClean
+rtNewWorst
+	lda fmerr
+	sta worst
+	lda fmerr+1
+	sta worst+1
+
+rtClean
+	rts
+
+; --- rows 4, 5, 6: frames / REU round trips / verify errors -----------
+report
+	lda #ROW_PASS
+	jsr setrow
+	ldy #COL_VAL
+	lda passc
+	jsr prhex
+
+	lda #ROW_FRAMES
+	jsr setrow
+	ldy #COL_VAL
+	lda framec+1
+	jsr prhex
+	lda framec
+	jsr prhex
+
+	lda #ROW_REUOK
+	jsr setrow
+	ldy #COL_VAL
+	lda reuc+1
+	jsr prhex
+	lda reuc
+	jsr prhex
+
+	lda #ROW_REUERR
+	jsr setrow
+	ldy #COL_VAL
+	lda errc+1
+	jsr prhex
+	lda errc
+	jsr prhex
+
+	lda #ROW_BADFR
+	jsr setrow
+	ldy #COL_VAL
+	lda badfr+1
+	jsr prhex
+	lda badfr
+	jsr prhex
+	ldy #COL_VAL+8			; past the "AT" caption in the label
+	lda firstps			; pass, then frame within it
+	jsr prhex
+	lda firstfr+1
+	jsr prhex
+	lda firstfr
+	jsr prhex
+
+	lda #ROW_WORST
+	jsr setrow
+	ldy #COL_VAL
+	lda worst+1
+	jsr prhex
+	lda worst
+	jsr prhex
+
+	jsr drawProbe
+
+	lda logdirty
+	beq rpDone
+	lda #0
+	sta logdirty
+	jsr drawLog
+rpDone
+	rts
+
+; --- the per-event log ------------------------------------------------
+; Entries 0-9 go down rows LOG_ROW0.. at column 0, entries 10-19 down the
+; same rows at column LOG_COL2. Redrawn whole rather than appended to,
+; because it happens about fifteen times in two hours and correctness is
+; worth more than the cycles.
+probeRegs
+	lda REU_STATUS
+	sta pnow+0
+	lda REU_LENLO
+	sta pnow+1
+	lda REU_C64LO
+	sta pnow+2
+	lda REU_C64HI
+	sta pnow+3
+	lda ID
+	sta pnow+4
+	rts
+
+; Row 12: the first failure's snapshot, then the most recent one, so a
+; state that keeps changing can be told from one that latched.
+drawProbe
+	lda #ROW_PROBE
+	jsr setrow
+	ldy #0
+	ldx #0
+dpGood
+	lda pgood,x
+	jsr prhex
+	inx
+	cpx #5
+	bne dpGood
+	iny
+	ldx #0
+dpFirst
+	lda pfirst,x
+	jsr prhex			; prhex and nibble both leave X alone
+	inx
+	cpx #5
+	bne dpFirst
+	iny
+	ldx #0
+dpNow
+	lda pnow,x
+	jsr prhex
+	inx
+	cpx #5
+	bne dpNow
+	rts
+
+drawLog
+	ldx #0
+dlLoop
+	cpx lognum
+	bcs dlDone
+	stx logi
+
+	txa
+	ldy #0				; left column
+	cmp #10
+	bcc dlRow
+	sbc #10				; carry is set here: A >= 10
+	ldy #LOG_COL2
+dlRow
+	sty logcol
+	clc
+	adc #LOG_ROW0
+	jsr setrow			; eats X
+
+	ldx logi
+	ldy logcol
+	lda logps,x
+	jsr prhex
+	iny
+	lda logfrhi,x
+	jsr prhex
+	lda logfrlo,x
+	jsr prhex
+	iny
+	lda logcnhi,x
+	jsr prhex
+	lda logcnlo,x
+	jsr prhex
+	iny
+	lda logix,x
+	jsr prhex
+	iny
+	lda logwit,x
+	jsr prhex
+
+	inx
+	bne dlLoop
+dlDone
+	rts
+
+; --- print A as two hex digits at (SCRPTR),y; y advances by 2 ---------
+; Y indexes the column, not X, because the fields now live past screen byte
+; 255 and an 8-bit absolute index cannot reach them.
+prhex
+	pha
+	lsr
+	lsr
+	lsr
+	lsr
+	jsr nibble
+	sta (SCRPTR),y
+	iny
+	pla
+	and #$0f
+	jsr nibble
+	sta (SCRPTR),y
+	iny
+	rts
+
+; nibble in A -> C64 screen code. '0'-'9' are $30-$39, 'A'-'F' are $01-$06.
+nibble
+	cmp #10
+	bcs nibLetter
+	ora #$30
+	rts
+nibLetter
+	sec
+	sbc #9
+	rts
+
+; --- point SCRPTR at the start of row A -------------------------------
+setrow
+	tax
+	lda rowlo,x
+	sta SCRPTR
+	lda rowhi,x
+	sta SCRPTR+1
+	rts
+
+; --- print the null-terminated screen-code string at STRPTR -----------
+; Labels always start at column 0, so the string index doubles as the
+; column and one Y serves for both.
+prstr
+	ldy #0
+prsLoop
+	lda (STRPTR),y
+	beq prsDone
+	sta (SCRPTR),y
+	iny
+	bne prsLoop
+prsDone
+	rts
+
+; --- A = row, X/Y = string lo/hi -> print label -----------------------
+; setrow clobbers X (it indexes the row table with it), so the string
+; pointer has to be stashed before the call, not after.
+prlabel
+	stx STRPTR
+	sty STRPTR+1
+	jsr setrow
+	jmp prstr
+
+; --- clear the screen, colour it, and lay the labels down -------------
+; Colour RAM matters: the C64 writes screen codes and colour separately,
+; and a field written over a cell whose colour was never set is invisible.
+; The whole point of this pass is that nothing on this screen is ambiguous.
+initScreen
+	; Pin the character set. The label strings assemble as PETSCII ($47 for
+	; "G", not screen code $07 -- .enc "screen" is a no-op in this 64tass),
+	; and those codes only render as letters in the *lowercase* character
+	; set, where $41-$5A are the capitals. On hardware RAD happens to leave
+	; $d018 there, which is why this has always looked right on the bench and
+	; like garbage in VICE, which boots the uppercase/graphics set. Setting it
+	; explicitly costs two bytes and makes the two agree.
+	lda #$17
+	sta $d018
+
+	lda #$20			; screen code for space
+	ldx #0
+clrLoop
+	sta SCREEN+0,x
+	sta SCREEN+250,x
+	sta SCREEN+500,x
+	sta SCREEN+750,x
+	inx
+	cpx #250
+	bne clrLoop
+
+	lda #COL_TEXT
+	ldx #0
+colLoop
+	sta COLOR+0,x
+	sta COLOR+250,x
+	sta COLOR+500,x
+	sta COLOR+750,x
+	inx
+	cpx #250
+	bne colLoop
+
+	; The ground-truth row in a different colour, so the eye lands on it.
+	ldx #0
+markLoop
+	lda #COL_MARK
+	sta COLOR+ROW_REUERR*40,x
+	inx
+	cpx #40
+	bne markLoop
+
+	lda #ROW_TITLE
+	ldx #<sTitle
+	ldy #>sTitle
+	jsr prlabel
+	lda #ROW_PASS
+	ldx #<sPasses
+	ldy #>sPasses
+	jsr prlabel
+	ldy #COL_VAL+8			; past the "OF" caption; SCRPTR is still ROW_PASS
+	lda #PASSES
+	jsr prhex
+	lda #ROW_MAGIC
+	ldx #<sMagic
+	ldy #>sMagic
+	jsr prlabel
+	lda #ROW_ACCEPT
+	ldx #<sAccept
+	ldy #>sAccept
+	jsr prlabel
+	lda #ROW_REJECT
+	ldx #<sReject
+	ldy #>sReject
+	jsr prlabel
+	lda #ROW_QFULL
+	ldx #<sQfull
+	ldy #>sQfull
+	jsr prlabel
+	lda #ROW_FRAMES
+	ldx #<sFrames
+	ldy #>sFrames
+	jsr prlabel
+	lda #ROW_REUOK
+	ldx #<sReuOk
+	ldy #>sReuOk
+	jsr prlabel
+	lda #ROW_REUERR
+	ldx #<sReuErr
+	ldy #>sReuErr
+	jsr prlabel
+	lda #ROW_BADFR
+	ldx #<sBadfr
+	ldy #>sBadfr
+	jsr prlabel
+	lda #ROW_WORST
+	ldx #<sWorst
+	ldy #>sWorst
+	jsr prlabel
+	lda #ROW_FINAL
+	ldx #<sFinal
+	ldy #>sFinal
+	jsr prlabel
+	lda #ROW_VERDICT
+	ldx #<sVerdict
+	ldy #>sVerdict
+	jsr prlabel
+	lda #ROW_LOGHDR
+	ldx #<sLogHdr
+	ldy #>sLogHdr
+	jmp prlabel
+
+; --- the verdict ------------------------------------------------------
+; Every field except QFULL, checked on the C64 so the answer does not
+; depend on anyone reading hex off a screen. QFULL is excluded because both
+; of its outcomes are passes -- see the flood test above.
+verdict
+	lda #0
+	sta failf
+
+	ldx #0
+vMagicLoop
+	lda v_magic,x
+	cmp magicRef,x
+	beq vMagicNext
+	jsr markFail
+vMagicNext
+	inx
+	cpx #3
+	bne vMagicLoop
+
+	lda v_info			; GET_INFO errcode
+	jsr failIfNZ
+	lda v_acc1			; SCENE_RESET accepted
+	jsr failIfNZ
+	lda v_acc2			; LOOP_STOP accepted
+	jsr failIfNZ
+
+	lda v_rej1			; DRAW_MESH -> BAD_OPCODE
+	cmp #ERR_BAD_OPCODE
+	beq vRej2
+	jsr markFail
+vRej2
+	lda v_rej2			; class 2 -> BAD_CLASS
+	cmp #ERR_BAD_CLASS
+	beq vFrames
+	jsr markFail
+
+vFrames
+	lda framec			; all 1500 frames
+	cmp #FRAMES_LO
+	bne vFramesBad
+	lda framec+1
+	cmp #FRAMES_HI
+	beq vReu
+vFramesBad
+	jsr markFail
+
+vReu
+	lda reuc			; all 1500 REU round trips
+	cmp #FRAMES_LO
+	bne vReuBad
+	lda reuc+1
+	cmp #FRAMES_HI
+	beq vErrc
+vReuBad
+	jsr markFail
+
+vErrc
+	lda errc			; THE ground truth: zero verify errors
+	jsr failIfNZ
+	lda errc+1
+	jsr failIfNZ
+
+	lda passc			; every pass ran to the end
+	cmp #PASSES
+	beq vFinal
+	jsr markFail
+vFinal
+	lda v_final			; nothing left an error behind
+	jsr failIfNZ
+
+	lda #ROW_VERDICT
+	jsr setrow
+	ldy #COL_VAL
+	ldx #0
+vPrint
+	lda failf
+	beq vPass
+	lda sFail,x
+	bne vPut
+	rts
+vPass
+	lda sPass,x
+	beq vDone
+vPut
+	sta (SCRPTR),y
+	iny
+	inx
+	bne vPrint
+vDone
+	rts
+
+failIfNZ
+	beq fzOut
+	jsr markFail
+fzOut
+	rts
+
+markFail
+	pha
+	lda #$ff
+	sta failf
+	pla
+	rts
+
+	.enc "screen"
+sTitle	.text "GPU64 3D PHASE 0"
+	.byte 0
+; Both column headings in one string -- prlabel starts at column 0, and 35
+; characters is still one screen line.
+sLogHdr	.text "PS FRME CNT  IX W   PS FRME CNT  IX W"
+	.byte 0
+sPasses	.text "PASS         OF"
+	.byte 0
+sMagic	.text "MAGIC       ERR"
+	.byte 0
+sAccept	.text "ACCEPT"
+	.byte 0
+sReject	.text "REJECT"
+	.byte 0
+sQfull	.text "QFULL"
+	.byte 0
+sFrames	.text "FRAMES"
+	.byte 0
+sReuOk	.text "REU OK"
+	.byte 0
+sReuErr	.text "REU ERR"
+	.byte 0
+sBadfr	.text "BAD FR       AT"
+	.byte 0
+sWorst	.text "WORST"
+	.byte 0
+sFinal	.text "FINAL"
+	.byte 0
+sVerdict .text "VERDICT"
+	.byte 0
+sPass	.text "PASS"
+	.byte 0
+sFail	.text "FAIL"
+	.byte 0
+	.enc "none"
+
+; "G64" as GET_INFO returns it -- PETSCII, not screen codes.
+magicRef .byte $47, $36, $34
+
+; The three magic columns, so copyMagic can index them with X.
+scrcol	.byte COL_VAL, COL_VAL+1, COL_VAL+2
+
+; Screen row -> address. All 25 rows: the log occupies rows 15-24, and a
+; table that stopped at 15 meant setrow() read past its own end and handed
+; back a pointer into rowhi -- writes then landed in program memory instead
+; of on the screen. Generated rather than typed out so it cannot go stale.
+rowlo	.byte <(SCREEN+0*40), <(SCREEN+1*40), <(SCREEN+2*40), <(SCREEN+3*40), <(SCREEN+4*40), <(SCREEN+5*40), <(SCREEN+6*40), <(SCREEN+7*40), <(SCREEN+8*40), <(SCREEN+9*40), <(SCREEN+10*40), <(SCREEN+11*40), <(SCREEN+12*40), <(SCREEN+13*40), <(SCREEN+14*40), <(SCREEN+15*40), <(SCREEN+16*40), <(SCREEN+17*40), <(SCREEN+18*40), <(SCREEN+19*40), <(SCREEN+20*40), <(SCREEN+21*40), <(SCREEN+22*40), <(SCREEN+23*40), <(SCREEN+24*40)
+rowhi	.byte >(SCREEN+0*40), >(SCREEN+1*40), >(SCREEN+2*40), >(SCREEN+3*40), >(SCREEN+4*40), >(SCREEN+5*40), >(SCREEN+6*40), >(SCREEN+7*40), >(SCREEN+8*40), >(SCREEN+9*40), >(SCREEN+10*40), >(SCREEN+11*40), >(SCREEN+12*40), >(SCREEN+13*40), >(SCREEN+14*40), >(SCREEN+15*40), >(SCREEN+16*40), >(SCREEN+17*40), >(SCREEN+18*40), >(SCREEN+19*40), >(SCREEN+20*40), >(SCREEN+21*40), >(SCREEN+22*40), >(SCREEN+23*40), >(SCREEN+24*40)
+
+framec	.word 0
+reuc	.word 0
+errc	.word 0
+qfull	.word 0
+floodn	.word 0
+fmerr	.word 0			; mismatches inside the frame being compared
+badfr	.word 0			; frames with at least one mismatch
+firstfr	.word 0			; first bad frame, biased by 1; 0 means none
+firstps	.byte 0			; pass the first bad frame fell in
+passc	.byte 0			; completed passes
+tripn	.byte 0			; round trips left in this frame
+pgot	.byte 0			; pfirst has been captured
+pgood	.fill 5, 0		; after the first transfer, which is known to work
+pfirst	.fill 5, 0
+pnow	.fill 5, 0
+fmwit	.byte 0			; which registers this transfer actually used
+fmfirst	.byte 0			; index of this frame's first mismatching byte
+lognum	.byte 0			; entries used in the log
+logdirty .byte 0		; a new entry is waiting to be drawn
+logi	.byte 0			; drawLog's saved index (setrow eats X)
+logcol	.byte 0			; drawLog's saved column
+; Parallel arrays, one byte per entry, because that is what a 6502 indexes
+; cheaply -- a struct of 6 would need a multiply.
+logps	.fill LOGN, 0
+logfrlo	.fill LOGN, 0
+logfrhi	.fill LOGN, 0
+logcnlo	.fill LOGN, 0
+logcnhi	.fill LOGN, 0
+logix	.fill LOGN, 0
+logwit	.fill LOGN, 0
+worst	.word 0			; most mismatches in any single frame
+failf	.byte 0
+v_magic	.byte 0, 0, 0
+v_info	.byte 0
+v_acc1	.byte 0
+v_acc2	.byte 0
+v_rej1	.byte 0
+v_rej2	.byte 0
+v_final	.byte 0

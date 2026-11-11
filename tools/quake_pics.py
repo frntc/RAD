@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 quake_pics.py - the level file's picture section (format v7).
 
@@ -28,7 +29,7 @@ DOTS = 6                                    # gfx/menudot1..6, 16x24
 WAD_PICS = ['NUM_%d' % i for i in range(10)] + ['NUM_COLON', 'NUM_SLASH']
 SKILLS = ['EASY', 'NORMAL', 'HARD', 'NIGHTMARE']
 
-# The controls menu (quake/gpu64_game_controls.inc), laid out as
+# The controls menu (games/quake/gpu64_game_controls.inc), laid out as
 # Quake's M_Keys_Draw: the actions in its bindnames wording, and a name for
 # every key of the C64's matrix, indexed column * 8 + row. The game carries
 # the same names for its own screen; keep the two lists in step.

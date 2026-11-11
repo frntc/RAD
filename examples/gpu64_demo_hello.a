@@ -1,0 +1,176 @@
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 demo 1 of 7 -- HELLO: the first thing to run.
+;
+;      Nothing here is animated and nothing is double-buffered. It paints
+;      one picture on the HDMI screen with the six commands you will use
+;      most, and prints one line on the C64's own screen saying how it went.
+;      If this works, gpu64 is wired up, the RAD menu is in REU mode, and
+;      the rest of the demos will run.
+;
+;      What it draws, and what each part is there to show:
+;
+;        SET_BORDER   the frame around the drawing surface -- 32 px at the
+;                     sides, 36 top and bottom. It belongs to the display,
+;                     not to a page, so a page flip never changes it.
+;        CLEAR        the whole 320x200 draw page in one command.
+;        RECT_FILL    a solid panel.
+;        RECT         a one-pixel outline, drawn just outside the panel.
+;        LINE         both endpoints inclusive.
+;        SET_PIXEL    one pixel, the smallest thing the API does.
+;
+;      Every coordinate is signed 16 bit and every drawing op CLIPS, so the
+;      cross of lines running off all four edges is not an error and does
+;      not set one. The last two lines deliberately run off the page to
+;      show that.
+;
+;      Colours are palette indices, and at reset entries 0-15 hold the C64's
+;      own colours in the C64's own numbering -- so #BLUE here means what it
+;      means in a POKE 53280.
+;
+;      Run it: LOAD"GPU64-HELLO",8,1 then RUN. Press RUN/STOP to finish.
+;
+;      REU emulation must be selected in RAD's menu (press T until it reads
+;      REU) or none of gpu64 runs at all.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+	.include "gpu64.inc"
+
+	#basicStub
+
+start
+	jsr dmInit			; clear the C64 screen, class 0, read info
+
+	; --- the border ----------------------------------------------------
+	; One palette index, painted around the drawing surface on both pages.
+	; It is comparatively expensive for that reason: set it when it
+	; changes, not once per frame.
+	#argb 0, DKGREY
+	#cmd OP_SET_BORDER
+
+	; --- the page ------------------------------------------------------
+	; CLEAR fills all 64000 bytes of the draw page. Both pages are the
+	; visible one at reset, so this lands straight on the screen.
+	#argb 0, BLUE
+	#cmd OP_CLEAR
+
+	; --- a filled panel ------------------------------------------------
+	; x, y is the top-left corner; w and h include the outline.
+	#argw 0, 60			; x
+	#argw 2, 40			; y
+	#argw 4, 200			; w
+	#argw 6, 120			; h
+	#argb 8, LTBLUE			; colour
+	#cmd OP_RECT_FILL
+
+	; --- a one-pixel outline just outside it ---------------------------
+	#argw 0, 58
+	#argw 2, 38
+	#argw 4, 204
+	#argw 6, 124
+	#argb 8, WHITE
+	#cmd OP_RECT
+
+	; --- a cross of lines, both endpoints inclusive --------------------
+	#argw 0, 60
+	#argw 2, 40
+	#argw 4, 259
+	#argw 6, 159
+	#argb 8, YELLOW
+	#cmd OP_LINE
+
+	#argw 0, 259
+	#argw 2, 40
+	#argw 4, 60
+	#argw 6, 159
+	#argb 8, YELLOW
+	#cmd OP_LINE
+
+	; --- two lines that run off the page -------------------------------
+	; Clipping is normal, not an error: geometry partly or wholly
+	; offscreen never sets ERRCODE. Note the negative coordinate -- these
+	; are signed 16-bit values, so #argw takes -40 as it stands.
+	#argw 0, -40
+	#argw 2, 10
+	#argw 4, 400
+	#argw 6, 190
+	#argb 8, LTGREEN
+	#cmd OP_LINE
+
+	#argw 0, 400
+	#argw 2, 10
+	#argw 4, -40
+	#argw 6, 190
+	#argb 8, LTGREEN
+	#cmd OP_LINE
+
+	; --- a row of single pixels ----------------------------------------
+	; The slow way to draw, shown once so it is clear what the cheap ops
+	; are saving you: this loop is 16 dispatches for 16 pixels, and each
+	; one halts the C64 for the length of its own work.
+	lda #0
+	sta dot
+dotLoop
+	lda dot
+	asl a
+	asl a
+	asl a
+	clc
+	adc #100			; x = 100 + dot*8
+	sta dotX
+	lda #0
+	adc #0
+	sta dotXHi			; the high byte of a 16-bit coordinate
+	#argwv 0, dotX
+	#argw 2, 175			; y
+	#argb 4, RED
+	#cmd OP_SET_PIXEL
+	inc dot
+	lda dot
+	cmp #16
+	bne dotLoop
+
+	; --- how did that go? ----------------------------------------------
+	; Every dispatch writes ERRCODE, successes included, so this is the
+	; result of the last SET_PIXEL and not a leftover from anything else.
+	lda #1
+	jsr dmRow
+	jsr dmText
+	.text "GPU64 HELLO   LAST ERRCODE "
+	.byte 0
+	jsr dmErr
+
+	lda #3
+	jsr dmRow
+	jsr dmText
+	.text "LOOK AT THE HDMI SCREEN."
+	.byte 0
+	lda #4
+	jsr dmRow
+	jsr dmText
+	.text "PRESS RUN/STOP TO FINISH."
+	.byte 0
+
+	jmp dmHold
+
+; The SET_PIXEL loop needs its x as a 16-bit little-endian pair somewhere it
+; can point #argwv at. dot is the counter; dotX/dotX+1 is x.
+dot	.byte 0
+dotX	.byte 0
+dotXHi	.byte 0
+
+	.include "gpu64_rt.inc"

@@ -1,0 +1,304 @@
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 demo 4 of 7 -- BOUNCE: the tear-free animation skeleton.
+;
+;      This is the loop to copy into your own program. Everything else is
+;      eight bouncing squares and a sweeping bar, which exist only so that
+;      tearing would be obvious if there were any.
+;
+;      The shape of it:
+;
+;        SET_DRAW_PAGE 1     ONCE, at the start. After that every PAGE_FLIP
+;                            swaps the two pages, so the draw page is
+;                            always the one that is not being displayed and
+;                            you never have to think about it again.
+;        wait STATUS bit2    the vblank-pending bit. Set once per display
+;                            frame; VBLANK_ACK clears it. This is polling,
+;                            so no interrupt handler is involved -- it
+;                            works from BASIC.
+;        draw the frame      into the back page, where nobody can see it.
+;        PAGE_FLIP arg 1     "at the next vblank", not "now". gpu64 makes
+;                            the swap land on a real frame boundary.
+;        wait STATUS bit0    busy clears when the flip has landed. This is
+;                            the one wait in the API that is a register
+;                            spin rather than a halt -- the C64 is free to
+;                            do something else instead of spinning.
+;
+;      The frame clock is measured once at boot and extrapolated, not read
+;      from the display, so it drifts by about a millisecond every few
+;      minutes. A long-running program should call VBLANK_SYNC ($09) now
+;      and then to re-pin it -- once a minute is plenty. This demo does it
+;      every 256 frames. Do NOT put it in the per-frame path: it waits for
+;      a real vertical sync and can halt the C64 for a whole frame.
+;
+;      If the display never calibrated, GET_INFO reports a frame period of
+;      0 and every vblank feature answers UNSUPPORTED. The helpers in
+;      gpu64_rt.inc fall back to free-running and immediate flips, so
+;      the demo still runs -- it just tears. That fallback is worth having
+;      in real code.
+;
+;      Run it: LOAD"GPU64-BOUNCE",8,1 then RUN. RUN/STOP finishes.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+	.include "gpu64.inc"
+
+NBALL   = 8
+SIZE    = 24			; each square is SIZE x SIZE
+X_MAX   = 320 - SIZE
+Y_MAX   = 200 - SIZE
+BAR_W   = 6
+
+	#basicStub
+
+start
+	jsr dmInit
+
+	#argb 0, BLACK
+	#cmd OP_SET_BORDER
+
+	; Page 0 is visible and page 1 is not, so this is the "draw where it
+	; cannot be seen" half of double buffering. Said once.
+	#argb 0, 1
+	#cmd OP_SET_DRAW_PAGE
+
+	; Both pages hold undefined bytes at reset. Clear the one that is
+	; visible too, or the first frame shows rubbish for as long as it
+	; takes to reach the first flip.
+	#argb 0, BLACK
+	#cmd OP_CLEAR
+	#argb 0, 0
+	#cmd OP_PAGE_FLIP		; immediate: makes page 1 visible...
+	#argb 0, BLACK
+	#cmd OP_CLEAR			; ...and page 0 the draw page. Clear it.
+
+	lda #1
+	jsr dmRow
+	jsr dmText
+	.text "GPU64 BOUNCE"
+	.byte 0
+	lda #3
+	jsr dmRow
+	jsr dmText
+	.text "FRAME PERIOD "
+	.byte 0
+	lda dmInfo+15
+	jsr dmHexA
+	lda dmInfo+14
+	jsr dmHexA
+	jsr dmText
+	.text " US"
+	.byte 0
+	lda dmVbOk
+	bne haveVb
+	lda #4
+	jsr dmRow
+	jsr dmText
+	.text "NO FRAME CLOCK - FREE RUNNING"
+	.byte 0
+haveVb
+	lda #6
+	jsr dmRow
+	jsr dmText
+	.text "FRAMES "
+	.byte 0
+	lda #8
+	jsr dmRow
+	jsr dmText
+	.text "RUN/STOP TO FINISH."
+	.byte 0
+
+; ----------------------------------------------------------------------
+; The loop.
+; ----------------------------------------------------------------------
+frame
+	jsr dmVbWait			; STATUS bit2, then VBLANK_ACK
+
+	; --- draw the frame into the back page -----------------------------
+	#argb 0, BLUE
+	#cmd OP_CLEAR
+
+	jsr drawBar
+	ldx #0
+ballLoop
+	jsr stepBall
+	jsr drawBall
+	inx
+	cpx #NBALL
+	bne ballLoop
+
+	; --- show it -------------------------------------------------------
+	jsr dmFlip			; deferred flip, then wait for bit0
+
+	; --- housekeeping ---------------------------------------------------
+	inc frameLo
+	bne noCarry
+	inc frameHi
+	; Every 256 frames, re-pin the extrapolated frame clock against a
+	; real vertical sync. Cheap at this rate, ruinous per frame -- and
+	; skipped entirely on a display that has no frame clock to pin, where
+	; it would only answer UNSUPPORTED.
+	lda dmVbOk
+	beq noCarry
+	#cmd OP_VBLANK_SYNC
+noCarry
+	lda #6
+	jsr dmRow
+	clc
+	lda DST
+	adc #7
+	sta DST
+	lda frameHi
+	jsr dmHexA
+	lda frameLo
+	jsr dmHexA
+
+	jsr dmStop
+	bne frame
+
+	; Leave the visible page holding the last frame, and put the draw page
+	; back where a program that runs after this one would expect it.
+	#argb 0, 0
+	#cmd OP_SET_DRAW_PAGE
+
+	lda #10
+	jsr dmRow
+	jsr dmText
+	.text "LAST ERRCODE "
+	.byte 0
+	jsr dmErr
+	jmp dmHold
+
+; ----------------------------------------------------------------------
+; A full-height bar sweeping across the screen. A torn frame cuts a bar
+; like this one into two halves that do not line up, which is much easier
+; to see than a torn square.
+; ----------------------------------------------------------------------
+drawBar
+	clc
+	lda barX
+	adc #4
+	sta barX
+	cmp #<(320 - BAR_W)
+	bcc barOk
+	lda #0
+	sta barX
+barOk
+	lda barX
+	sta ARG+0
+	lda #0
+	sta ARG+1			; x
+	#argw 2, 0			; y
+	#argw 4, BAR_W
+	#argw 6, 200
+	#argb 8, DKGREY
+	#cmd OP_RECT_FILL
+	rts
+
+; ----------------------------------------------------------------------
+; X = ball index throughout. Nothing here is gpu64-specific: it is the
+; 16-bit x that the 320-pixel page forces, and a byte of y.
+; ----------------------------------------------------------------------
+stepBall
+	clc
+	lda ballXL,x
+	adc ballDXL,x
+	sta ballXL,x
+	lda ballXH,x
+	adc ballDXH,x
+	sta ballXH,x
+
+	lda ballXH,x
+	bmi bounceX
+	lda ballXL,x
+	cmp #<X_MAX
+	lda ballXH,x
+	sbc #>X_MAX
+	bcc xOk
+bounceX
+	sec				; negate the step...
+	lda #0
+	sbc ballDXL,x
+	sta ballDXL,x
+	lda #0
+	sbc ballDXH,x
+	sta ballDXH,x
+	jsr addX			; ...and take it twice, which undoes
+	jsr addX			; the move that went too far
+xOk
+	clc
+	lda ballY,x
+	adc ballDY,x
+	sta ballY,x
+	bmi bounceY
+	cmp #Y_MAX
+	bcc yOk
+bounceY
+	sec
+	lda #0
+	sbc ballDY,x
+	sta ballDY,x
+	clc
+	lda ballY,x
+	adc ballDY,x
+	sta ballY,x
+	clc
+	lda ballY,x
+	adc ballDY,x
+	sta ballY,x
+yOk
+	rts
+
+addX
+	clc
+	lda ballXL,x
+	adc ballDXL,x
+	sta ballXL,x
+	lda ballXH,x
+	adc ballDXH,x
+	sta ballXH,x
+	rts
+
+drawBall
+	lda ballXL,x
+	sta ARG+0
+	lda ballXH,x
+	sta ARG+1
+	lda ballY,x
+	sta ARG+2
+	lda #0
+	sta ARG+3
+	#argw 4, SIZE
+	#argw 6, SIZE
+	lda ballCol,x
+	sta ARG+8
+	#cmd OP_RECT_FILL
+	rts
+
+; ----------------------------------------------------------------------
+frameLo	.byte 0
+frameHi	.byte 0
+barX	.byte 0
+
+ballXL	.byte 10, 60, 110, <260, 210, <300, 40, 140
+ballXH	.byte 0, 0, 0, >260, 0, >300, 0, 0
+ballY	.byte 10, 40, 70, 100, 130, 160, 90, 20
+ballDXL	.byte 2, $fd, 3, $fe, 1, $fc, 4, $ff
+ballDXH	.byte 0, $ff, 0, $ff, 0, $ff, 0, $ff
+ballDY	.byte 1, 2, $ff, $fe, 3, 1, $fd, 2
+ballCol	.byte WHITE, YELLOW, LTGREEN, LTRED, CYAN, ORANGE, LTBLUE, PURPLE
+
+	.include "gpu64_rt.inc"

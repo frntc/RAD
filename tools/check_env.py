@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """check_env.py - milestone 20: water, slime and the radiation suit.
 
 CLIP_MOVE reports Quake's waterlevel (block bytes 50/51) and the contents at

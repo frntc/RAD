@@ -1,8 +1,9 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64: the IO2 command API register file and dispatcher.
 
  Wire protocol reference (register map, opcode table, error codes):
- docs/api_design.md. Design rationale: project/milestone4_2d_api_design.md.
+ docs/api_design.md. Design rationale: dev/milestone4_2d_api_design.md.
 
  Everything here runs synchronously on core 0, called straight from
  reuUsingPolling()'s IO2 write handler in rad_reu.cpp -- the same
@@ -21,7 +22,7 @@
 //
 // gpu64 2026-09-27: the block lives at $DF50-$DF68 (it was $DF0B-$DF23).
 // The old window overlapped the Ultimate's Command Interface at $DF1B-$DF1F
-// (project/uci_register_remap_design.md), and the next free byte, $DF20, is
+// (dev/uci_register_remap_design.md), and the next free byte, $DF20, is
 // where the Ultimate maps Ultimate Audio. $DF50 is chosen for the address
 // multiplexer, not for tidiness: a half-switched '257 can only ADD one-bits
 // to the high nibble (the signal nibble it switches away from is $C-$F), so
@@ -44,7 +45,7 @@
 // opcode and undefined for opcodes that define none.
 #define GPU64_REG_RESULT	0x66
 
-// gpu64: reliability-protocol sequence pair (project/reliability_protocol_design.md).
+// gpu64: reliability-protocol sequence pair (dev/reliability_protocol_design.md).
 // SEQ is write-only, C64-chosen, cycled $01-$FE (never $00 or $FF); SEQACK
 // is read-only and is set to the most recently *dispatched* SEQ, so a
 // C64-side compare against the value it just wrote catches a dropped CMD_LO.
@@ -180,7 +181,7 @@ static inline boolean gpu64_apiKeyed( void )
 // is untouched. Poll STATUS bit0 before asking for another.
 #define GPU64_ERR_BUSY			0x07
 
-// gpu64: class 1 (milestone 6). See project/milestone6_3d_design.md.
+// gpu64: class 1 (milestone 6). See dev/milestone6_3d_design.md.
 // Resource RAM exhausted.
 #define GPU64_ERR_OUT_OF_MEMORY		0x08
 // The core-0-to-core-1 ring buffer is full. Core 0 rejects rather than waits
@@ -199,7 +200,7 @@ static inline boolean gpu64_apiKeyed( void )
 // to produce BAD_ID/BAD_ARGS/UNSUPPORTED for these opcodes -- it means core 1
 // did not finish in a generous multiple of any real draw's worst case, i.e.
 // core 1 is wedged. Designed to be unreachable in normal operation; see
-// project/gap_filling_plan.md's Stage 15 section.
+// dev/gap_filling_plan.md's Stage 15 section.
 #define GPU64_ERR_WORKER_TIMEOUT	0x0C
 
 // --- blob descriptor spaces --------------------------------------------
@@ -249,7 +250,7 @@ void gpu64_apiDispatch( u8 op );
 
 // IO2 register window write/read, minus the dispatch. addr is the full
 // 8-bit IO2 offset, so the caller must NOT pass REU's 5-bit-masked version
-// -- see the decode note in project/milestone4_2d_api_design.md.
+// -- see the decode note in dev/milestone4_2d_api_design.md.
 static inline void gpu64_apiWriteReg( u8 addr, u8 data )
 {
 	if ( addr == GPU64_REG_CMD_HI )
@@ -277,7 +278,7 @@ static inline u8 gpu64_apiReadReg( u8 addr )
 {
 	// Bounds-checked by construction: this never indexes a struct with a
 	// masked address the way REU's own read handler does (see the landmine
-	// note in project/milestone4_2d_api_design.md).
+	// note in dev/milestone4_2d_api_design.md).
 	if ( addr == GPU64_REG_STATUS )
 		return gpu64Regs.status;
 	if ( addr == GPU64_REG_ERRCODE )

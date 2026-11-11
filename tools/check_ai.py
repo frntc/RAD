@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """check_ai.py - milestone 20 stage E: do the monsters fight back?
 
 check_combat.py runs with --notarget, so everything it proves is the

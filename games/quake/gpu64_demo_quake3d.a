@@ -1,0 +1,4538 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 -- the same room, as a retained scene.
+;
+;      WHAT THIS PROGRAM IS FOR
+;
+;      gpu64_demo_quake.a draws this room with class 2. It holds the level
+;      on the gpu64 side, but a FRAME is still eight commands and about
+;      sixty register writes -- a camera, two lights, a face range, a
+;      monster batch, a weapon sprite, a status bar, a flip -- and the C64
+;      is halted for every one of them.
+;
+;      This program draws the same room with class 1, as a SCENE. The level
+;      is a mesh node, the monsters are sprite nodes, the torch and the
+;      muzzle flash are light nodes, and the camera is a node too. Nothing
+;      here issues a draw call at all: LOOP_START hands the framebuffer to
+;      gpu64, which renders the scene on core 1 at its own frame clock, and
+;      a frame on the C64 side is at most
+;
+;              SET_POSITION + SET_ORIENTATION  on the camera,
+;              SET_ORIENTATION                 on the monster that turns,
+;              SET_POSITION + SET_ORIENTATION  on the monster that walks,
+;              SCENE_COMMIT,
+;
+;      six commands of which five are a handful of register writes each.
+;      "At most", because the camera is sent only when the player actually
+;      moved: the room -- thirty triangles, ten textures, a directional
+;      light, a point light, four nodes' worth of transform -- is resident
+;      and is never sent again after start-up, and so is the camera. A
+;      frame on which he stands still is four commands, three of them the
+;      two monsters that are always moving.
+;
+;      Twice a second that is not quite true: one frame in thirty-two
+;      re-sends the camera and one in thirty-two re-sends the level node,
+;      unchanged or not. See sendCamera -- a dropped ARG or ID write is
+;      invisible to SEQACK, and without this the scene would keep a wrong
+;      camera pitch, or a displaced room, for the rest of the run.
+;
+;      WHAT IS DELIBERATELY MISSING
+;
+;      The weapon, and the status bar. Both were drawn over the finished 3D
+;      view with class 0, and in handshake mode the render loop owns the
+;      framebuffer: there is no moment between the loop's frames at which
+;      the C64 may draw into the page that is about to be shown. That is a
+;      real limitation of the stage 16 loop rather than an oversight, and
+;      it is written up in docs/class1-3d-mesh-reference.md. The report goes
+;      on the C64's own screen instead, which is where a bench reader can
+;      photograph it anyway.
+;
+;      THE CONTROLS
+;
+;              W / S           walk forward and back
+;              A / D           turn left and right
+;              Q / E           strafe left and right
+;              F1 / F3         look up and down, F7 centres
+;              SPACE           fire -- a muzzle flash that lights the room
+;              RUN/STOP        quit
+;
+;      WHAT THE C64 SCREEN SHOWS
+;
+;        SETUP    OK, or the number of the start-up command that failed and
+;                 its ERRCODE. The steps are numbered in the order they are
+;                 issued, from 1.
+;        FRAMES   frames attempted.
+;        OK       SCENE_COMMITs that answered OK. Commits are paced on
+;                 STATUS bit 4 (FRAME_READY), so this should track FRAMES
+;                 closely; committing flat out instead is ~80% BUSY by
+;                 design, which is what the stage 16 loop test measured.
+;        MISSED   dispatches whose SEQACK did not match the SEQ written for
+;                 them AND still did not match on an immediate second read,
+;                 so the firmware's state really is stale. Every node update
+;                 here is re-sent from the top when this trips, so this
+;                 counts detections and not lost frames. Then a verdict on
+;                 the count, so a poor photograph is still readable:
+;                 LO under 256 (run 30 reproduced), MID under 1024,
+;                 HI at or above it (runs 28-29, ~3000).
+;        ERR      ERRCODE of the last SCENE_COMMIT that was not OK, then
+;                 ERRCODE reads that came back OUT OF RANGE and were
+;                 therefore read a second time, then how many of those were
+;                 still out of range, then the value that last second read
+;                 gave. The valid codes run $00-$0C, so anything above that
+;                 is the bus and not an answer: field 2 counts unreadable
+;                 ANSWERS, not refused commands, and only field 3 is an
+;                 answer actually lost. Run 15 reported 106 phantom
+;                 failures for want of this split, and run 16 showed the
+;                 bad value is not always $FF -- it was $20, with $D1 and
+;                 $A3 elsewhere on the screen.
+;        CLOCK    the measured frame period in microseconds, then how
+;                 many of dmInit's eight GET_INFO attempts were unspent
+;                 when the info block landed. 08 is a first-time hit; 00
+;                 means the block never arrived and the period is not a
+;                 measurement of anything.
+;
+;        STALLS   frames on which the render loop did not report a finished
+;                 frame before the wait ran out. Should stay 00. Then the
+;                 GET_HEALTH readback's own record, six fields:
+;                   ff     attempts that failed verification, saturating
+;                   ee     ERRCODE of the last of them
+;                   mm     ... of which the magic was absent, so the block
+;                          stopped arriving before its last four bytes
+;                   ss     ... of which the magic was present and the
+;                          XOR/sum disagreed, so the body is corrupt
+;                   oo     first offset still holding the $5a poison on the
+;                          most recent failure; 80 means only the trailer
+;                          this build added failed to land, a low moving
+;                          value means the body is short, FF means nothing
+;                          was poisoned and the block is corrupt instead,
+;                          and FE means there has been no failure at all
+;                   vv     voidWin, A/B windows given up on entirely
+;                 mm + ss must equal ff. 00 00 00 00 FF 00 is clean, and
+;                 anything else is what to read rows 16-17 against -- a
+;                 voided window means those rows are a partial run.
+;
+;      ...and the four rows at the bottom, filled in when the run ends,
+;      which are what turn MISSED from a number into a diagnosis. They are
+;      all DIFFERENCES across the run: GET_HEALTH is sampled once before the
+;      first frame and once after the last.
+;
+;        BUS BAD  bad READS, bad WRITES, then the read-side address
+;                 fingerprint (last, OR, AND) and the last bad write
+;                 address, then the write-side OR and AND. A gpu64 register
+;                 lives at $DF50-$DF68, so a correct sample has A4-A7 clear;
+;                 a bad address names the bits that moved. Runs 16 and 17
+;                 both gave AND = $80, i.e. A7 set in EVERY bad read
+;                 address -- A7 being GPIO 3 in the g3 phase, the pin the
+;                 LVC257 multiplexes with BUTTON, which idles high. The two
+;                 write-side bytes were added to ask whether bad writes
+;                 carry the same fingerprint.
+;        BUS RW   gpu64-window reads, then writes, that the polling loop
+;                 serviced, then the reads of an ARG register. These are the
+;                 denominators MISSED never had. The third column is not a
+;                 fault: `sta ARG,y` makes the 6502 emit a dummy read at the
+;                 address it is about to write, and ARG registers are
+;                 write-only, so every indexed argument store shows up
+;                 there. The run of 2026-09-09 scored 50492 of these as bad
+;                 reads before the counter was split out.
+;        BUS BAD  of those, the ones at an address no gpu64 register
+;                 occupies, reads then writes, then the last bad read
+;                 address, the OR of every bad read address, the AND of
+;                 every one, and the last bad write address. Non-zero means
+;                 an access WAS serviced but at a mis-sampled address; A4-A7
+;                 are multiplexed on the cartridge port so only the high
+;                 nibble can move. An AND of FF with a count of 0000 is the
+;                 no-samples sentinel.
+;        DISPWHY  commands the firmware dispatched, then the SIGNED
+;                 difference against what this program sent, then WHY a
+;                 stuck run is stuck. Zero is a clean run; -NNNN counts
+;                 commands whose CMD_LO write was never sampled, +NNNN
+;                 counts commands the firmware ran that were never sent.
+;                 The closing GET_HEALTH is already allowed for.
+;
+;                 This column printed the C64's raw count until 2026-09-10,
+;                 when run 10's photograph could not be read: 021E67 against
+;                 021E0F or 021EDF is +87 or -121, and those are opposite
+;                 findings. Subtracting on the C64 puts a sign glyph on the
+;                 screen instead, which a photograph cannot lose.
+;
+;                 The last four columns were added on 2026-09-10 after two
+;                 bench runs that each entered a state they never left: CMT
+;                 06 -- SCENE_COMMIT answering UNSUPPORTED -- on 2011 of
+;                 2182 frames and then on 11832 of 17326, with the C64 side
+;                 still running, still dispatching, and STALLS 00. That is
+;                 a frozen HDMI picture behind a program that looks alive.
+;                 $06 has four unrelated producers and the screen could not
+;                 say which, so now it does:
+;
+;                   NOLOOP  SCENE_COMMITs refused because the class 1 loop
+;                           was not running.
+;                   NOMODE  class 1/2 commands refused because the display
+;                           was not in graphics mode -- which refuses the
+;                           node updates too, not just the commit.
+;                   STATE   the flag byte at the LAST refusal, not at the
+;                           end of the run (LOOP_STOP legitimately clears
+;                           bit 0 before the closing GET_HEALTH). Bit 0
+;                           loop running, 1 frame clock calibrated, 2
+;                           graphics mode, 3 flip pending, 4 FRAME_READY,
+;                           5 BUSY, 6 framebuffer up.
+;                   WHY     what stopped the loop last: 01 the LOOP_STOP
+;                           opcode, 02 SCENE_RESET, 03 a session teardown
+;                           (resetREU, i.e. a C64 reset), 04 boot. At the
+;                           end of a clean run this must read 01; anything
+;                           else means the closing LOOP_STOP did not land.
+;                   STOPTRY how many closing LOOP_STOPs SEQACK refused to
+;                           confirm before one stuck. 00 is the normal
+;                           reading.
+;
+;                 These rows normally appear only at finish. From
+;                 2026-09-10 they also appear the moment 32 consecutive
+;                 commits are refused, with STUCK - SNAPSHOT BELOW on row
+;                 3 -- so a frozen run can be photographed as it stands,
+;                 with no RUN/STOP and nothing lost. See stuckWatch.
+;
+;                 A run that ends in CMT 06 with NOLOOP large and WHY 01
+;                 says a LOOP_STOP opcode executed that this program never
+;                 issued mid-run -- which makes it a corrupted command, and
+;                 puts it back on the known bus defect. NOMODE large says
+;                 the same about a TEXT_MODE opcode. Both zero says the
+;                 frame clock, and STATE bit 1 confirms it.
+;        KEY      the tail of row 23, built 2026-09-10 out of bench run 14.
+;                 Four bytes: refusals, THE OPCODE OF THE LAST ONE, cameras
+;                 lost, scenes wiped. The second byte is what the run is
+;                 for -- run 14 could prove the live scene's active camera
+;                 had been destroyed but not say by which opcode, and the
+;                 one-shot key in ARG15 now both refuses a phantom and
+;                 records its name. See showKey.
+;
+;        STOPSRC  built 2026-09-10 out of bench run 11, which caught the
+;                 freeze in the act and read NOLOOP 0020 WHY 01: a LOOP_STOP
+;                 opcode had executed 30000 frames before this program's
+;                 teardown. STOPSRC says where that opcode came from. It
+;                 reads as: how far the sequence number moved for that
+;                 dispatch, the opcode that ran immediately before it, and
+;                 a verdict.
+;
+;                   00 ... PHANTOM  no command arrived at all -- the SEQ
+;                                   write never happened, so CMD_LO was
+;                                   written by something that was not this
+;                                   program. Refusing a command whose SEQ
+;                                   has not advanced would close the whole
+;                                   class, and csDispatch already handles a
+;                                   refusal by re-sending.
+;                   01 ... REALCMD  a real command arrived and its DATA
+;                                   byte was mis-sampled -- almost
+;                                   certainly a SCENE_COMMIT's $08 latched
+;                                   as $07. No SEQ gate can see that; it
+;                                   would take a checksum or an echo.
+;                   03 ... REALCMD  the same, on the one dispatch in 253
+;                                   where seqCounter wraps $FE -> 01.
+;                   xx ... REALCMD  with xx neither: commands were lost on
+;                                   either side of it as well.
+;                   .. .. IDLE      WHY is not 01, so these bytes are boot
+;                                   leftovers and are not evidence.
+;
+;                 At finish this row describes the run's OWN closing
+;                 LOOP_STOP and reads 01 08 REALCMD in a clean run -- the
+;                 teardown is a real command, and the commit before it was
+;                 the last thing sent. The evidentiary reading is the one
+;                 stuckWatch freezes, and finish deliberately does not
+;                 refresh any of these rows once it has.
+;        SEQREP   dispatches that arrived with SEQ unchanged since the
+;                 previous one -- i.e. the SEQ write was lost -- then the
+;                 count of SEQACK reads that were wrong once and right
+;                 immediately after, then how many of THOSE read $FF, then
+;                 the value the second read gave, then GET_HEALTH's own
+;                 ERRCODE. SEQREP reads 2 in a clean run, for the same two
+;                 unsequenced dispatches.
+;
+;                 The $FF split is the one that matters: $FF is a floating
+;                 bus, so those reads were never decoded to SEQACK -- a
+;                 mis-sampled address. A wrong value that is NOT $FF came
+;                 off a real register, and SEQBAD says which value.
+;        SEQBAD   the non-$FF wrong reads, split three ways: how many held
+;                 the PREVIOUS sequence number (the read beat its own
+;                 dispatch -- a race), how many held the value the ERRCODE
+;                 read two instructions earlier returned (the previous
+;                 read's data still on the bus when this one latched), the
+;                 last value that was neither, and the shared value at the
+;                 last of those ERRCODE matches.
+;
+;                 The race bucket is dead: 1 event in 8322 frames. The
+;                 ERRCODE bucket holds nearly all of the rest -- but read
+;                 the fourth column before believing it. On 2026-09-10 it
+;                 came back $00 in both runs, and $00 is what ERRCODE reads
+;                 on every successful command, so "equalled the ERRCODE"
+;                 and "read zero" are the same event and this split cannot
+;                 tell them apart. What survives is the pair of rails: the
+;                 bad SEQACK read answers $FF or $00 and almost nothing
+;                 else.
+;
+;      So MISSED is attributed by reading DISP and SEQREP together:
+;
+;        DISPWHY short by MISSED    the CMD_LO writes were lost
+;        DISPWHY clean, SEQREP up   the SEQ writes were lost
+;        DISPWHY clean, SEQREP 1    nothing was lost on the write side
+;
+;      and the 2026-09-09 run said "some of each, and mostly neither": DISPWHY
+;      short by 39, SEQREP up by 83, against MISSED 198 -- with MISSRD at
+;      561, i.e. three times MISSED again in SEQACK reads that were wrong
+;      once and right on an immediate re-read. The write side is real but is
+;      not the biggest term; the read side is.
+;
+;      Run it: LOAD"GPU64-QUAKE3D",8,1 then RUN. RUN/STOP finishes.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+	.include "gpu64.inc"
+
+; The textures are the class-2 demo's, in class 1's texel order -- see the
+; head of gpu64_quake_tex.inc, which needs these before it is included.
+TEXW	= 32
+TEXH	= 32
+TEXLEN	= TEXW * TEXH
+TEXSH	= 5			; log2 of the width and of the height, which
+				; is what UPLOAD_TEXTURE takes
+
+; ----------------------------------------------------------------------
+; Class 1 opcodes. See docs/class1-3d-mesh-reference.md. They are named
+; here rather than in gpu64.inc because this is the first demo to
+; speak class 1 at all.
+; ----------------------------------------------------------------------
+OP_SCENE_RESET       = $00
+OP_SET_VIEWPORT      = $01
+OP_SET_PERSPECTIVE   = $02
+OP_SET_LIGHT3D       = $03
+OP_BUILD_COLORMAP    = $04
+OP_SET_BACKGROUND    = $05
+OP_LOOP_START        = $06
+OP_LOOP_STOP         = $07
+; The one-shot key the four destructive opcodes carry, in ARG15. See
+; gpu64_api.h: the firmware SPENDS ARG15 on every dispatch, so the key is
+; valid for exactly the command that staged it and a phantom CMD_LO write
+; arriving at any other moment is refused with $04 instead of obeyed.
+;
+; ARG15 and not ARG0, which is where this started on the morning of
+; 2026-09-10: the per-frame node stream writes ARG0 constantly, so a phantom
+; arriving mid-frame has a real chance of finding a coordinate byte that
+; happens to be $A5 already sitting there. Nothing writes ARG15 but this.
+KEY                  = $a5
+ARG_KEY              = 15
+OP_SCENE_COMMIT      = $08
+OP_ARENA_STATUS      = $09
+OP_UPLOAD_MESH       = $10
+OP_UPLOAD_TEXTURE    = $11
+OP_CREATE_OBJECT     = $20
+OP_CREATE_CAMERA     = $21
+OP_SET_ACTIVE_CAMERA = $23
+OP_SET_VISIBLE       = $24
+OP_CREATE_SPRITE     = $25
+OP_CREATE_LIGHT      = $26
+OP_SET_SPRITE        = $27
+OP_SET_POINT_LIGHT   = $28
+OP_SET_POSITION      = $30
+OP_SET_ORIENTATION   = $31
+OP_SET_SCALE         = $35
+
+; The sequence-number pair. Writing SEQ costs one register write and buys a
+; detector for the dropped-write defect; SEQACK reads back the SEQ of the
+; command gpu64 actually dispatched.
+SEQ      = $df67
+SEQACK   = $df68
+
+; GET_HEALTH block offsets (Source/Firmware/gpu64_api.cpp, case 0x0A, and
+; Source/Firmware/gpu64_busstats.h). The 80-byte rung is the one that
+; carries the dispatch pair; a firmware without it answers 64 and leaves
+; H_DISP/H_SEQREP reading as whatever this program zeroed them to, which
+; shows on screen as a dispatch count of zero and is unmistakable.
+H_READS   = 48
+H_WRITES  = 52
+H_RDBAD   = 56
+H_WRBAD   = 58
+H_LASTBAD = 60
+H_ORBAD   = 61
+H_ANDBAD  = 62
+H_LASTBW  = 63
+H_ORBW    = 96			; OR of every bad WRITE address
+H_ANDBW   = 97			; AND of every bad write address: bits always set
+H_BADNIB  = 98			; 16 buckets: bad WRITE addresses by high nibble
+H_MUXMISS = 114			; u32: IO2 samples taken through an unswitched mux
+H_MUXFIX  = 118			; u32: ... repaired (no longer printed; see showNib)
+H_SLKMUX  = 118			; u16: of the late reads, ones whose pass re-read the mux
+H_MUXUFW  = 120			; u16: ... and this many the re-read did NOT repair
+H_MUXUNFX = 122			; u8: the same, clamped at 255 -- kept for the log
+H_SLKOVER = 123			; u8: worst read-window overshoot, ARM cycles, sat 255
+H_SLKEXP  = 124			; u16: how many reads arrived past the deadline
+H_SLACK   = 126			; u8: smallest POSITIVE margin, only meaningful at 0 over
+H_SLKBIG  = 127			; u8: overshoots past 64 cycles, saturating
+H_DISP    = 64
+H_SEQREP  = 68
+H_ARGDUM  = 72
+H_DEFER   = 44
+H_FIRED   = 46
+
+; The 96-byte rung (2026-09-10) and the four bytes of it this program
+; shows: which of the four producers of GPU64_ERR_UNSUPPORTED a stuck run
+; is stuck on, and -- when it is the loop -- what stopped the loop. See
+; Source/Firmware/gpu64_apidiag.h.
+H_NOLOOP  = 80			; SCENE_COMMITs refused with the loop stopped
+H_NOMODE  = 82			; class 1/2 commands refused, display not graphics
+H_NOCLOCK = 84			; SCENE_COMMITs refused with no frame clock
+H_RFSTATE = 86			; the state bitmap at the last refusal
+H_STOPWHY = 87			; GPU64_LOOPSTOP_*, what stopped the loop last
+H_STOPS   = 88			; times the loop went running -> stopped
+H_STOPSEQ = 93			; SEQ of the dispatch that stopped the loop
+H_STOPSQP = 94			; ...and of the dispatch before that one
+H_STOPPOP = 95			; ...and that one's opcode
+
+; The one-shot key's ledger (2026-09-10, after bench run 14 lost the live
+; scene's active camera to an opcode this program never sent). H_KEYOP is
+; the reading the run is for: it NAMES the phantom.
+H_KEYREF  = 76			; destructive opcodes refused for want of the key
+H_KEYOP   = 77			; CMD_LO of the last such refusal
+H_CAMLOST = 78			; times the live scene's active camera went away
+H_WIPES   = 79			; SCENE_RESETs that ran against a built scene
+
+; ----------------------------------------------------------------------
+; The A/B bus experiment (2026-09-10, after bench run 12).
+;
+; Run 12 measured 1 bad write in 144 with the class 1 render loop running
+; and core 1 busy every frame. The standalone probe (gpu64_probe_bus),
+; which hammers the same registers with core 1 IDLE, measured zero bad
+; addresses in 111000 accesses on the same hardware the day before. Run to
+; run the demo's own rate has moved 30x, so two separate runs cannot be
+; compared -- the only honest comparison is inside ONE run.
+;
+; So the run is now two phases of PHASE_LEN frames each, back to back:
+;
+;   phase A   the render loop RUNNING. Core 1 renders a frame per commit.
+;   phase B   LOOP_STOP, then the identical per-frame command traffic with
+;             core 1 IDLE. Every SCENE_COMMIT is refused UNSUPPORTED, which
+;             is a dispatch and the same register writes, so the two phases
+;             put the same number of accesses through the polling loop.
+;
+; Rows 16 and 17 then show each phase's bad-access counts next to its own
+; denominators. Same binary, same session, same temperature, same board:
+; if core 1 is what dirties core 0's sampling, A is large and B is small.
+;
+; The phases ALTERNATE -- A B A B ... eight times each, 256 frames apiece --
+; rather than running as one A followed by one B. A single split cannot tell
+; "loop running vs stopped" apart from "early in the run vs late in it", and
+; late-in-the-run is not a hypothetical here: the Pi warms up, and
+; gpu64-bus-fault-rate-varies-30x records the same binary on the same day
+; producing rates 30x apart with temperature among the named suspects.
+; Interleaving puts both conditions on both sides of any drift.
+;
+; Each phase's counts are accumulated into a per-condition total, so rows 16
+; and 17 are the pooled eight windows, not a single one.
+;
+; What to hold constant when reading it: KEEP HANDS OFF THE KEYS for the
+; whole run. Walking changes how much geometry core 1 draws, which is the
+; variable under test.
+PHASES    = 16			; 8 of each, alternating, 256 frames apiece
+
+ST_FRAME_READY = $10		; STATUS bit 4: the loop has a finished frame
+
+SPR_DIRECTIONAL = $01		; the sprite's texture id is the first of
+				; eight views and its yaw picks which
+
+; --- resource ids ------------------------------------------------------
+; Textures and meshes share one id space, so the mesh sits clear of the ten
+; texture ids. The two wall textures must keep the numbers the generated
+; faceBlob names.
+TEX_BRICK = 1
+TEX_STONE = 2
+TEX_MON   = 4			; .. 11: eight views, the first of them named
+MESH_ID   = 20
+
+; --- node ids ----------------------------------------------------------
+CAM_ID    = 1
+LEVEL_ID  = 2
+MON0_ID   = 10			; in the corner, still: walking round IT is
+MON1_ID   = 11			; on the platform, turning on the spot
+MON2_ID   = 12			; on the floor, walking the width of the room
+TORCH_ID  = 20
+FLASH_ID  = 21
+
+; ----------------------------------------------------------------------
+; The world, in CLASS 1 axes.
+;
+; tools/gen_quakemesh.py did the conversion once, at build time: class 2 is
+; a map renderer with x east, y north and z up, and class 1 is left-handed
+; with x right, y UP and z away from the camera, so a class-2 point (x,y,z)
+; is the class-1 point (x, z, y). Everything below is already converted.
+; The PLAYER's own bookkeeping is not, and is converted where it is sent --
+; see sendCamera, which is the only place in this program that knows the
+; two coordinate systems are different.
+; ----------------------------------------------------------------------
+WU	.function n
+	.endf (n * 256) & $ffff
+
+Z_RAMP	= 384			; 1.5 -- the top of the ramp, 8.8
+
+TORCH_X	= 8 * 256		; the torch on the platform: class-2
+TORCH_Y	= Z_RAMP		; (8, 0, Z_RAMP) with its last two swapped
+TORCH_Z	= 0
+TORCH_R	= $0500			; 5.0 world units of reach
+TORCH_S	= 6			; colormap levels it lifts at its centre, of
+				; sixteen -- so six is a lot
+
+FLASH_R	= $0600			; 6.0: the flash has to reach the far wall of
+				; a room this size, not just the floor
+FLASH_N	= 10			; frames a shot stays lit
+
+MON_W	= $00c0			; 0.75 x 1.5 world units
+MON_H	= $0180
+
+; ----------------------------------------------------------------------
+; The player, kept in CLASS 2 axes and 8.8 units -- unchanged from
+; gpu64_demo_quake.a, so the walk, the wall clamp and the ramp height are
+; the same code doing the same arithmetic on the same numbers. Only the
+; four values that go on the bus are converted.
+; ----------------------------------------------------------------------
+X_LO	= $0080			; 0.5
+X_HI	= $0980			; 9.5
+Y_LO	= $fb80			; -4.5
+Y_HI	= $0480			; 4.5
+RAMP_X0	= 6 * 256
+EYE_UP	= $0080
+START_X	= 384			; 1.5 -- at the west end, looking up the room
+
+TURN	= 3			; binary degrees a frame, 256 to the circle
+PITCH_LIM = 48
+
+; The keyboard matrix, read exactly as the class 2 demo reads it.
+CIA_PRA	= $dc00
+CIA_PRB	= $dc01
+COL_A	= %11111110		; F7, F1, F3
+COL_B	= %11111101		; W, A, S, E
+COL_C	= %11111011		; D
+COL_D	= %01111111		; Q, SPACE, RUN/STOP
+KA_F7	= $08
+KA_F1	= $10
+KA_F3	= $20
+KB_W	= $02
+KB_A	= $04
+KB_S	= $20
+KB_E	= $40
+KC_D	= $04
+KD_Q	= $40
+KD_SPC	= $10
+KD_STOP	= $80
+
+; How long to wait for the loop to report a finished frame before giving up
+; on it. The loop runs at the display's frame clock, so a ready frame is at
+; most tens of thousands of cycles away; this is well past that and exists
+; only so a loop that has stopped answering ends the program instead of
+; hanging it.
+READY_WAIT = 8000
+
+; Zero page. $f7-$fa is the RS232 area, free while a PRG runs. eyeZ is NOT
+; here: dmText uses $fb as a pointer, and the two would collide.
+posX	= $f7			; the player, class 2 axes, 8.8 -- adjacent
+posY	= $f9			; so that one routine adds a step to either
+
+	#basicStub
+
+; ======================================================================
+; Start-up.
+;
+; Everything from here to LOOP_START happens once. It is the whole cost of
+; the room: after it, a frame is six commands.
+; ======================================================================
+start
+	jsr dmInit
+
+	; Before anything that can write back into C64 memory: fence it.
+	;
+	; GET_HEALTH's destination address travels in ARG1-ARG3, which SEQACK
+	; does not cover, so a single dropped store sends 128 bytes of health
+	; block to whatever address the previous command left behind -- with
+	; the Pi doing the writing and this program halted while it happens. A
+	; fault-injected run watched exactly that land on $1F48 and take the
+	; program's own code with it. No refresh ring repairs that; the C64 is
+	; already dead.
+	jsr setDmaWin
+
+	#argb 0, BLACK
+	#cmd OP_SET_BORDER
+	#argb 0, BLACK
+	#cmd OP_CLEAR
+
+	; The palette: 8 hues x 32 brightnesses, which BUILD_COLORMAP below
+	; turns into class 1's sixteen lighting levels. PAL_LOAD's count is a
+	; byte, so 256 entries take two calls.
+	;
+	; Class 1's colormap runs BRIGHT-wards -- level 15 is full brightness
+	; -- where class 2's runs the other way. That is why a point light
+	; here adds levels and the same light in gpu64_demo_quake.a subtracts
+	; them, and it is the one thing a reader porting between the two
+	; layers has to hold in mind.
+	#argblob 0, SPACE_C64, palData, 128*3
+	#argb 6, 0
+	#argb 7, 128
+	#cmd OP_PAL_LOAD
+	#argblob 0, SPACE_C64, palData+128*3, 128*3
+	#argb 6, 128
+	#argb 7, 128
+	#cmd OP_PAL_LOAD
+
+	lda #1				; class 1 from here to the end
+	sta CMD_HI
+
+	#argb ARG_KEY, KEY		; destructive -- see KEY above
+	lda #OP_SCENE_RESET
+	jsr cmd1
+	jsr logSetup
+
+	; The whole screen. There is no status bar to leave room for, because
+	; the C64 cannot draw one while the loop owns the framebuffer.
+	#argw 0, 0
+	#argw 2, 0
+	#argw 4, FB_W
+	#argw 6, FB_H
+	lda #OP_SET_VIEWPORT
+	jsr cmd1
+	jsr logSetup
+
+	; 90 degrees, which is the field of view the class 2 demo gets from a
+	; projection distance of 160 pixels across a 320-wide view. Near 0.25
+	; because the walls come close in a room ten units across; far 120,
+	; which is as far as the 8.8 depth format reaches.
+	;
+	; The order matters: the focal length is derived from the fov AND the
+	; viewport width, so SET_PERSPECTIVE has to come after SET_VIEWPORT.
+	#argw 0, $4000
+	#argw 2, $0040
+	#argw 4, $7800
+	lda #OP_SET_PERSPECTIVE
+	jsr cmd1
+	jsr logSetup
+
+	; The one directional light, plus an ambient floor so the faces it
+	; misses are not flat black. The direction is TOWARDS the light.
+	#argw 0, -1280			; (-5, 7, -6) in 8.8
+	#argw 2, 1792
+	#argw 4, -1536
+	#argb 6, 4
+	lda #OP_SET_LIGHT3D
+	jsr cmd1
+	jsr logSetup
+
+	#argb 0, SKY_COL
+	lda #OP_SET_BACKGROUND
+	jsr cmd1
+	jsr logSetup
+
+	; Reads the palette that is up and builds the sixteen-level colormap
+	; every lit pixel is looked up in. It has to follow PAL_LOAD.
+	lda #OP_BUILD_COLORMAP
+	jsr cmd1
+	jsr logSetup
+
+	; --- the textures -------------------------------------------------
+	lda #<brickTex
+	ldx #>brickTex
+	ldy #TEX_BRICK
+	jsr uploadTex
+	jsr logSetup
+
+	lda #<stoneTex
+	ldx #>stoneTex
+	ldy #TEX_STONE
+	jsr uploadTex
+	jsr logSetup
+
+	; Eight views of the monster, at TEX_MON..TEX_MON+7. A DIRECTIONAL
+	; sprite names only the first of them and gpu64 picks the one you are
+	; looking at. Each view is TEXLEN = 1024 bytes, exactly four pages, so
+	; the low byte of the address never changes.
+	lda #0
+	sta texN
+stTex
+	lda texN
+	asl a
+	asl a
+	clc
+	adc #>monTex
+	tax
+	lda texN
+	clc
+	adc #TEX_MON
+	tay
+	lda #<monTex
+	jsr uploadTex
+	jsr logSetup
+	inc texN
+	lda texN
+	cmp #8
+	bne stTex
+
+	; --- the level, once ----------------------------------------------
+	; Thirty triangles and sixty-two vertices, generated from the class 2
+	; room by tools/gen_quakemesh.py. This one command is the whole of
+	; what a class 2 frame used to re-name every sixtieth of a second.
+	#id16 MESH_ID
+	#argblob 0, SPACE_C64, vertBlob, VBLOBLEN
+	#argblob 6, SPACE_C64, faceBlob, FBLOBLEN
+	lda #OP_UPLOAD_MESH
+	jsr cmd1
+	jsr logSetup
+
+	jsr buildScene
+
+	; And again. This is not a typo and it is not belt-and-braces: it is
+	; the only repair there is for the half of the damage the refresh ring
+	; cannot reach.
+	;
+	; The ring re-asserts node STATE. It cannot re-assert node EXISTENCE,
+	; and it cannot re-assert a creation ARGUMENT -- CREATE_OBJECT's mesh
+	; id and CREATE_SPRITE's texture id are read once, at creation, and no
+	; transform opcode ever mentions them again. A fault-injected run at a
+	; deliberately absurd rate showed exactly those three survivors after
+	; everything else had healed: a node missing altogether, a level
+	; wearing mesh 62228, a monster wearing texture 16388.
+	;
+	; Re-running the whole of buildScene fixes all three, because every
+	; creation opcode replaces in place over a live id, and because this
+	; routine already orders itself correctly -- each node is created and
+	; then given its state, so the second pass rebuilds and re-states in
+	; one go. It costs about thirty commands, once, before the loop starts,
+	; on a C64 that is not doing anything else yet.
+	;
+	; What it does not fix is a CREATE whose own ID_LO was lost: that node
+	; exists under some other id and the second pass simply creates the one
+	; that is missing, leaving an orphan in a table with 256 slots and
+	; seven tenants. Harmless, and cheaper than detecting it.
+	jsr buildScene
+
+	; He starts where the class 2 demo starts him: at the west end,
+	; looking up the room.
+	lda #<START_X
+	sta posX
+	lda #>START_X
+	sta posX+1
+	lda #0
+	sta posY
+	sta posY+1
+	sta plYaw
+	sta plPitch
+	jsr eyeHeight
+
+	; The camera has to be somewhere before LOOP_START renders from it.
+	; Unconditionally, not through sendCamera: this is also what seeds the
+	; shadow that every later frame's "did anything move?" is measured
+	; against.
+	jsr scPosSend
+	jsr scRotSend
+
+	; And now gpu64 has the screen. ARG0 = 0 is handshake mode: one frame
+	; per SCENE_COMMIT. (Mode 1, free-running, is a later stage and this
+	; firmware answers UNSUPPORTED for it rather than quietly running the
+	; wrong protocol.)
+	#argb 0, 0
+	lda #OP_LOOP_START
+	jsr cmd1
+	sta loopErr
+	jsr logSetup
+
+	jsr showLabels
+	jsr showSetup
+
+	; Row 1 is the run's liveness flag. finish overwrites it with the
+	; STOPPED banner, which is longer and covers this completely. Run 18
+	; had to be read from the *absence* of that banner -- a freeze, but
+	; nothing on the screen said so in as many words. Now it does.
+	lda #1
+	jsr dmRow
+	jsr dmText
+	.text "RUNNING"
+	.byte 0
+
+	; The bus counters, sampled before the first frame so everything shown
+	; at the end is a difference. Deliberately after LOOP_START: the setup
+	; traffic is not what is being measured, the frame loop is.
+	;
+	; hFailCt/hErrF are zeroed HERE and not in the block below, which runs
+	; after this call: this baseline sample is a readback like any other
+	; and a failure in it is exactly as interesting as one mid-run. Zeroing
+	; them afterwards is how the first version of this instrument hid its
+	; own first data point.
+	lda #0
+	sta hErrF
+	sta hFailCt
+	sta hFailMag
+	sta hFailSum
+	lda #$fe			; "no failure has been recorded", which 00
+	sta hFirstBad			;   would otherwise read as "offset 0"
+	lda #0
+	jsr doHealth
+	ldx #127
+-	lda hbuf,x
+	sta hbuf0,x
+	sta hbufP,x
+	dex
+	bpl -
+
+	; And zero the C64-side counters at the same instant, so every number
+	; on the screen covers exactly the same window. Without this dispCt
+	; would also carry the two sequenced camera commands start-up sends
+	; before LOOP_START, which happen to cancel the +2 baseline below and
+	; make a wrong reading look right. Setup failures are reported by
+	; SETUP, not by these.
+	lda #0
+	sta dispCt
+	sta dispCt+1
+	sta dispCt+2
+	sta healthCt
+	sta healthCt+1
+	sta hFail
+	sta hVoid
+	sta voidWin
+	sta healthBad
+	sta missed
+	sta missed+1
+	sta missRd
+	sta missRd+1
+	sta missRdFF
+	sta missRdFF+1
+	sta errBad
+	sta errBad+1
+	sta errBad2
+	sta errBad2+1
+	sta lastBadErr
+	sta mrPrev
+	sta mrPrev+1
+	sta mrErr
+	sta mrErr+1
+	sta mrOther
+	sta mrErrVal
+
+	; loopErr no longer gates the frame loop, and run 27 is why. A single
+	; unreadable ERRCODE on LOOP_START used to end the program before its
+	; first frame. But a refused LOOP_START is not fatal to anything:
+	; SCENE_COMMIT against a stopped loop RE-ARMS it (the self-healing
+	; commit, 2026-09-10), so the first frame repairs exactly the condition
+	; this test used to abort on. And if the loop really cannot start, the
+	; frames that follow say so out loud in CMT 06 / NOLOOP -- which is
+	; strictly more information than a blank screen.
+	;
+	; loopErr is still recorded and still printed by SETUP. It is evidence
+	; now, not a control-flow decision.
+
+; ======================================================================
+; A frame.
+;
+; Note what is not here: no clear, no draw, no flip, no vblank wait. Core 1
+; does all four from the scene this loop mutates. The C64's whole job is to
+; say where things are and then say go.
+; ======================================================================
+frame
+	jsr movePlayer
+	jsr doRefresh
+	jsr sendCamera
+	jsr sendMonsters
+	jsr sendFlash
+
+	; Pace on the loop, not on the bus. A commit issued before the last
+	; frame has finished answers BUSY and is thrown away; a program that
+	; commits flat out gets about four in five refused. One commit per
+	; ready frame is what the handshake is for.
+	jsr paceFrame
+
+	; SCENE_COMMIT is sent WITHOUT the retry the node updates get. A
+	; dropped commit costs one frame of latency and nothing else, whereas
+	; a retry after a commit that did land would answer BUSY and look
+	; like an error that never happened.
+	; Which opcode: phase A commits, phase B must NOT. As of 2026-09-10 a
+	; SCENE_COMMIT against a stopped loop RE-ARMS the loop instead of
+	; answering $06, which would restart core 1 and destroy the A/B
+	; experiment on its first phase-B frame. ARENA_STATUS is the stand-in:
+	; a real class 1 dispatch, same command traffic, touches no loop
+	; state. So phase B now scores OK, not $06 -- expect CMT 06 near 0000
+	; and OK near FRAMES, where before this change it was half and half.
+	lda phase
+	bne frOpB
+	lda #OP_SCENE_COMMIT
+	bne frOpSet			; always taken: $08 is not zero
+frOpB
+	lda #OP_ARENA_STATUS
+frOpSet
+	sta seqOp
+	lda missed
+	sta cmSnap
+	jsr csDispatch
+
+	; Was it this dispatch that the bus dropped? It matters more here than
+	; anywhere else in the frame: a dropped SCENE_COMMIT leaves ERRCODE
+	; holding the *previous* command's answer, which is OK -- so a dropped
+	; commit is counted below as a frame that succeeded. If OK and CMT MISS
+	; ever come out equal, that is what happened and no commit succeeded at
+	; all.
+	lda missed
+	cmp cmSnap
+	beq frNoMiss
+	inc cmMiss
+	bne frNoMiss
+	inc cmMiss+1
+frNoMiss
+
+	lda seqErr
+	beq frOk
+	sta lastErr
+
+	; Split by answer. BUSY (07) is the loop refusing a commit because the
+	; last frame is still in flight -- a pacing outcome. UNSUPPORTED (06)
+	; is not: it means the loop is not running, or there is no frame clock.
+	cmp #ERR_BUSY
+	bne frNot07
+	inc e07
+	bne frFirst
+	inc e07+1
+	jmp frFirst
+frNot07
+	cmp #ERR_UNSUPPORTED
+	bne frNotXX
+	inc e06
+	bne +
+	inc e06+1
++	jsr stuckWatch
+	jmp frFirst
+frNotXX
+	; Whatever this is, it is not one of the two answers the protocol is
+	; supposed to produce. Keep the code as well as the count -- 82 of
+	; these at the bench on 2026-09-08 said only that they existed.
+	sta xxCode
+	inc eXX
+	bne frXXCam
+	inc eXX+1
+frXXCam
+	; $0B NO_CAMERA is the one code in here that is permanent if it is not
+	; repaired: something destroyed the LIVE scene's active camera, so
+	; LOOP_START and the SCENE_COMMIT re-arm both refuse for the rest of
+	; the session. Run 14 spent 1374 of 4096 frames doing exactly that and
+	; the A/B windows it was supposed to be measuring measured nothing.
+	; Put a camera back instead, and count the repair.
+	lda xxCode
+	cmp #ERR_NO_CAMERA
+	bne frFirst
+	jsr reviveCamera
+
+frFirst
+	lda firstSet
+	bne frCount
+	inc firstSet
+	lda seqErr
+	sta firstCode
+	lda frames
+	sta firstFrame
+	lda frames+1
+	sta firstFrame+1
+	jmp frCount
+frOk
+	lda #0
+	sta stuckRun			; the $06 run is broken by an accepted
+					; commit and by nothing else
+
+	; The last frame on which a commit was accepted. Paired with FRAMES it
+	; says whether the run died at a countable event or just stopped being
+	; looked at: if lastOk is far below FRAMES, commits were still being
+	; refused for a long tail; if it tracks FRAMES to the end, whatever
+	; froze the HDMI never showed up in an errcode at all.
+	lda frames
+	sta lastOkFrame
+	lda frames+1
+	sta lastOkFrame+1
+	inc okFrames
+	bne frCount
+	inc okFrames+1
+frCount
+	inc frames
+	bne +
+	inc frames+1
++
+	; A phase boundary every 256 frames, so the high byte of the count IS
+	; the phase index and the low byte is the only thing that has to be
+	; tested.
+	lda frames
+	bne fcPaint
+	lda frames+1
+	cmp #PHASES
+	bcs fcEnd
+	jsr phaseSwitch
+	jmp fcPaint
+fcEnd
+	; The last window needs no phaseTally here: finish does one of its own
+	; before the teardown, phase is still 1 at that point, and phaseTally
+	; is delta-based -- it adds hbuf-hbufP -- so window 15 is banked to B
+	; exactly as it ran. Checked against run 19's own arithmetic: A+B came
+	; to 16839 dispatches against DISPWHY's 16841, i.e. full coverage with
+	; only the teardown outside it. A second call here would only bank a
+	; near-zero delta and spend a GET_HEALTH doing it.
+	jsr showFrame			; so FRAMES reads 1000 and not 0FFF
+	jmp finish
+fcPaint
+
+	jsr showFrame
+
+	; Rows 16-23 every 32nd frame. Until 2026-09-11 showBus ran only from
+	; finish and from the stuck detector, so a run that froze -- or was
+	; photographed in flight -- carried none of the numbers it exists to
+	; take. That is exactly what happened to bench run 18: FRAMES 00FF with
+	; BUS A, BUS B, BUS BAD and STOPSRC all blank, and the ANDBW verdict
+	; the build was made to deliver simply absent. A whole bench round for
+	; no reading.
+	;
+	; It costs the measurement nothing. showBus reads C64 RAM only -- acc,
+	; hbuf and this program's own counters -- and issues no command, so it
+	; adds no dispatch and no DMA hold, which is why it can run per frame
+	; at all. The one concession is that hbuf is refreshed only by doHealth
+	; at a phase boundary, so BUS BAD's or/and fingerprint is current as of
+	; the last boundary rather than this frame. Both accumulators are
+	; monotone, so that is an earlier valid reading and not a wrong one.
+	; Deliberately NOT repaired by calling doHealth here: that would add a
+	; dispatch every 32 frames to whichever window it landed in, i.e. spend
+	; the A/B comparison to refresh its own display.
+	;
+	; stuckDone is honoured for the same reason finish honours it -- a
+	; stuck run keeps the picture it froze, and this would paint over it.
+	lda stuckDone
+	bne fcNoBus
+
+	; One health refresh per window, at its midpoint. Without it hbuf is
+	; only ever refilled by phaseTally at a boundary, so everything showBus
+	; prints would stay frozen at the setup baseline for the whole of the
+	; first 256 frames -- reading as a clean bus when it is really an
+	; unsampled one, and leaving precisely run 18's freeze (which died at
+	; frame 256) just as unreadable as before.
+	;
+	; Frame 128 exactly, not every 128th: at a multiple of 256 phaseSwitch
+	; has already called doHealth on its way through phaseTally, and this
+	; would merely do it twice. So it fires once per window, 16 times in a
+	; 4096-frame run, 8 in A windows and 8 in B -- symmetric, which is the
+	; property the A/B comparison actually needs, and 1% of the run's ~1700
+	; dispatches either way. The windows' denominators are printed, so the
+	; cost is visible rather than assumed.
+	lda frames
+	cmp #128
+	bne fcNoHealth
+	jsr doHealth
+fcNoHealth
+
+	lda frames
+	and #31
+	bne fcNoBus
+	jsr showBus
+fcNoBus
+
+	; RUN/STOP off this program's own matrix scan, and only believed on
+	; two consecutive frames: the KERNAL's $91 is maintained by an IRQ
+	; that fights the sei-guarded column reads in readKeys.
+	lda keyD
+	and #KD_STOP
+	bne frUp
+	inc stopCt
+	lda stopCt
+	cmp #2
+	bcs finish
+	jmp frame
+frUp
+	lda #0
+	sta stopCt
+	jmp frame
+
+; ======================================================================
+; Shutting down. LOOP_STOP hands the framebuffer back to immediate mode --
+; without it the next program to run finds the loop still rendering this
+; program's scene over the top of whatever it draws.
+; ======================================================================
+finish
+	; LOOP_STOP used to go out through cmd1: no sequence number, no check,
+	; no retry. On 2026-09-10 that bit. The run ended with WHY 02 -- the
+	; cause the start-up SCENE_RESET left -- which means the closing
+	; LOOP_STOP never dispatched at all, and the loop was still running
+	; when the program exited. That is precisely the state the next
+	; program inherits and cannot see.
+	;
+	; LOOP_STOP is idempotent: it clears a flag and records a cause. So
+	; unlike SCENE_COMMIT it can simply be re-sent until SEQACK confirms
+	; it, and STOPTRY on row 21 says how many times that was needed.
+	; Bank the window in progress BEFORE the teardown, so the closing
+	; LOOP_STOP is charged to neither condition -- the same rule the phase
+	; boundaries follow.
+	jsr phaseTally
+	jsr sendStop
+
+	lda #0
+	sta CMD_HI
+
+	; The second sample, and the rows it feeds. This is the whole point of
+	; the 2026-09-09 revision: until now MISSED was a numerator with no
+	; denominator and no attribution, and the bench could not tell a lost
+	; command from a lost sequence byte from a bad read.
+	;
+	; Unless stuckWatch already fired. Its snapshot was taken while the
+	; loop was stopped by something this program never sent, and the
+	; LOOP_STOP just above would overwrite exactly the bytes that say so --
+	; STOPSRC would come back reading the teardown's own perfectly ordinary
+	; 01 REALCMD. A stuck run keeps the picture it froze.
+	lda stuckDone
+	bne fnKeep
+	jsr doHealth
+	jsr showBus
+fnKeep
+
+	; Row 1, not row 23: row 23 now carries STOPSRC, and this message would
+	; erase the one row a stuck run is being read for.
+	lda #1
+	jsr dmRow
+	jsr dmText
+	.text "STOPPED - RUN/STOP AGAIN TO EXIT"
+	.byte 0
+
+-	jsr readKeys			; wait for the key that stopped us to
+	lda keyD			; come back up, so the second press is
+	and #KD_STOP			; a real one
+	beq -
+-	jsr readKeys
+	lda keyD
+	and #KD_STOP
+	bne -
+	jsr $e544			; KERNAL clear screen
+	rts
+
+; ======================================================================
+; The scene, built once.
+;
+; Every node here is created and placed at start-up and then either never
+; touched again -- the level, the torch, the monster in the corner -- or
+; touched with one command a frame. This routine is the reason a frame is
+; short.
+; ======================================================================
+buildScene
+	; The camera. LOOP_START refuses to run without an active one, so
+	; these two are not optional.
+	#id16 CAM_ID
+	lda #OP_CREATE_CAMERA
+	jsr cmd1
+	jsr logSetup
+
+	#id16 CAM_ID
+	lda #OP_SET_ACTIVE_CAMERA
+	jsr cmd1
+	jsr logSetup
+
+	; The level at the world origin: the mesh is already in world
+	; coordinates, so this node is placed once and never moves.
+	#id16 LEVEL_ID
+	#argw 0, MESH_ID
+	lda #OP_CREATE_OBJECT
+	jsr cmd1
+	jsr logSetup
+
+	#id16 LEVEL_ID
+	#arg1616 0, 0
+	#arg1616 4, 0
+	#arg1616 8, 0
+	lda #OP_SET_POSITION
+	jsr cmd1
+	jsr logSetup
+
+	; --- the three monsters -------------------------------------------
+	lda #0
+	sta monN
+bsMon
+	jsr bsMonId
+	#argw 0, TEX_MON
+	lda #OP_CREATE_SPRITE
+	jsr cmd1
+	jsr logSetup
+
+	jsr bsMonId
+	#argw 0, MON_W
+	#argw 2, MON_H
+	#argb 4, SPR_DIRECTIONAL
+	lda #OP_SET_SPRITE
+	jsr cmd1
+	jsr logSetup
+
+	jsr monStagePos
+	jsr bsMonId
+	lda #OP_SET_POSITION
+	jsr cmd1
+	jsr logSetup
+
+	jsr monStageFace
+	jsr bsMonId
+	lda #OP_SET_ORIENTATION
+	jsr cmd1
+	jsr logSetup
+
+	inc monN
+	lda monN
+	cmp #3
+	bne bsMon
+
+	; --- the torch ----------------------------------------------------
+	; A light is a node like any other: created, positioned by the
+	; ordinary transform opcodes, and then left alone for the whole run.
+	; The class 2 demo had to re-send this light, position and all, every
+	; single frame to keep it lit.
+	#id16 TORCH_ID
+	lda #OP_CREATE_LIGHT
+	jsr cmd1
+	jsr logSetup
+
+	#id16 TORCH_ID
+	#arg1616 0, TORCH_X
+	#arg1616 4, TORCH_Y
+	#arg1616 8, TORCH_Z
+	lda #OP_SET_POSITION
+	jsr cmd1
+	jsr logSetup
+
+	#id16 TORCH_ID
+	#argb 0, TORCH_S
+	#argw 1, TORCH_R
+	lda #OP_SET_POINT_LIGHT
+	jsr cmd1
+	jsr logSetup
+
+	; --- the muzzle flash ---------------------------------------------
+	; Created here and switched straight off. Creating it up front is
+	; what makes firing cost a SET_VISIBLE instead of a node allocation
+	; in the middle of a frame.
+	#id16 FLASH_ID
+	lda #OP_CREATE_LIGHT
+	jsr cmd1
+	jsr logSetup
+
+	#id16 FLASH_ID
+	#argb 0, 0
+	lda #OP_SET_VISIBLE
+	jsr cmd1
+	jsr logSetup
+
+	#id16 FLASH_ID
+	#argb 0, 0			; strength comes with the trigger
+	#argw 1, FLASH_R
+	lda #OP_SET_POINT_LIGHT
+	jsr cmd1
+	jmp logSetup
+
+; ID_LO/ID_HI = the id of monster monN. Node ids here are all under 256, so
+; the high byte is a constant.
+bsMonId
+	ldx monN
+	lda monIds,x
+	sta ID_LO
+	lda #0
+	sta ID_HI
+	rts
+
+monIds	.byte MON0_ID, MON1_ID, MON2_ID
+
+; ----------------------------------------------------------------------
+; The monster records: eight bytes each so indexing one is three shifts.
+; x, y, z are class 1 world 8.8 and face is the direction the monster
+; itself points, in the class-2 byte units the walk arithmetic uses.
+;
+; These are the class 2 demo's three things -- (3,-3,0), (10,1,Z_RAMP) and
+; (5,0,0) with the last two axes swapped. A sprite's position is its FEET,
+; the same measure class 2's `base` was.
+; ----------------------------------------------------------------------
+MRECLEN	= 8
+monRec
+	.word WU(3),  0,      WU(-3)
+	.byte 32, 0
+	.word WU(10), Z_RAMP, WU(1)
+	.byte 0, 0
+	.word WU(5),  0,      0
+	.byte 64, 0
+
+; Stage monster monN's position as three 16.16 vectors.
+monStagePos
+	jsr monOffX
+	ldy #0
+	jsr putTab1616
+	ldy #4
+	jsr putTab1616
+	ldy #8
+	jmp putTab1616
+
+; Stage monster monN's facing as an orientation.
+monStageFace
+	jsr monOffX
+	lda monRec+6,x
+	jmp faceToYaw
+
+; X = the byte offset of monster monN's record.
+monOffX
+	lda monN
+	asl a
+	asl a
+	asl a
+	tax
+	rts
+
+; ======================================================================
+; The state refresh ring.
+;
+; SEQACK covers the SEQ write and CMD_LO. It does not cover an ARG or an
+; ID store, and nothing else does either: a dropped argument byte leaves a
+; retained node holding a value nobody asked for, with no error, no RESULT
+; and no way to notice. In a retained scene that is not a glitch for one
+; frame -- it is permanent, because the only thing that would ever correct
+; it is a later command carrying the right value, and a program that sends
+; a node's state only when that state CHANGES never sends one.
+;
+; So the defence is not detection, it is expiry. Every node's full state is
+; re-asserted on a rotating schedule whether or not it changed, which puts
+; a ceiling on how long any single lost store can survive. Every transform
+; and state opcode is absolute and idempotent (SET_POSITION, not
+; MOVE_WORLD), so a re-send is always safe and always converges.
+;
+; Which nodes need this is not obvious and is worth stating plainly: it is
+; exactly the ones that never move. The two monsters that walk and turn
+; send their position every frame anyway, so a dropped store costs them one
+; frame. The monster standing in the corner, the torch, and the level
+; itself are each placed once before LOOP_START and never mentioned again
+; -- and those three are most of what a room is made of. The rule is
+; **a node that never changes is a node that never heals.**
+;
+; One entry per REFRESH_EVERY frames, round-robin. Twenty-eight entries at
+; two frames each is a full cycle in 56 frames, about nine tenths of a second,
+; for half a command per frame against the eleven a frame already sends.
+; Note which knob is which: REFRESH_EVERY alone sets the cost per frame,
+; and the entry count sets the cycle length. Adding entries lengthens the
+; bound; it does not add traffic. So cover everything. Not one entry per frame: the point is a bound on the damage, not
+; the re-send-everything-every-frame that class 2 did and that this program
+; exists to stop doing.
+; ======================================================================
+REFRESH_EVERY = 2
+
+doRefresh
+	dec refreshCt
+	bpl rfDone
+	lda #REFRESH_EVERY-1
+	sta refreshCt
+
+	ldx refreshIx
+	lda refreshTab,x
+	sta rfCall+1
+	lda refreshTab+1,x
+	sta rfCall+2
+	inx
+	inx
+	cpx #REFRESH_N*2
+	bcc +
+	ldx #0
++	stx refreshIx
+rfCall	jsr $ffff			; patched two lines up
+rfDone	rts
+
+; Interleaved so that two entries for the same node are not adjacent, which
+; matters only if a burst of bus trouble is correlated in time -- it costs
+; nothing to arrange, so it is arranged.
+refreshTab
+	.word scPosSend			; camera position
+	.word lvlPosSend		; the level: placed once, never moves
+	.word scRotSend			; camera orientation
+	.word rfMon0Pos			; monster 0: never moves, never turns
+	.word rfTorchPos		; the torch: placed once, lit once
+	.word rfMon0Rot
+	.word rfMon1Pos			; monster 1: turns every frame, but its
+	.word rfFlashVis		;   POSITION is placed once -- see below
+	.word rfMon1Rot
+	.word rfTorchLight
+	.word rfMon2Pos			; monster 2 sends both every frame; these
+	.word rfMon2Rot			;   two are here for uniformity only
+	.word rfMon0Spr			; the sprite sizes, set once in buildScene
+	.word rfMon1Spr			;   -- see the note on misaddressed
+	.word rfMon2Spr			;   commands below
+	.word rfFlashLight		; the flash's radius: only ever sent on a
+					;   frame he is firing, so between shots
+					;   nothing would repair it
+
+	; And the rest of what each node TYPE accepts, whether or not this
+	; program ever sets it. The level's ORIENTATION is the one that
+	; forced the issue: the program never rotates the room, so it had no
+	; entry, and the injected run put a yaw of 3072 on it -- from a
+	; monster's SET_ORIENTATION whose id write was lost. A light wearing
+	; a stray yaw is harmless. A ROOM wearing one is the whole level
+	; tilted for the rest of the session, and nothing would have put it
+	; back.
+	.word rfLvlRot
+	.word rfLvlScale
+	.word rfLvlVis
+	.word rfMon0Scale
+	.word rfMon1Scale
+	.word rfMon2Scale
+	.word rfMon0Vis
+	.word rfMon1Vis
+	.word rfMon2Vis
+	.word rfTorchVis
+
+	; The two lights' orientations, which the renderer does not read at
+	; all -- a point light has no facing. They are here so that the
+	; fault-injection test in docs/state-refresh.md has an unambiguous
+	; verdict: every field the scene dump prints has a writer, so any
+	; difference at all is a defect rather than a judgement call about
+	; which stray values happen not to matter. Two commands per cycle.
+	.word rfTorchRot
+	.word rfFlashRot
+	.word rfFlashPos
+	.word rfDmaWin			; the readback fence -- set once, so no
+				;   other writer, and a phantom that
+				;   moved it would aim the next health
+				;   block at this program's code
+REFRESH_N = ( * - refreshTab ) / 2
+
+; All three monsters, both halves of each, and the reason is worth writing
+; down because getting it wrong is the easy mistake and this program made
+; it. The ring first shipped with entries for monster 0 alone -- it is the
+; one that never moves, so it is obviously the one that cannot heal -- and
+; a fault-injected run in the simulator came back with monster 1 stranded
+; at the wrong coordinates while every other node had repaired itself.
+;
+; Monster 1 turns on the spot. Its ORIENTATION goes out every frame, which
+; makes it look like a moving node; its POSITION is written once in
+; buildScene and never again. Half of it heals and half of it cannot, and
+; nothing about the node says which half.
+;
+; So the test is not "does this node move". It is mechanical, per piece of
+; state: **anything not written unconditionally every frame needs an
+; entry.** Monster 2's two are listed even though it sends both every frame
+; and so needs neither -- the cost is one command every REFRESH_EVERY
+; frames and the benefit is that the table does not have to be re-audited
+; every time the animation changes.
+;
+; monN is the selector monStagePos and bsMonId both read; sendMonsters sets
+; it again for its own two later in the same frame, so borrowing it is free.
+rfMon0Pos
+	lda #0
+	.byte $2c			; bit $xxxx -- skip the next two bytes
+rfMon1Pos
+	lda #1
+	.byte $2c
+rfMon2Pos
+	lda #2
+	sta monN
+	jsr smPosOnce
+	beq +
+	jsr smPosOnce
++	rts
+
+rfMon0Rot
+	lda #0
+	.byte $2c
+rfMon1Rot
+	lda #1
+	.byte $2c
+rfMon2Rot
+	lda #2
+	sta monN
+	jsr smFaceOnce
+	beq +
+	jsr smFaceOnce
++	rts
+
+; SET_SPRITE, which buildScene issues once per monster and no frame ever
+; issues again. Nothing in the animation touches it, so by the rule above
+; it would not need an entry -- except that the rule is about state you
+; WRITE, and a dropped ID_LO writes state you did not.
+;
+; The same simulator run that caught monster 1 also left the muzzle flash
+; holding a yaw of 20992. Nothing in this program ever sets a light's
+; orientation; that value arrived from a SET_ORIENTATION aimed at a monster
+; whose id write was lost, and it landed on whichever node was addressed
+; last. A light's yaw is unused, so it did no harm -- but the same accident
+; on a sprite's size, or on a node's scale, is a monster that is suddenly
+; the wrong size for the rest of the session, and only its owner re-sending
+; it puts it back.
+;
+; So the entries want to cover what each node TYPE uses, not only what this
+; program happens to set. Three more commands per cycle is the whole cost.
+rfMon0Spr
+	lda #0
+	.byte $2c
+rfMon1Spr
+	lda #1
+	.byte $2c
+rfMon2Spr
+	lda #2
+	sta monN
+	jsr rfSprOnce
+	beq +
+	jsr rfSprOnce
++	rts
+
+rfSprOnce
+	#argw 0, MON_W
+	#argw 2, MON_H
+	#argb 4, SPR_DIRECTIONAL
+	jsr bsMonId
+	lda #OP_SET_SPRITE
+	jmp cmdSeq1
+
+; The torch. Staged again before the retry, the same as every other
+; sequenced send here: the write that was lost is as likely to have been an
+; argument as the opcode.
+rfTorchPos
+	jsr rfTorchPStage
+	jsr rfTorchPCmd
+	beq +
+	jsr rfTorchPStage
+	jsr rfTorchPCmd
++	rts
+
+rfTorchPStage
+	#arg1616 0, TORCH_X
+	#arg1616 4, TORCH_Y
+	#arg1616 8, TORCH_Z
+	rts
+
+rfTorchPCmd
+	#id16 TORCH_ID
+	lda #OP_SET_POSITION
+	jmp cmdSeq1
+
+; Strength and radius. Either arriving as zero puts the light out without
+; destroying the node, so a dropped ARG0 here is a room that silently goes
+; dark for the rest of the run -- the single most visible thing on this
+; list, and the one with no other way back.
+rfTorchLight
+	jsr rfTorchLStage
+	jsr rfTorchLCmd
+	beq +
+	jsr rfTorchLStage
+	jsr rfTorchLCmd
++	rts
+
+rfTorchLStage
+	#argb 0, TORCH_S
+	#argw 1, TORCH_R
+	rts
+
+rfTorchLCmd
+	#id16 TORCH_ID
+	lda #OP_SET_POINT_LIGHT
+	jmp cmdSeq1
+
+; The muzzle flash. sfVisOnce always sends the state flashArm says it
+; should be in, so this is correct whether it is lit or out. Its position
+; and strength go out on every frame he is FIRING, which is not the same as
+; every frame -- see rfFlashPos.
+rfFlashVis
+	jsr sfVisOnce
+	beq +
+	jsr sfVisOnce
++	rts
+
+; Radius, and the strength flashCt currently says it should be -- zero when
+; he is not firing, which is one of the two ways a light is off and is
+; exactly what the scene should hold between shots.
+rfFlashLight
+	jsr rfFlashLStage
+	jsr rfFlashLCmd
+	beq +
+	jsr rfFlashLStage
+	jsr rfFlashLCmd
++	rts
+
+rfFlashLStage
+	lda flashCt
+	asl a
+	asl a
+	sta ARG+0
+	#argw 1, FLASH_R
+	rts
+
+rfFlashLCmd
+	#id16 FLASH_ID
+	lda #OP_SET_POINT_LIGHT
+	jmp cmdSeq1
+
+; Position, from the shadow sfMove keeps. This entry is what the drop:10
+; fault sweep was missing: the light is placed at his eye on the frames he
+; fires and then never again, so it is a field with a writer that stops
+; writing. The sweep caught it the other way round -- a SET_POSITION whose
+; ID_LO was lost landed on the flash in a run where he never fired at all,
+; and there was nothing to put it back.
+rfFlashPos
+	jsr rfFlashPStage
+	jsr rfFlashPCmd
+	beq +
+	jsr rfFlashPStage
+	jsr rfFlashPCmd
++	rts
+
+rfFlashPStage
+	ldx #11
+-	lda flashPosSave,x
+	sta ARG,x
+	dex
+	bpl -
+	rts
+
+rfFlashPCmd
+	#id16 FLASH_ID
+	lda #OP_SET_POSITION
+	jmp cmdSeq1
+
+; The readback fence, re-asserted. It is class 0 state rather than node
+; state, but it obeys the same rule as every other entry in this table: it
+; is written once and never again, so nothing else would ever put it back.
+; setDmaWin restores CMD_HI to 1 on the way out -- see below -- because the
+; frame loop that calls this runs entirely in class 1.
+rfDmaWin
+	jsr setDmaWin
+	lda #1
+	sta CMD_HI
+	rts
+
+; ----------------------------------------------------------------------
+; The fields nothing in this program ever writes.
+;
+; Every one of these sends a constant -- the room is at the origin, upright,
+; full size and visible, and it always will be. That is exactly why they
+; need entries: a value that never changes is a value with no other writer,
+; so a misaddressed command that lands on it stays there forever.
+; ----------------------------------------------------------------------
+rfLvlRot
+	jsr rfZeroRot
+	jsr rfLvlRotCmd
+	beq +
+	jsr rfZeroRot
+	jsr rfLvlRotCmd
++	rts
+
+rfZeroRot
+	lda #0
+	sta ARG+0
+	sta ARG+1
+	sta ARG+2
+	sta ARG+3
+	sta ARG+4
+	sta ARG+5
+	rts
+
+rfLvlRotCmd
+	#id16 LEVEL_ID
+	lda #OP_SET_ORIENTATION
+	jmp cmdSeq1
+
+rfLvlScale
+	#id16 LEVEL_ID
+	jsr rfScaleOne
+	beq +
+	jsr rfScaleOne
++	rts
+
+rfMon0Scale
+	lda #0
+	.byte $2c
+rfMon1Scale
+	lda #1
+	.byte $2c
+rfMon2Scale
+	lda #2
+	sta monN
+	jsr bsMonId
+	jsr rfScaleOne
+	beq +
+	jsr bsMonId
+	jsr rfScaleOne
++	rts
+
+; SET_SCALE is unsigned 8.8 and zero is BAD_ARGS, so one is 256. Stages its
+; own arguments, which is what makes it safe to call twice.
+rfScaleOne
+	#argw 0, 256
+	lda #OP_SET_SCALE
+	jmp cmdSeq1
+
+rfLvlVis
+	#id16 LEVEL_ID
+	jsr rfVisOne
+	beq +
+	jsr rfVisOne
++	rts
+
+rfTorchVis
+	#id16 TORCH_ID
+	jsr rfVisOne
+	beq +
+	jsr rfVisOne
++	rts
+
+rfMon0Vis
+	lda #0
+	.byte $2c
+rfMon1Vis
+	lda #1
+	.byte $2c
+rfMon2Vis
+	lda #2
+	sta monN
+	jsr bsMonId
+	jsr rfVisOne
+	beq +
+	jsr bsMonId
+	jsr rfVisOne
++	rts
+
+rfVisOne
+	#argb 0, 1
+	lda #OP_SET_VISIBLE
+	jmp cmdSeq1
+
+rfTorchRot
+	jsr rfZeroRot
+	jsr rfTorchRotCmd
+	beq +
+	jsr rfZeroRot
+	jsr rfTorchRotCmd
++	rts
+
+rfTorchRotCmd
+	#id16 TORCH_ID
+	lda #OP_SET_ORIENTATION
+	jmp cmdSeq1
+
+rfFlashRot
+	jsr rfZeroRot
+	jsr rfFlashRotCmd
+	beq +
+	jsr rfZeroRot
+	jsr rfFlashRotCmd
++	rts
+
+rfFlashRotCmd
+	#id16 FLASH_ID
+	lda #OP_SET_ORIENTATION
+	jmp cmdSeq1
+
+; ======================================================================
+; The camera: the two commands that are the whole of what this program
+; tells gpu64 about where the player is.
+;
+; This is the only routine that knows the player and the scene are in
+; different coordinate systems:
+;
+;   class 1 x = posX,  y = eyeZ,  z = posY        the axis swap
+;   class 1 yaw   = (64 - plYaw) << 8             class 2 yaw 0 looks +x,
+;                                                 class 1 yaw 0 looks +z
+;   class 1 pitch = -(plPitch << 8)               class 2 pitch is positive
+;                                                 looking UP, class 1
+;                                                 positive is looking DOWN
+;
+; Both go through cmdSeq1, which re-sends the WHOLE command -- arguments
+; included -- if SEQACK says a write was dropped. Re-firing CMD_LO alone
+; would not do: the write that was lost is as likely to have been an
+; argument byte, and the ARG window still holds whatever did land.
+;
+; But SEQACK only ever says so for the SEQ write and for CMD_LO. A lost ARG
+; or ID store is invisible to it, and the shadow below then records a
+; command that half-arrived as a command that arrived -- which is exactly
+; the permanent corruption the last paragraph of this comment warns about,
+; reached through the one door it does not check. The state refresh ring
+; above is what bounds it. Three bench symptoms are this and nothing else,
+; and the register that carries each one says why:
+;
+;   ARG3   SET_ORIENTATION puts the camera's PITCH high byte here, and the
+;          SET_POSITION before it puts posX's. Lose the pitch store and the
+;          view tips by a coordinate and stays there -- "I have not looked
+;          down and it looks like I am looking down" -- because plPitch has
+;          not changed, so no later frame re-sends it.
+;   ARG1   the same trade for YAW: the view snaps to a bearing nobody
+;          asked for. This one heals as soon as the player turns.
+;   ID_LO  a lost id store aims the command at whichever node was addressed
+;          last. The monsters are updated in the same frame, so the camera
+;          lands on a monster or a monster lands on the camera: the player
+;          is teleported across the room, sees it from outside through the
+;          backfaces of its near walls, and stays there.
+;
+; And neither is sent at all unless the player actually moved. The scene
+; keeps the camera between frames, so standing still costs nothing -- which
+; is the difference from class 2, where the camera went out every frame
+; whether it had changed or not. The comparison is against the SOURCE bytes
+; (posX/posY/eyeZ, plYaw/plPitch) and not against the ARG window: the ARG
+; registers are write-only, and reading them back would sample a floating
+; bus rather than what was staged.
+;
+; The shadow is updated only after a send whose SEQACK matched. A command
+; that may or may not have landed has to stay recorded as NOT sent -- mark
+; it sent and a dropped camera update becomes permanent, because no later
+; frame would ever see a difference to correct it.
+; ======================================================================
+sendCamera
+	jsr camPosChanged
+	beq +
+	jsr scPosSend
++
+	jsr camRotChanged
+	beq +
+	jsr scRotSend
++	rts
+
+; The level, back at the world origin. Sent through the sequenced path like
+; everything else in the frame loop, so it is counted in dispCt and shows up
+; in the DISPWHY reconciliation rather than making the two counts disagree.
+; The arguments are re-staged before the retry: the whole reason this exists
+; is that the lost write may have been one of them.
+lvlPosSend
+	jsr lvlStagePos
+	jsr lvlPosCmd
+	beq lpDone
+	jsr lvlStagePos
+	jsr lvlPosCmd
+lpDone	rts
+
+lvlStagePos
+	#arg1616 0, 0
+	#arg1616 4, 0
+	#arg1616 8, 0
+	rts
+
+lvlPosCmd
+	#id16 LEVEL_ID
+	lda #OP_SET_POSITION
+	jmp cmdSeq1
+
+; Unconditional. Start-up calls these two directly, before LOOP_START, to
+; put the camera somewhere and to seed the shadows with what was sent.
+scPosSend
+	jsr scStagePos
+	jsr scPosCmd
+	beq +
+	jsr scPosCmd
+	bne scpDone
++	jsr camPosKeep
+scpDone	rts
+
+scRotSend
+	jsr scStageRot
+	jsr scRotCmd
+	beq +
+	jsr scRotCmd
+	bne scrDone
++	jsr camRotKeep
+scrDone	rts
+
+scStagePos
+	ldx #posX
+	ldy #0
+	jsr put1616
+	jsr argEye			; ARG4..7
+	ldx #posY
+	ldy #8
+	jmp put1616
+
+scPosCmd
+	#id16 CAM_ID
+	lda #OP_SET_POSITION
+	jmp cmdSeq1
+
+scStageRot
+	lda #0
+	sta ARG+0
+	lda #64
+	sec
+	sbc plYaw
+	sta ARG+1
+
+	lda #0
+	sta ARG+2
+	sec				; 0 - (plPitch << 8), which is a
+	sbc plPitch			; borrow-free subtract of the high
+	sta ARG+3			; byte alone when the low byte is 0
+
+	lda #0
+	sta ARG+4
+	sta ARG+5
+	rts
+
+scRotCmd
+	#id16 CAM_ID
+	lda #OP_SET_ORIENTATION
+	jmp cmdSeq1
+
+; A = 0 when the camera is where it was left. Six bytes for the position
+; and two for the angles, because those eight are everything the two
+; commands above are built from.
+camPosChanged
+	lda posX
+	cmp camPosSh+0
+	bne cpcDiff
+	lda posX+1
+	cmp camPosSh+1
+	bne cpcDiff
+	lda posY
+	cmp camPosSh+2
+	bne cpcDiff
+	lda posY+1
+	cmp camPosSh+3
+	bne cpcDiff
+	lda eyeZ
+	cmp camPosSh+4
+	bne cpcDiff
+	lda eyeZ+1
+	cmp camPosSh+5
+	bne cpcDiff
+	lda #0
+	rts
+cpcDiff	lda #1
+	rts
+
+camPosKeep
+	lda posX
+	sta camPosSh+0
+	lda posX+1
+	sta camPosSh+1
+	lda posY
+	sta camPosSh+2
+	lda posY+1
+	sta camPosSh+3
+	lda eyeZ
+	sta camPosSh+4
+	lda eyeZ+1
+	sta camPosSh+5
+	rts
+
+camRotChanged
+	lda plYaw
+	cmp camRotSh+0
+	bne crcDiff
+	lda plPitch
+	cmp camRotSh+1
+	bne crcDiff
+	lda #0
+	rts
+crcDiff	lda #1
+	rts
+
+camRotKeep
+	lda plYaw
+	sta camRotSh+0
+	lda plPitch
+	sta camRotSh+1
+	rts
+
+; ======================================================================
+; The two monsters that move.
+;
+; Three bytes of state between them, and one command each. A class 2 frame
+; re-sent all three whole sixteen-byte records inside the batch whether
+; they had changed or not; the one standing in the corner is not mentioned
+; here at all.
+; ======================================================================
+sendMonsters
+	; The one on the platform turns on the spot, a full circle every 256
+	; frames, so all eight of its views come round without it moving.
+	lda frameCt
+	sta monRec+1*MRECLEN+6
+
+	; The one on the floor walks the width of the room and back. In class
+	; 1 that is its z, and its facing flips at each end.
+	ldy #64				; walking toward +z
+	lda frameCt
+	and #$7f
+	cmp #$40
+	bcc +
+	eor #$7f			; 127 - p: the way back
+	ldy #192
++
+	sty monRec+2*MRECLEN+6
+	sec
+	sbc #32				; -32..31
+	sta smTmp
+	asl a				; x8 -> -4.0 .. 3.9 world units. The
+	asl a				; high byte is the sign of the value
+	asl a				; BEFORE the shift, which is right for
+	sta monRec+2*MRECLEN+4		; this range and only for this range.
+	lda smTmp
+	and #$80
+	beq +
+	lda #$ff
++
+	sta monRec+2*MRECLEN+5
+
+	lda #1
+	sta monN
+	jsr smFaceOnce
+	beq +
+	jsr smFaceOnce
++
+	lda #2
+	sta monN
+	jsr smPosOnce
+	beq +
+	jsr smPosOnce
++
+	jsr smFaceOnce
+	beq +
+	jsr smFaceOnce
++	rts
+
+smPosOnce
+	jsr monStagePos
+	jsr bsMonId
+	lda #OP_SET_POSITION
+	jmp cmdSeq1
+
+smFaceOnce
+	jsr monStageFace
+	jsr bsMonId
+	lda #OP_SET_ORIENTATION
+	jmp cmdSeq1
+
+; ======================================================================
+; The muzzle flash.
+;
+; Nothing at all is sent on a frame he is not firing, which is the point of
+; a light being a node: it keeps its position, its radius and its strength
+; between frames, so "still off" costs nothing. Class 2's inline SET_LIGHT
+; had to be re-sent every frame just to stay lit.
+; ======================================================================
+sendFlash
+	lda flashCt
+	bne sfLit
+
+	lda flashArm			; out, and already switched off?
+	beq sfDone
+	lda #0
+	sta flashArm
+	jsr sfVisOnce			; no: this is the frame that clears it
+	beq sfDone
+	jmp sfVisOnce
+
+sfLit
+	lda flashArm
+	cmp #2
+	beq sfMove
+	lda #2
+	sta flashArm
+	jsr sfVisOnce
+	beq sfMove
+	jsr sfVisOnce
+
+sfMove
+	; At his eye, so what it lights is whatever he is pointing at.
+	ldx #posX
+	ldy #0
+	jsr put1616
+	jsr argEye
+	ldx #posY
+	ldy #8
+	jsr put1616
+
+	; Keep what was staged. The flash's position is written only on the
+	; frames he is firing, so between shots nothing rewrites it and a
+	; dropped byte -- or a misaddressed SET_POSITION meant for the camera
+	; -- would sit in the node for the rest of the run. The ring resends
+	; this shadow, which is zeroed at load, so a program that never fires
+	; still has a writer for the field.
+	ldx #11
+-	lda ARG,x
+	sta flashPosSave,x
+	dex
+	bpl -
+
+	#id16 FLASH_ID
+	lda #OP_SET_POSITION
+	jsr cmdSeq1
+
+	; 10..1 -> strength 40..4. Forty is far past the sixteen levels the
+	; colormap has and the lookup clamps, so near the muzzle the wall
+	; goes white.
+	lda flashCt
+	asl a
+	asl a
+	sta ARG+0
+	#argw 1, FLASH_R
+	#id16 FLASH_ID
+	lda #OP_SET_POINT_LIGHT
+	jsr cmdSeq1
+
+	dec flashCt
+sfDone
+	rts
+
+; SET_VISIBLE with the state flashArm now says it should be: 2 means lit.
+sfVisOnce
+	lda flashArm
+	cmp #2
+	beq +
+	lda #0
+	.byte $2c			; bit $a901 -- skips the next two bytes
++	lda #1
+	sta ARG+0
+	#id16 FLASH_ID
+	lda #OP_SET_VISIBLE
+	jmp cmdSeq1
+
+; ======================================================================
+; Wait for the render loop to finish a frame.
+;
+; STATUS bit 4 is FRAME_READY, and this is a plain register read: no
+; dispatch, no DMA hold, nothing the loop has to stop for. The counter is a
+; dead-loop guard only.
+; ======================================================================
+waitReady
+	lda #<READY_WAIT
+	sta waitCt
+	lda #>READY_WAIT
+	sta waitCt+1
+	; BOTH bits, not just FRAME_READY. FRAME_READY says core 1 has finished
+	; rendering; it says nothing about the flip the *previous* commit armed,
+	; which only retires at the next vblank and until then makes
+	; SCENE_COMMIT answer BUSY on gpu64Vsync.flipPending. Waiting on
+	; FRAME_READY alone is what produced 15838 BUSY answers against 6099
+	; accepted commits at the bench on 2026-09-08: the render finishes in
+	; well under a frame, so the program went back round three times per
+	; displayed frame and halted the C64 for a dispatch each time, to be
+	; told the same thing. STATUS bit 0 is cleared by the vsync commit in
+	; the same breath as gpu64Vsync.flipPending (rad_reu.cpp), so it is
+	; exactly the missing half of the condition.
+wrPoll
+	lda STATUS
+	and #( ST_FRAME_READY | ST_BUSY )
+	cmp #ST_FRAME_READY
+	beq wrDone
+	lda waitCt
+	bne +
+	dec waitCt+1
++	dec waitCt
+	lda waitCt
+	ora waitCt+1
+	bne wrPoll
+
+	; Gave up. Stamp it: which frame the FIRST stall happened on, and the
+	; STATUS byte the C64 was still being handed when the budget ran out.
+	; Read STATUS again rather than keeping it in the poll loop -- the loop
+	; runs 8000 times per stall and this runs once.
+	inc waitFail
+	lda STATUS
+	sta lastStat
+	lda stallSet
+	bne wrDone
+	inc stallSet
+	lda frames
+	sta stallFrame
+	lda frames+1
+	sta stallFrame+1
+wrDone
+	rts
+
+; ======================================================================
+; Dispatch.
+;
+; cmd1 is the plain one: the write to CMD_LO halts the C64 for the whole
+; command, so ERRCODE is valid on the very next instruction and there is
+; nothing to poll.
+;
+; csDispatch adds the sequence number. It writes an incrementing SEQ before
+; the dispatch and compares SEQACK after it; a mismatch means the SEQ write
+; or CMD_LO itself was not sampled by the polling loop -- the pre-existing
+; bus defect CLAUDE.md documents, about one write in 180000, not a bug in
+; this program. It returns A = 0 when the command was seen, and leaves the
+; ERRCODE in seqErr.
+;
+; What it does NOT cover, and what this comment claimed until 2026-09-10
+; that it did, is a dropped ARG or ID_LO/ID_HI write. Those land in plain
+; registers that nothing reads back, the dispatch that follows is perfectly
+; well-formed, and SEQACK matches -- gpu64_api.h says so in as many words:
+; "a dropped ARG write would silently go unnoticed today". The command then
+; executes on whatever the PREVIOUS command left in that register. See
+; sendCamera for what that costs and what this program does about it.
+;
+; cmdSeq1 is csDispatch for a caller that has already staged its arguments
+; and does not need to re-stage them (SET_VISIBLE, SET_POINT_LIGHT and the
+; rest all leave their ARG bytes alone). Callers whose arguments are
+; computed re-run the staging as well -- see sendCamera.
+; ======================================================================
+cmd1
+	ldx #1
+	stx CMD_HI
+	sta CMD_LO
+	lda ERRCODE
+	; The valid codes run $00-$0C. ANY value above that is not an answer
+	; gpu64 can give, so the read itself failed -- exactly the case
+	; csDispatch already re-reads for below, on SEQACK. The command
+	; finished long before this read returned, ERRCODE is a plain latch
+	; that is not going to change, and a second read a few cycles later is
+	; a fresh sample of the same settled value.
+	;
+	; Run 15 tested this against $FF alone, on the reasoning that $FF is
+	; what a floating bus answers. Run 16 showed that is only the common
+	; case: it reported ERR $20, FIRST $D1 and a last-SEQACK of $A3, none
+	; of which are errcodes either. An unserviced read returns whatever
+	; was last on the bus, which is usually but not always all-ones -- see
+	; the SEQBAD row, where 99 bad reads returned the value of the
+	; immediately preceding read. So test the range, not the value.
+	cmp #$0d
+	bcc c1Done			; a real code: the overwhelmingly common path
+	inc errBad
+	bne +
+	inc errBad+1
+
+	; Run 27 died here. ONE command's ERRCODE came back $D3 on both reads,
+	; and because the caller was LOOP_START the program stored that in
+	; loopErr and jumped straight to finish -- a whole bench run spent to
+	; print a blank screen. Two reads was simply not enough retries.
+	;
+	; There is no reason to be stingy. ERRCODE is a plain latch, the
+	; command finished long before the first read returned, and there is
+	; no deadline on reading it -- unlike the firmware side, where run 26
+	; showed the DRIVE has no margin at all. At the measured rate (54 bad
+	; reads in 611000) eight consecutive failures is not a thing that
+	; happens. Seven more costs a few microseconds on a path taken once in
+	; ten thousand commands.
++	ldx #7
+c1ReRead
+	lda ERRCODE
+	cmp #$0d
+	bcc c1Done
+	dex
+	bne c1ReRead
+
+	; Exhausted -- and the answer is reported as OK, not as the garbage
+	; byte. This is the run 27 lesson in one line: "I could not read the
+	; answer" is NOT "the command failed". The command was dispatched and
+	; SEQACK confirms that separately; all that was lost is the reply. A
+	; caller told $D3 does something drastic with it, a caller told OK
+	; carries on and the next state refresh repairs anything that really
+	; did go wrong. errBad2 keeps the event visible without letting it
+	; steer the program.
+	sta lastBadErr
+	inc errBad2
+	bne +
+	inc errBad2+1
++	lda #0
+c1Done
+	rts
+
+cmdSeq1
+	sta seqOp
+csDispatch
+	; The denominator. Every command that carries a sequence number is
+	; counted here, retries included, and GET_HEALTH byte 64 says how many
+	; of them the firmware actually executed. Twenty-four bits because a
+	; long run is four dispatches a frame and 65536 of those is under five
+	; minutes.
+	inc dispCt
+	bne +
+	inc dispCt+1
+	bne +
+	inc dispCt+2
++
+	; Never 0 and never $FF. Zero would let a SEQACK that has never been
+	; written read as a match; $FF would let a *dropped read* of SEQACK --
+	; which returns a floating $FF -- read as one, which is exactly the
+	; case the split below exists to separate out.
+	inc seqCounter
+	lda seqCounter
+	beq csWrap
+	cmp #$ff
+	bne csSeqOk
+csWrap	lda #1
+	sta seqCounter
+csSeqOk
+	lda seqCounter
+	sta SEQ
+	lda seqOp
+	jsr cmd1
+	sta seqErr
+	lda SEQACK
+	sta firstSeqAck
+	cmp seqCounter
+	beq csOk
+
+	; A mismatch, and three different things produce one: the SEQ write was
+	; lost, the CMD_LO write was lost, or this read of SEQACK was. They have
+	; nothing in common and until 2026-09-09 this program blamed all three
+	; on the first.
+	;
+	; Read SEQACK again. The firmware has already finished the command and
+	; SEQACK is a plain register, so a second read that agrees with
+	; seqCounter proves the *first read* was the failure and the firmware's
+	; state was right all along -- no retry is needed and none is asked for.
+	; Six cycles, on a path taken once in a few dispatches.
+	;
+	; The other two are separated on the firmware side, by GET_HEALTH bytes
+	; 64-71: dispatches short by this count means the CMD_LO writes were
+	; lost, seqRepeat equal to it means the SEQ writes were.
+	lda SEQACK
+	cmp seqCounter
+	bne csMissW
+	inc missRd
+	bne +
+	inc missRd+1
++
+	; Which of the two read-side producers it was. $FF is what a floating
+	; bus answers, so a first read of $FF is a mis-sampled address: the
+	; access was never decoded to SEQACK at all. Any OTHER wrong value is
+	; a real register read that was simply too early -- SEQACK still held
+	; the previous sequence number -- which is not a bus fault but a race,
+	; and points at the hold gate deferring the dispatch past the read.
+	; The 2026-09-09 runs disagreed on this ($FE then $FF), which is why
+	; it now gets counted instead of sampled.
+	lda firstSeqAck
+	cmp #$ff
+	bne mrNotFF
+	inc missRdFF
+	bne mrDone
+	inc missRdFF+1
+	jmp mrDone
+
+	; Not $FF, so the address decoded and a real register answered -- the
+	; question is which value came back. Three candidates, and they name
+	; three different defects:
+	;
+	;   one behind seqCounter  SEQACK had not been written yet, i.e. this
+	;                          read beat its own dispatch. A race, not a
+	;                          bus fault.
+	;   equal to seqErr        the value the ERRCODE read two instructions
+	;                          earlier returned -- the previous read's data
+	;                          still on the bus when this one latched.
+	;   anything else          neither; mrOther keeps the last one so it
+	;                          can be looked at.
+	;
+	; seqCounter skips 0, so one behind 1 is $FE, not 0.
+mrNotFF
+	lda seqCounter
+	sec
+	sbc #1
+	bne mrNoWrap
+	lda #$fe
+mrNoWrap
+	cmp firstSeqAck
+	bne mrNotPrev
+	inc mrPrev
+	bne mrDone
+	inc mrPrev+1
+	jmp mrDone
+mrNotPrev
+	lda firstSeqAck
+	cmp seqErr
+	bne mrNotErr
+	sta mrErrVal
+	inc mrErr
+	bne mrDone
+	inc mrErr+1
+	jmp mrDone
+mrNotErr
+	lda firstSeqAck
+	sta mrOther
+mrDone
+	lda #0
+	rts
+csMissW
+	sta lastSeqAck			; what it answered instead
+	inc missed
+	bne +
+	inc missed+1
++
+	lda #1				; A != 0: the caller should send again
+	rts
+csOk
+	lda #0
+	rts
+
+; ======================================================================
+; Argument staging helpers.
+; ======================================================================
+
+; X = the zero page address of a signed 8.8 value, Y = an ARG offset.
+; Writes the four bytes of the 16.16 SET_POSITION takes: the 8.8 value
+; shifted left eight and sign-extended.
+put1616
+	lda #0
+	sta ARG,y
+	iny
+	lda $00,x
+	sta ARG,y
+	iny
+	lda $01,x
+	sta ARG,y
+	iny
+	lda $01,x
+	and #$80
+	beq +
+	lda #$ff
++	sta ARG,y
+	rts
+
+; The same for eyeZ, which is in ordinary RAM rather than zero page. It is
+; a height above the floor and so is never negative, which is why the top
+; byte is a constant zero.
+argEye
+	lda #0
+	sta ARG+4
+	lda eyeZ
+	sta ARG+5
+	lda eyeZ+1
+	sta ARG+6
+	lda #0
+	sta ARG+7
+	rts
+
+; X = a byte offset into monRec, Y = an ARG offset. Leaves X advanced by
+; two, so three calls walk one record's x, y and z.
+putTab1616
+	lda #0
+	sta ARG,y
+	iny
+	lda monRec,x
+	sta ARG,y
+	iny
+	inx
+	lda monRec,x
+	sta ARG,y
+	iny
+	and #$80
+	beq +
+	lda #$ff
++	sta ARG,y
+	inx
+	rts
+
+; A = a class 2 facing byte. Stages the class 1 orientation that means the
+; same direction: yaw = (64 - facing) << 8, pitch and roll zero.
+faceToYaw
+	sta ftTmp
+	lda #0
+	sta ARG+0
+	lda #64
+	sec
+	sbc ftTmp
+	sta ARG+1
+	lda #0
+	sta ARG+2
+	sta ARG+3
+	sta ARG+4
+	sta ARG+5
+	rts
+
+; A = the low byte of the texture address, X = its high byte, Y = the id.
+uploadTex
+	sta ARG+1
+	stx ARG+2
+	sty ID_LO
+	lda #0
+	sta ID_HI
+	sta ARG+3
+	lda #SPACE_C64
+	sta ARG+0
+	#argw 4, TEXLEN
+	#argb 6, TEXSH
+	#argb 7, TEXSH
+	lda #OP_UPLOAD_TEXTURE
+	jmp cmd1
+
+; A = an ERRCODE, returned unchanged. Counts the start-up commands and
+; remembers the FIRST one that failed, by its number from 1 and its code.
+logSetup
+	tay
+	inc setupIdx
+	cpy #0
+	beq lsDone
+	lda setupBadCode
+	bne lsDone
+	sty setupBadCode
+	lda setupIdx
+	sta setupBadAt
+lsDone
+	tya
+	rts
+
+; ======================================================================
+; The player. Unchanged from gpu64_demo_quake.a: same axes, same units,
+; same tables. Nothing below this line knows that gpu64 is drawing a scene
+; graph rather than a batch of records.
+; ======================================================================
+movePlayer
+	inc frameCt
+	jsr readKeys
+
+	; Look up and down. The limit is 48 binary degrees either way -- far
+	; enough to see the ceiling, not far enough to turn the room over.
+	lda keyA
+	and #KA_F7
+	bne +
+	lda #0
+	sta plPitch
++
+	lda keyA
+	and #KA_F1
+	bne +
+	lda plPitch
+	cmp #PITCH_LIM
+	beq +
+	clc
+	adc #2
+	sta plPitch
++
+	lda keyA
+	and #KA_F3
+	bne +
+	lda plPitch
+	cmp #256-PITCH_LIM
+	beq +
+	sec
+	sbc #2
+	sta plPitch
++
+
+	; Turn first, so the walk that follows uses the angle he is facing by
+	; the end of the frame. Yaw counts anticlockwise: +y is to his left.
+	lda keyB
+	and #KB_A
+	bne +
+	lda plYaw
+	clc
+	adc #TURN
+	sta plYaw
++
+	lda keyC
+	and #KC_D
+	bne +
+	lda plYaw
+	sec
+	sbc #TURN
+	sta plYaw
++
+
+	; vecX,vecY is now one step forward: about an eighth of a world unit.
+	lda plYaw
+	jsr setDir
+
+	lda keyB
+	and #KB_W
+	bne +
+	lda vecX
+	ldx #posX
+	jsr addSgn
+	lda vecY
+	ldx #posY
+	jsr addSgn
++
+	lda keyB
+	and #KB_S
+	bne +
+	lda vecX
+	jsr negA
+	ldx #posX
+	jsr addSgn
+	lda vecY
+	jsr negA
+	ldx #posY
+	jsr addSgn
++
+
+	; Strafing right is the forward vector turned a quarter circle:
+	; (sin yaw, -cos yaw). No second lookup, just the two bytes swapped.
+	lda keyB
+	and #KB_E
+	bne +
+	lda vecY
+	ldx #posX
+	jsr addSgn
+	lda vecX
+	jsr negA
+	ldx #posY
+	jsr addSgn
++
+	lda keyD
+	and #KD_Q
+	bne +
+	lda vecY
+	jsr negA
+	ldx #posX
+	jsr addSgn
+	lda vecX
+	ldx #posY
+	jsr addSgn
++
+
+	; Fire. SPACE raises the muzzle flash and re-arms the one-shot that
+	; puts it out again; holding the key keeps it lit, which is what a
+	; held trigger should look like.
+	lda keyD
+	and #KD_SPC
+	bne +
+	lda #FLASH_N
+	sta flashCt
+	lda flashArm
+	bne +
+	lda #1
+	sta flashArm
++
+	jsr clampPos
+	jmp eyeHeight
+
+setDir
+	tax
+	lda sinTab,x
+	jsr asr2
+	sta vecY
+	txa
+	clc
+	adc #64
+	tax
+	lda sinTab,x
+	jsr asr2
+	sta vecX
+	rts
+
+asr2
+	cmp #$80			; carry = sign, so ROR keeps it
+	ror a
+	cmp #$80
+	ror a
+	rts
+
+negA
+	eor #$ff
+	clc
+	adc #1
+	rts
+
+; A = a signed 8-bit step, X = the zero page address of a 16-bit value:
+; add one to the other.
+addSgn
+	ldy #0
+	cmp #$80
+	bcc +
+	ldy #$ff			; sign-extend into the high byte
++
+	clc
+	adc $00,x
+	sta $00,x
+	tya
+	adc $01,x
+	sta $01,x
+	rts
+
+; Keep him inside the room: half a unit clear of every wall. There is no
+; collision detection here -- the room is a box, and a box is four
+; compares.
+;
+; x is always positive, so a negative high byte can only mean he walked
+; backwards through the west wall. y is signed, and biasing the high byte
+; by $80 turns the signed compare into the unsigned one the 6502 has.
+YHB	= (>Y_HI) ^ $80
+YLB	= (>Y_LO) ^ $80
+
+clampPos
+	lda posX+1
+	bmi cpLoX
+	cmp #>X_HI
+	bcc cpChkLo
+	bne cpHiX
+	lda posX
+	cmp #<X_HI
+	bcc cpChkLo
+cpHiX
+	lda #<X_HI
+	sta posX
+	lda #>X_HI
+	sta posX+1
+	jmp cpYax
+cpChkLo
+	lda posX+1
+	cmp #>X_LO
+	bcc cpLoX
+	bne cpYax
+	lda posX
+	cmp #<X_LO
+	bcs cpYax
+cpLoX
+	lda #<X_LO
+	sta posX
+	lda #>X_LO
+	sta posX+1
+
+cpYax
+	lda posY+1
+	eor #$80
+	cmp #YHB
+	bcc cpChkYlo
+	bne cpHiY
+	lda posY
+	cmp #<Y_HI
+	bcc cpChkYlo
+cpHiY
+	lda #<Y_HI
+	sta posY
+	lda #>Y_HI
+	sta posY+1
+	rts
+cpChkYlo
+	lda posY+1
+	eor #$80
+	cmp #YLB
+	bcc cpLoY
+	bne cpYdone
+	lda posY
+	cmp #<Y_LO
+	bcs cpYdone
+cpLoY
+	lda #<Y_LO
+	sta posY
+	lda #>Y_LO
+	sta posY+1
+cpYdone
+	rts
+
+; The height of the ramp under his feet, plus half a unit for the eye.
+;
+; The ramp climbs 1.5 units over the 3 from x=6 to x=9, so the floor he is
+; standing on is ( x - 6 ) / 2, clamped to the top. One subtract and one
+; shift is the whole of what a sloped floor costs the 6502.
+eyeHeight
+	lda posY+1			; the ramp is only three units wide,
+	bpl +				; so off its sides the floor is flat
+	lda posY
+	jsr negA
+	lda posY+1
+	eor #$ff
+	adc #0
++
+	cmp #2
+	bcs ehFlat
+
+	lda posX+1
+	cmp #6
+	bcc ehFlat
+
+	sec
+	lda posX
+	sbc #<RAMP_X0
+	sta eyeZ
+	lda posX+1
+	sbc #>RAMP_X0
+	sta eyeZ+1
+	lsr eyeZ+1
+	ror eyeZ
+
+	lda eyeZ+1
+	cmp #>Z_RAMP
+	bcc ehAdd
+	bne ehClamp
+	lda eyeZ
+	cmp #<Z_RAMP
+	bcc ehAdd
+ehClamp
+	lda #<Z_RAMP
+	sta eyeZ
+	lda #>Z_RAMP
+	sta eyeZ+1
+ehAdd
+	clc
+	lda eyeZ
+	adc #<EYE_UP
+	sta eyeZ
+	lda eyeZ+1
+	adc #>EYE_UP
+	sta eyeZ+1
+	rts
+
+ehFlat
+	lda #<EYE_UP
+	sta eyeZ
+	lda #>EYE_UP
+	sta eyeZ+1
+	rts
+
+; The keyboard, read straight off the matrix: four columns carry every key
+; this program uses.
+readKeys
+	sei
+	lda #$ff
+	sta $dc02			; port A drives the columns
+	lda #$00
+	sta $dc03			; port B reads the rows
+
+	lda #COL_A
+	sta CIA_PRA
+	lda CIA_PRB
+	sta keyA
+	lda #COL_B
+	sta CIA_PRA
+	lda CIA_PRB
+	sta keyB
+	lda #COL_C
+	sta CIA_PRA
+	lda CIA_PRB
+	sta keyC
+	lda #COL_D
+	sta CIA_PRA
+	lda CIA_PRB
+	sta keyD
+
+	lda #$ff			; leave it as the KERNAL expects
+	sta CIA_PRA
+	cli
+	rts
+
+; ======================================================================
+; The report, on the C64's own screen.
+; ======================================================================
+showLabels
+	lda #0
+	jsr dmRow
+	jsr dmText
+	.text "GPU64 QUAKE3D - A RETAINED SCENE"
+	.byte 0
+
+	lda #4
+	jsr dmRow
+	jsr dmText
+	.text "FRAMES"
+	.byte 0
+	lda #5
+	jsr dmRow
+	jsr dmText
+	.text "OK"
+	.byte 0
+	lda #6
+	jsr dmRow
+	jsr dmText
+	.text "MISSED"
+	.byte 0
+	lda #7
+	jsr dmRow
+	jsr dmText
+	.text "ERR"
+	.byte 0
+	lda #8
+	jsr dmRow
+	jsr dmText
+	.text "STALLS"
+	.byte 0
+
+	; The diagnostic half, added 2026-09-08 after a bench run in which
+	; every commit was refused and the single ERR byte could not say why.
+	;
+	; CLOCK is the measured frame period from GET_INFO, and it is the
+	; first thing to read: SCENE_COMMIT requires a calibrated frame clock
+	; and answers UNSUPPORTED without one, while LOOP_START does not check
+	; it at all -- so a display gpu64 could not measure gives exactly
+	; "SETUP OK" followed by an all-UNSUPPORTED run.
+	lda #9
+	jsr dmRow
+	jsr dmText
+	.text "CLOCK"
+	.byte 0
+	lda #10
+	jsr dmRow
+	jsr dmText
+	.text "CMT 06"
+	.byte 0
+	lda #11
+	jsr dmRow
+	jsr dmText
+	.text "CMT 07"
+	.byte 0
+	lda #12
+	jsr dmRow
+	jsr dmText
+	.text "CMT XX"
+	.byte 0
+	lda #13
+	jsr dmRow
+	jsr dmText
+	.text "CMTMISS"
+	.byte 0
+	lda #14
+	jsr dmRow
+	jsr dmText
+	.text "FIRST"
+	.byte 0
+
+	; The stall stamps, added after the 2026-09-08 run that stalled 162
+	; times and then froze the HDMI side with no errcode to show for it.
+	; Reads as: first-stall frame, last-accepted-commit frame, and the
+	; STATUS byte waitReady gave up on.
+	lda #15
+	jsr dmRow
+	jsr dmText
+	; Not "STALL@" -- printAt only converts $41-$5A, and "@" ($40) falls
+	; through to screen code $40, which is a graphic, not an at-sign.
+	.text "STALLAT"
+	.byte 0
+
+	; And the clock itself, which is known before the first frame and
+	; never changes.
+	lda #9
+	jsr dmRow
+	jsr showCol
+	lda dmInfo+15
+	jsr dmHexA
+	lda dmInfo+14
+	jsr dmHexA
+
+	; And how many of dmInit's eight GET_INFO attempts were still unspent
+	; when the info block arrived: 08 means it landed first time, 00 means
+	; it never landed at all and dmInit zeroed the block itself. Without
+	; this, CLOCK 0000 has two readings -- a display with no frame clock,
+	; and a readback that missed its destination -- and run 29 could not
+	; tell them apart.
+	jsr showSpc
+	lda dmInfoTry
+	jsr dmHexA
+
+	; The bus rows, filled in only at the end of the run by showBus().
+	; Labelled up front so a run that never reaches finish still says what
+	; the empty rows would have held.
+	lda #19
+	jsr dmRow
+	jsr dmText
+	.text "BUS RW"
+	.byte 0
+	lda #20
+	jsr dmRow
+	jsr dmText
+	.text "BUS BAD"
+	.byte 0
+	lda #21
+	jsr dmRow
+	jsr dmText
+	.text "DISPWHY"
+	.byte 0
+	lda #22
+	jsr dmRow
+	jsr dmText
+	.text "SEQREP"
+	.byte 0
+	lda #23
+	jsr dmRow
+	jsr dmText
+	.text "STOPSRC"
+	.byte 0
+
+	; Rows 16 and 17 used to carry the control legend. The legend is in the
+	; header comment and in the docs; the A/B bus experiment is not, and it
+	; is the reason this run is being photographed.
+	lda #16
+	jsr dmRow
+	jsr dmText
+	.text "BUS A"
+	.byte 0
+	lda #17
+	jsr dmRow
+	jsr dmText
+	.text "BUS B"
+	.byte 0
+	lda #18
+	jsr dmRow
+	jsr dmText
+	.text "SEQBAD"
+	.byte 0
+	rts
+
+showSetup
+	lda #2
+	jsr dmRow
+	jsr dmText
+	.text "SETUP "
+	.byte 0
+	lda setupBadCode
+	bne ssBad
+	jsr dmText
+	.text "OK"
+	.byte 0
+	rts
+ssBad
+	jsr dmText
+	.text "FAILED AT STEP "
+	.byte 0
+	lda setupBadAt
+	jsr dmHexA
+	jsr dmText
+	.text " CODE "
+	.byte 0
+	lda setupBadCode
+	jmp dmHexA
+
+; ======================================================================
+; The bus counters (2026-09-09).
+;
+; Why this is here. The 2026-09-09 bench run showed 1284 SEQACK mismatches
+; in 7703 SCENE_COMMITs -- one commit in six -- while gpu64_probe_bus, run
+; minutes earlier on the same machine, measured the bus as clean over
+; 111000 accesses. Both cannot be a statement about the same defect. What
+; the screen could not say was WHICH access the mismatch was about, and it
+; had no denominator at all.
+;
+; It now has both. csDispatch splits the mismatch on the C64 side into "the
+; read of SEQACK was bad" (missRd, recoverable, no retry sent) and "the
+; firmware's state really is stale" (missed). GET_HEALTH bytes 64-71 split
+; the second one on the firmware side:
+;
+;   DISP FW short of DISP C64 by MISSED     the CMD_LO writes were lost and
+;                                           those commands never ran
+;   DISP FW matches, SEQREP equals MISSED   the commands all ran; it was the
+;                                           SEQ writes that were lost
+;   DISP FW matches, SEQREP is 0            nothing was lost on the write
+;                                           side at all, and the mismatch
+;                                           is somewhere this program has
+;                                           not looked yet
+;
+; DISP FW reads two higher than DISP C64 in a clean run, and SEQREP two
+; higher than zero: LOOP_STOP and this GET_HEALTH itself are both
+; dispatches, both fall between the two snapshots, and neither carries a
+; sequence number. Two, not more -- anything above that is the finding.
+; ======================================================================
+; SET_DMA_WINDOW: the only fence there is between a dropped ARG byte and
+; the Pi writing over this program.
+;
+; RESULT is checked rather than trusted. ARG registers read back as $FF --
+; the register file answers only STATUS, ERRCODE, RESULT and SEQACK -- so
+; the echo is the only evidence the window landed, and gpu64 makes it one
+; byte of XOR over the four argument bytes. A mismatch means either the
+; window write was dropped or the RESULT read was, and both are answered
+; the same way: send it again. Four tries, then carry on regardless --
+; failing to start because a readback fence could not be confirmed is the
+; run-27 mistake (section 49), and an unfenced program is exactly as safe
+; as every program before this opcode existed.
+; ======================================================================
+DMAWIN_CK = ( <hbuf ) ^ ( >hbuf ) ^ 132 ^ 0 ^ $a5
+
+setDmaWin
+	lda #4
+	sta dwTry
+dwAgain
+	lda #0
+	sta CMD_HI
+	#argw 0, hbuf
+	#argw 2, 132
+	lda #OP_SET_DMA_WINDOW
+	sta CMD_LO
+	lda RESULT
+	cmp #DMAWIN_CK
+	beq dwOk
+	dec dwTry
+	bne dwAgain
+dwOk	rts
+
+; ======================================================================
+; GET_HEALTH, verified and retried.
+;
+; The run of 2026-09-09 came back with every firmware-side column reading
+; 0000 and healthErr 00: the closing GET_HEALTH's CMD_LO write was one of
+; the ~1-in-250 that are lost, so hbuf still held the START snapshot and
+; every difference on the screen came out zero. A whole bench run's
+; firmware side, thrown away by a single unverified write -- which is the
+; exact failure CLAUDE.md's rule 1 exists to prevent, in the instrument
+; that was built to measure it.
+;
+; So: poison the buffer, dispatch, and check the poison is gone. Bytes
+; 0-11 are the base health block and cannot plausibly all be $5A. Up to
+; eight attempts, and healthTry says how many it took -- non-zero there
+; means the write was lost and the retry saved the run.
+doHealth
+	inc healthCt
+	bne +
+	inc healthCt+1
++
+	lda #0
+	sta healthTry
+dhAgain
+	lda #$5a
+	ldx #131
+-	sta hbuf,x
+	dex
+	bpl -
+
+	lda #0
+	sta CMD_HI			; GET_HEALTH is class 0; the frame loop
+					; leaves CMD_HI on 1
+	sta ARG+0			; GPU64_SPACE_C64
+	lda #<hbuf
+	sta ARG+1
+	lda #>hbuf
+	sta ARG+2
+	lda #0
+	sta ARG+3
+	lda #132			; 132, not 128: the four extra bytes are
+	sta ARG+4			; the trailer that makes the block
+	lda #0				; self-verifying
+	sta ARG+5
+	lda #OP_GET_HEALTH
+	sta CMD_LO
+	lda ERRCODE
+	sta healthErr
+	beq +
+	sta healthBad			; sticky: the fence's own failure mode is
+					; OUT_OF_RANGE here, and the closing call's
+					; healthErr cannot show a mid-run one
++
+
+	; The block verifies itself. Until 2026-09-20 this was "are bytes 0-11
+	; still poison", which passes on a block that arrived only in PART --
+	; and a partially arrived block is exactly what put 3.4 million writes
+	; in run 29's BUS A column against a run total of 190 thousand. The
+	; firmware now appends a magic and two check bytes over 0-129 (XOR,
+	; then an additive sum that catches the transposition XOR is blind to),
+	; so there is nothing left to infer: either the whole block arrived or
+	; it did not.
+	lda hbuf+128
+	cmp #71				; 'G'
+	bne dhBadMag
+	lda hbuf+129
+	cmp #54				; '6'
+	bne dhBadMag
+
+	ldy #0
+	lda #0
+	tax				; X = additive sum, A = XOR
+dhCkSum
+	eor hbuf,y
+	pha
+	txa
+	clc
+	adc hbuf,y
+	tax
+	pla
+	iny
+	cpy #130
+	bne dhCkSum
+
+	cmp hbuf+130
+	bne dhBadSum
+	cpx hbuf+131
+	beq dhGood
+
+	; Which half failed. The magic sits in the last four bytes of the
+	; block, so a missing magic means the block stopped arriving before its
+	; end, while a present magic with a wrong checksum means the body is
+	; corrupt. Those want different repairs and run 30 could not tell them
+	; apart -- it only knew that fifteen blocks were not whole.
+dhBadSum
+	lda hFailSum
+	cmp #$ff			; saturate; a wrapped count would lie
+	beq dhBadCk
+	inc hFailSum
+	bne dhBadCk			; always taken: it was not $ff
+dhBadMag
+	lda hFailMag
+	cmp #$ff
+	beq dhBadCk
+	inc hFailMag
+dhBadCk
+
+	; Where did it stop arriving? The first byte still holding the $5a
+	; poison locates it. **128 on every failure** means the four trailer
+	; bytes this build added are the only thing that does not land -- 128
+	; bytes is exactly two cache lines and 132 spills into a third, which
+	; is the shape of the bulk-transfer warm-window defect. A low, moving
+	; offset means the body is genuinely short. $ff means nothing was
+	; poisoned, so the block arrived whole and is corrupt instead.
+	; Caveat: a real health byte may legitimately BE $5a, which can only
+	; make this read earlier than the truth, never later.
+	ldy #0
+dhFbScan
+	lda hbuf,y
+	cmp #$5a
+	beq dhFbGot
+	iny
+	cpy #132
+	bne dhFbScan
+	ldy #$ff
+dhFbGot
+	sty hFirstBad
+
+	inc healthTry
+
+	; Why it failed, and how often across the run. Run 29 voided five of
+	; sixteen A/B windows -- eight consecutive failed attempts each time,
+	; which is far too many to be the ~1-in-250 lost-write floor, so
+	; something was refusing GET_HEALTH systematically for a whole window
+	; and the screen could not say what. ERRCODE names it: $03 the fence
+	; refused the destination, $02 the length arrived short, $00 the
+	; dispatch never happened at all, anything else an unreadable read.
+	lda healthErr
+	sta hErrF
+	lda hFailCt
+	cmp #$ff			; saturate; a wrapped count would lie
+	beq +
+	inc hFailCt
++
+	lda healthTry
+	cmp #8
+	bcs dhGaveUp		; jmp, not bcc: the checksum loop below put
+	jmp dhAgain		; dhAgain out of branch range
+dhGaveUp
+
+	; Eight attempts and no verified block. Until 2026-09-20 this
+	; fell straight through to dhOk and the caller had no way to tell, so
+	; phaseTally folded a poisoned buffer into an A/B accumulator and then
+	; copied it into hbufP -- which is exactly what cost run 28 its whole
+	; A/B split. The check existed; its verdict was thrown away. Return it.
+	lda #1
+	sta hFail
+	rts
+
+dhGood	lda #0
+	sta hFail
+dhOk
+	rts
+
+; X = a GET_HEALTH offset. hSub = hbuf[x..x+3] - hbuf0[x..x+3], unrolled
+; because the loop form would need cpy, and cpy destroys the carry sbc is
+; chaining through.
+sub32
+	sec
+	lda hbuf+0,x
+	sbc hbuf0+0,x
+	sta hSub+0
+	lda hbuf+1,x
+	sbc hbuf0+1,x
+	sta hSub+1
+	lda hbuf+2,x
+	sbc hbuf0+2,x
+	sta hSub+2
+	lda hbuf+3,x
+	sbc hbuf0+3,x
+	sta hSub+3
+	rts
+
+; The same two subtractions again, but against the previous phase boundary
+; rather than the start of the run: hbuf - hbufP is the window that just
+; ended. Near-copies rather than one routine with a pointer, because sbc is
+; chaining a carry through and any indirection cheap enough to be worth it
+; destroys it.
+subP32
+	sec
+	lda hbuf+0,x
+	sbc hbufP+0,x
+	sta hSub+0
+	lda hbuf+1,x
+	sbc hbufP+1,x
+	sta hSub+1
+	lda hbuf+2,x
+	sbc hbufP+2,x
+	sta hSub+2
+	lda hbuf+3,x
+	sbc hbufP+3,x
+	sta hSub+3
+	rts
+
+subP16
+	sec
+	lda hbuf+0,x
+	sbc hbufP+0,x
+	sta hSub+0
+	lda hbuf+1,x
+	sbc hbufP+1,x
+	sta hSub+1
+	lda #0
+	sta hSub+2
+	sta hSub+3
+	rts
+
+; The same for the 16-bit, saturating fields.
+sub16
+	sec
+	lda hbuf+0,x
+	sbc hbuf0+0,x
+	sta hSub+0
+	lda hbuf+1,x
+	sbc hbuf0+1,x
+	sta hSub+1
+	lda #0
+	sta hSub+2
+	sta hSub+3
+	rts
+
+showHex32
+	lda hSub+3
+	jsr dmHexA
+showHex24
+	lda hSub+2
+	jsr dmHexA
+showHex16
+	lda hSub+1
+	jsr dmHexA
+	lda hSub+0
+	jmp dmHexA
+
+; A space at the cursor, which dmHexA leaves on the next column.
+showSpc
+	lda #$20
+showChr
+	ldy #0
+	sta (DST),y
+	inc DST
+	bne +
+	inc DST+1
++	rts
+
+; ======================================================================
+; The signed dispatch delta.
+;
+; hSub holds the firmware's dispatch count for the run; dispCt holds this
+; program's own, and the closing GET_HEALTH is the one dispatch the firmware
+; makes that dispCt does not count. So the run is clean when the difference
+; is exactly zero, and the sign says which way it went:
+;
+;   -NNNN  commands this program sent that the firmware never dispatched --
+;          the CMD_LO write was not sampled. Every run 7 through 9.
+;   +NNNN  commands the firmware dispatched that this program never sent.
+;
+; Printed as a sign and four digits because the 2026-09-10 run 10 photograph
+; could not be read: 021E67 against 021E0F or 021EDF is 87 of the second
+; kind or 121 of the first, and those are opposite findings. A sign glyph is
+; unambiguous at photograph resolution in a way that a hex digit is not.
+; ======================================================================
+showDelta
+	sec
+	lda hSub+0
+	sbc dispCt+0
+	sta dSub+0
+	lda hSub+1
+	sbc dispCt+1
+	sta dSub+1
+	lda hSub+2
+	sbc dispCt+2
+	sta dSub+2
+	lda hSub+3
+	sbc #0
+	sta dSub+3
+
+	; ...and the GET_HEALTHs, which go out unsequenced and so are counted
+	; by the firmware and not by dispCt. This used to subtract a literal 1
+	; -- the closing one was the only one there was. The A/B run takes one
+	; at every phase boundary as well, and a hard-coded 1 turned a clean
+	; run into a -16 that reads as sixteen lost commands.
+	sec
+	lda dSub+0
+	sbc healthCt+0
+	sta dSub+0
+	lda dSub+1
+	sbc healthCt+1
+	sta dSub+1
+	lda dSub+2
+	sbc #0
+	sta dSub+2
+	lda dSub+3
+	sbc #0
+	sta dSub+3
+
+	lda dSub+3
+	bmi sdNeg
+	lda #$2b			; '+'
+	jsr showChr
+	jmp sdHex
+sdNeg
+	lda #$2d			; '-'
+	jsr showChr
+	sec
+	lda #0
+	sbc dSub+0
+	sta dSub+0
+	lda #0
+	sbc dSub+1
+	sta dSub+1
+sdHex
+	lda dSub+1
+	jsr dmHexA
+	lda dSub+0
+	jmp dmHexA
+
+; ======================================================================
+; Self-diagnosis for a run that stops being accepted.
+;
+; Runs 5 and 6 both entered a state they never left -- every SCENE_COMMIT
+; answering UNSUPPORTED, HDMI frozen, the C64 still alive -- and the health
+; block that says WHICH of the four producers refused was only ever read at
+; finish, i.e. only if someone pressed RUN/STOP and photographed the result.
+; The 2026-09-10 run that hung was not captured that way, and the evidence
+; went with it.
+;
+; So the program now diagnoses itself. Thirty-two consecutive refused
+; commits (about half a second) is not noise, and on the 32nd it takes one
+; GET_HEALTH and paints rows 19-22 there and then. A photograph of the hung
+; screen now carries NOLOOP, NOMODE, STATE and WHY without anyone touching
+; the keyboard.
+;
+; It fires once per run. The snapshot lands in hbuf, which is also finish's
+; end-of-run buffer -- but if the run is stuck, finish's copy was not going
+; to say anything this one does not.
+; ======================================================================
+; ======================================================================
+; Put an active camera back.
+;
+; Built 2026-09-10 out of bench run 14, where the live scene lost its active
+; camera at around frame 2400 of 4096 and the run spent its whole remaining
+; budget answering $0B to everything. Nothing the C64 sent can account for
+; it: the only two opcodes that can destroy a camera are SCENE_RESET and
+; DESTROY_NODE, this program sends the first once during start-up and the
+; second never. Both now carry the one-shot key (see KEY above), so the
+; firmware should refuse a phantom outright -- but an instrument that assumes
+; its own fix worked is not an instrument, so this stays as the recovery and
+; REVIVE on row 14 as the count.
+;
+; Cheapest repair first: if the camera NODE is still there and only the
+; active flag went, SET_ACTIVE_CAMERA alone fixes it. If that answers
+; anything, the node is gone too, which means the scene itself was wiped --
+; then re-create it. The level and the monsters are not rebuilt: the run
+; carries on against an empty room, which looks wrong on HDMI and is
+; supposed to, while the bus counters keep accumulating.
+; ======================================================================
+reviveCamera
+	inc reviveCt
+	bne +
+	inc reviveCt+1
++	#id16 CAM_ID
+	lda #OP_SET_ACTIVE_CAMERA
+	jsr cmd1
+	cmp #0
+	beq rcOut
+
+	#id16 CAM_ID
+	lda #OP_CREATE_CAMERA
+	jsr cmd1
+	#id16 CAM_ID
+	lda #OP_SET_ACTIVE_CAMERA
+	jsr cmd1
+
+	; The camera is back at the origin looking down -Z. Force the next
+	; sendCamera to re-send the whole transform rather than skip it as
+	; unchanged -- camPosSh/camRotSh are its "what gpu64 already has"
+	; shadow, and what gpu64 has is now nothing.
+	ldx #5
+	lda #$ff
+-	sta camPosSh,x
+	dex
+	bpl -
+	sta camRotSh+0
+	sta camRotSh+1
+rcOut
+	rts
+
+; ======================================================================
+; LOOP_STOP, re-sent until SEQACK confirms it.
+;
+; Idempotent -- it clears a flag and records a cause -- so unlike
+; SCENE_COMMIT retrying it is free. Called twice now: once at the A/B phase
+; boundary and once at finish. STOPTRY on row 21 is the count from the LAST
+; call, which is finish's.
+; ======================================================================
+sendStop
+	lda #0
+	sta stopTry
+ssTry
+	; The key byte. Inside the retry loop and not before it: ARG15's write
+	; is as droppable as any other, and a lost key comes back as $04.
+	#argb ARG_KEY, KEY
+	lda #OP_LOOP_STOP
+	jsr cmdSeq1
+
+	; Two failures to retry on, not one, and until 2026-09-10 this tested
+	; only the first. cmdSeq1 returns the SEQACK verdict -- did the command
+	; ARRIVE -- and leaves the command's own ERRCODE in seqErr. A lost ARG15
+	; write arrives perfectly well and answers BAD_ARGS, so a stop that
+	; checked A alone would report success and leave the loop running.
+	cmp #0
+	bne ssAgain
+	lda seqErr
+	beq ssOut
+ssAgain
+	inc stopTry
+	lda stopTry
+	cmp #8
+	bcc ssTry
+ssOut
+	rts
+
+; ======================================================================
+; A phase boundary: bank the window that just ended against whichever
+; condition it ran under, then switch conditions.
+;
+; The window is banked BEFORE the switch, so the LOOP_STOP or LOOP_START
+; that does the switching is charged to neither side.
+; ======================================================================
+phaseSwitch
+	jsr phaseTally
+
+	lda phase
+	bne psToA
+
+	; A -> B. Stop the loop and core 1 goes quiet: its idle path is WFE,
+	; not a spin, so it costs no bus cycle and no store.
+	jsr sendStop
+	lda #1
+	sta phase
+	rts
+
+psToA
+	; B -> A. If this LOOP_START does not land, the next window is another
+	; phase B wearing phase A's label, and the pooled totals quietly stop
+	; meaning anything -- so it goes out sequence-checked and a failure is
+	; counted where the screen can show it.
+	#argb 0, 0
+	lda #OP_LOOP_START
+	jsr cmdSeq1
+
+	; Both halves of "did it land", and until 2026-09-10 this checked only
+	; the first. cmdSeq1 returns the SEQACK verdict -- did the command
+	; ARRIVE -- and leaves the command's own ERRCODE in seqErr, so a
+	; LOOP_START that arrived and answered NO_CAMERA read as a success
+	; here. Run 14's row 17 therefore showed 00 00 through 2048 frames in
+	; which the loop was never running and the windows labelled A were
+	; phase B wearing phase A's name. $FF stands for the dispatch that
+	; never arrived, which has no errcode of its own to report.
+	cmp #0
+	beq psCheck
+	lda #$ff
+	jmp psFail
+psCheck
+	lda seqErr
+	beq psStarted
+psFail
+	sta restartCode
+	inc restartErr
+	jsr reviveCamera		; the likeliest reason, and repairable
+psStarted
+	lda #0
+	sta phase
+	rts
+
+; ----------------------------------------------------------------------
+; Bank one window. The four counters are differences against the previous
+; boundary's sample, added into the A or B accumulator according to the
+; condition the window just ran under.
+; ----------------------------------------------------------------------
+phaseTally
+	jsr doHealth
+	inc tallies
+
+	; A window whose health sample came back poison cannot be banked. The
+	; delta would be nonsense, and copying the poison into hbufP makes the
+	; NEXT window's delta nonsense too -- with the opposite sign, so the two
+	; cancel, the pooled totals still reconcile against BUS BAD, and both
+	; rows read as garbage that looks arithmetically sound. Run 28 lost its
+	; entire A/B split to that and the screen never said so.
+	;
+	; So a failed sample voids this window AND the next one -- the next one
+	; because hbufP stays on the last good sample, which makes its delta
+	; span one window of each condition -- and the count goes on row 17.
+	lda hFail
+	bne ptVoid
+	lda hVoid
+	beq ptBank
+
+	; The window after a void one: hbufP catches up here, but the delta it
+	; spans belongs to both conditions, so it is discarded too.
+	lda #0
+	sta hVoid
+	jsr ptVoided
+	jmp ptCopy
+
+ptVoid	lda #1
+	sta hVoid
+	jsr ptVoided
+	rts
+
+ptVoided
+	lda voidWin
+	cmp #$ff			; saturate: a wrapped count would lie
+	beq +
+	inc voidWin
++	rts
+
+ptBank
+	ldx #0
+	lda phase
+	beq ptBase
+	ldx #16
+ptBase
+	stx accBase
+
+	ldx #H_WRBAD
+	jsr subP16
+	ldy accBase
+	jsr accAdd
+
+	ldx #H_RDBAD
+	jsr subP16
+	lda accBase
+	clc
+	adc #4
+	tay
+	jsr accAdd
+
+	ldx #H_WRITES
+	jsr subP32
+	lda accBase
+	clc
+	adc #8
+	tay
+	jsr accAdd
+
+	ldx #H_DISP
+	jsr subP32
+	lda accBase
+	clc
+	adc #12
+	tay
+	jsr accAdd
+
+ptCopy
+	ldx #127
+-	lda hbuf,x
+	sta hbufP,x
+	dex
+	bpl -
+	rts
+
+; Y = byte offset into acc. acc[y..y+3] += hSub[0..3].
+accAdd
+	clc
+	lda acc+0,y
+	adc hSub+0
+	sta acc+0,y
+	lda acc+1,y
+	adc hSub+1
+	sta acc+1,y
+	lda acc+2,y
+	adc hSub+2
+	sta acc+2,y
+	lda acc+3,y
+	adc hSub+3
+	sta acc+3,y
+	rts
+
+; ======================================================================
+; One frame's worth of pacing.
+;
+; Phase A waits on the render loop, which is the handshake the protocol is
+; built around. Phase B cannot -- there is no loop, so FRAME_READY never
+; rises -- and it deliberately does not substitute a timer either.
+;
+; Pacing phase B on the KERNAL jiffy was the first design and was dropped.
+; It would have matched the two phases in wall-clock rate, but the quantity
+; being compared is bad accesses per ACCESS, not per second, and both
+; phases issue the same commands over the same 2048 frames either way. What
+; the jiffy would have added is a dependency on an IRQ the desk simulator
+; does not model, i.e. a routine that could only ever be tested at the
+; bench.
+;
+; Running phase B flat out instead makes it the HARDER of the two on the
+; bus -- back to back DMA holds, no idle gap between frames, more cache
+; churn -- so it biases against the hypothesis under test. If phase A is
+; still the dirtier of the two under that handicap, the finding is real.
+; ======================================================================
+paceFrame
+	lda phase
+	bne pfOut
+	jmp waitReady
+pfOut
+	rts
+
+stuckWatch
+	; Phase B refuses every commit BY DESIGN -- that is what it is for --
+	; so the stuck detector would fire on frame 32 of it and freeze a
+	; snapshot over the reading the run exists to take.
+	lda phase
+	bne swDone
+	lda stuckDone
+	bne swDone
+	inc stuckRun
+	lda stuckRun
+	cmp #32
+	bcc swDone
+	inc stuckDone
+
+	jsr doHealth
+	jsr showBus
+
+	; Row 2, not row 3: row 3 carries the NIB verdict that showBus just
+	; printed, and a stuck run needs that reading as much as a clean one.
+	; Row 2's "SETUP OK" has said all it has to say by frame 32.
+	lda #2
+	jsr dmRow
+	jsr dmText
+	.text "STUCK - SNAPSHOT BELOW "
+	.byte 0
+swDone
+	rts
+
+; Rows 16 and 17: the pooled accumulators. Nothing is printed before the
+; first boundary, when both are still zero and would read as a clean bus.
+showPhases
+	lda tallies
+	beq spOut
+
+	lda #16
+	jsr dmRow
+	jsr showCol
+	ldy #0
+	jsr showAcc
+
+	lda #17
+	jsr dmRow
+	jsr showCol
+	ldy #16
+	jsr showAcc
+
+	; How many LOOP_STARTs failed to restart the loop, and the last code
+	; one of them answered. 00 00 is the reading this row needs; anything
+	; else means some window labelled A was not one.
+	jsr showSpc
+	lda restartErr
+	jsr dmHexA
+	jsr showSpc
+	lda restartCode
+	jsr dmHexA
+
+	; Windows neither row could bank, because their health sample came back
+	; poison. 00 is the reading rows 16/17 need; anything else and the two
+	; rows are a partial run, not a split -- see phaseTally.
+	jsr showSpc
+	lda voidWin
+	jsr dmHexA
+spOut
+	rts
+
+; Y = accumulator base. Prints wrBad, rdBad, writes, dispatches.
+showAcc
+	sty accBase
+	ldy accBase
+	jsr accLoad
+	jsr showHex16
+	jsr showSpc
+	lda accBase
+	clc
+	adc #4
+	tay
+	jsr accLoad
+	jsr showHex16
+	jsr showSpc
+	lda accBase
+	clc
+	adc #8
+	tay
+	jsr accLoad
+	jsr showHex24
+	jsr showSpc
+	lda accBase
+	clc
+	adc #12
+	tay
+	jsr accLoad
+	jmp showHex24
+
+; Y = byte offset into acc. hSub = acc[y..y+3], so the showHex helpers can
+; print it without a second set of formatters.
+accLoad
+	lda acc+0,y
+	sta hSub+0
+	lda acc+1,y
+	sta hSub+1
+	lda acc+2,y
+	sta hSub+2
+	lda acc+3,y
+	sta hSub+3
+	rts
+
+; Row 23. Kept out of showBus's own flow only so the comment above the call
+; site stays with the reading it explains.
+showStopSrc
+	lda #23
+	jsr dmRow
+	jsr showCol
+
+	sec
+	lda hbuf+H_STOPSEQ
+	sbc hbuf+H_STOPSQP
+	pha
+	jsr dmHexA
+	jsr showSpc
+	lda hbuf+H_STOPPOP
+	jsr dmHexA
+	jsr showSpc
+
+	; The verdict. Anything other than a LOOP_STOP opcode means these three
+	; bytes are boot leftovers and must not be read as evidence.
+	pla
+	tax
+	lda hbuf+H_STOPWHY
+	cmp #1
+	beq ssSeq
+	jsr dmText
+	; Padded to the width of PHANTOM and REALCMD, and falling through to
+	; the key ledger rather than returning. Both matter only because this
+	; row is now reprinted during the run (see fcPaint): a 4-character
+	; verdict would leave three characters of the previous print behind,
+	; and an early rts would leave a whole stale KEY block on screen.
+	.text "IDLE   "
+	.byte 0
+	jmp showKey
+ssSeq
+	cpx #0
+	bne ssReal
+	jsr dmText
+	.text "PHANTOM"
+	.byte 0
+	jmp showKey
+ssReal
+	jsr dmText
+	.text "REALCMD"
+	.byte 0
+	jmp showKey
+
+; The rest of row 23: the one-shot key's ledger, four bytes, as deltas
+; across the run except for the opcode. Reads as
+;
+;   KEY rr oo cc ww
+;
+;   rr  destructive opcodes REFUSED for want of the key. Non-zero means a
+;       phantom arrived and was turned away -- which is the gate working,
+;       not a fault. Every call site in this program stages the key.
+;   oo  the opcode of the last refusal. THIS is the reading run 15 is for:
+;       00 SCENE_RESET, 07 LOOP_STOP, 12 FREE_RESOURCE, 22 DESTROY_NODE.
+;       Run 14 could only prove the camera was gone, not what took it.
+;   cc  times the live scene's active camera went away anyway.
+;   ww  SCENE_RESETs that ran against a scene that still had a camera.
+;
+; cc or ww non-zero with rr zero means the key did not cover the path that
+; did the damage, which would be the next thing to chase.
+showKey
+	jsr showSpc
+	jsr dmText
+	.text "KEY"
+	.byte 0
+	jsr showSpc
+	ldx #H_KEYREF
+	jsr keyDelta
+	jsr showSpc
+	lda hbuf+H_KEYOP		; absolute: it is a name, not a count
+	jsr dmHexA
+	jsr showSpc
+	ldx #H_CAMLOST
+	jsr keyDelta
+	jsr showSpc
+	ldx #H_WIPES
+	jsr keyDelta
+	rts
+
+; ======================================================================
+; Row 3: the bad-write high-nibble histogram, reduced to a verdict. Sixteen
+; two-digit counters is exactly the row nobody can read off a CRT
+; photograph, so the sixteen are scanned here and three numbers printed:
+;
+;   NIB tt cc nn
+;     tt  the high nibble that took the most bad writes
+;     cc  how many it took, saturating at FF
+;     nn  how many of the sixteen buckets were non-zero at all
+;
+; tt of 09 or 0A with a small nn is "A7 spuriously set, and nothing else":
+; the ARG block is $11-$20, so $91-$A0 is that block with A7 on, and every
+; one of those is an argument write the firmware discarded without the C64
+; ever being told -- the undetected ARG-drop defect, with a cause. A large
+; nn is the opposite reading: the address did not fail in one bit, and
+; run 19's andBadWrite of $80 was an artifact of which registers this demo
+; happens to write.
+;
+; Absolute, not a delta against hbuf0: the buckets saturate at FF, and a
+; difference of two saturated bytes is not a number. They accumulate from
+; resetREU(), so a long session carries earlier programs' faults too.
+; ======================================================================
+showNib
+	lda #3
+	jsr dmRow
+	jsr dmText
+	.text "MX"
+	.byte 0
+
+	; The bad-nibble histogram is gone from row 3 entirely. It was the
+	; address defect's instrument, that defect closed in run 22, and it has
+	; read 00 00 for four consecutive runs -- while BUS BAD's orBadWrite /
+	; andBadWrite still carry the same fingerprint to the bit if it ever
+	; comes back. Row 3 is 40 columns and the slack attribution needs them.
+
+	; MX mmmmmm uu  SLK sdd eeee bb  M nnnn
+	;
+	; mmmmmm  sampled IO2 accesses whose high address nibble was one no real
+	;         access could produce -- the REU decodes $DF00-$DF0A and the API
+	;         $DF50-$DF68, so a true nibble is $0, $1 or $2 -- i.e. the
+	;         LVC257 had not switched and A4-A7 were really some mix of
+	;         NMI/ROMH/IO1/BUTTON, and this pass paid a GPLEV0 re-read to
+	;         repair it. Six digits: the ceiling is one per IO2 access.
+	; uuuu    how many the re-read did NOT repair, wide as of run 29. The
+;         expected reading is 0000, and it was 00 for four runs -- but the
+;         field was clamped at 255 and run 28 came back FF against a
+;         muxMiss of 00390F, i.e. the repair rate had collapsed to about a
+;         sixth and the clamp is why nobody saw it. uuuu/mmmmmm IS the
+;         repair rate; read it before anything else on this screen.
+	;
+	; sdd     the read's margin against WAIT_CYCLE_READ, RAD's drive-by
+	;         target, signed. Run 25 measured this below the drive against
+	;         WAIT_CYCLE_READ2 and so scored bus over-HOLD, which cannot
+	;         explain a wrong ERRCODE; the stamp now sits at the drive.
+	;         At 1.4GHz one C64 cycle is about 1400 ARM cycles, so -0E is 1%
+	;         of a C64 cycle late and -FF is a fifth of one.
+	; eeee    how many reads were late at all.
+	; bb      how many of those by more than 64 cycles, saturating.
+	; nnnn    of the late ones, how many were in a pass that paid for a mux
+	;         re-read.
+	;
+	; Run 26 read -CF 00DA 9D: 218 late of 611390, 157 badly late, worst
+	; 207 cycles. Rare but systematic, and the same order as errBad + MISSED,
+	; so it is a live mechanism. nnnn is the follow-up and it is a WITHIN-run
+	; test, which matters because the fault rate varies 30x between runs:
+	;
+	;   nnnn ~= eeee   the mux re-read is buying address correctness with
+	;                  read lateness. Both are ours, and the trade has to be
+	;                  made deliberately -- e.g. re-read only on writes,
+	;                  which have no deadline.
+	;   nnnn ~= 0000   the re-read is exonerated. The lateness is in the
+	;                  unconditional part of the pass and trimming the repair
+	;                  will not touch it.
+	;
+	; None of the SLK fields is a delta: two are running extremes and the
+	; rest saturate, so subtracting a baseline would be wrong.
+	jsr showSpc
+	ldx #H_MUXMISS
+	jsr sub32
+	jsr showHex24
+	jsr showSpc
+	ldx #H_MUXUFW
+	jsr sub16
+	jsr showHex16
+
+	; None of the SLK fields is a delta: two are running extremes and the
+	; third saturates, so subtracting a baseline would be wrong.
+	jsr showSpc
+	jsr dmText
+	.text "SLK"
+	.byte 0
+	jsr showSpc
+	lda hbuf+H_SLKOVER
+	beq +
+	pha
+	lda #$2d			; '-', the margin was gone by this much
+	jsr showChr
+	pla
+	jmp ++
++	lda #$2b			; '+', this much of it survived
+	jsr showChr
+	lda hbuf+H_SLACK
++	jsr dmHexA
+	jsr showSpc
+	lda hbuf+H_SLKEXP+1
+	jsr dmHexA
+	lda hbuf+H_SLKEXP
+	jsr dmHexA
+	jsr showSpc
+	lda hbuf+H_SLKBIG
+	jsr dmHexA
+
+	jsr showSpc
+	jsr dmText
+	.text "M"
+	.byte 0
+	jsr showSpc
+	lda hbuf+H_SLKMUX+1
+	jsr dmHexA
+	lda hbuf+H_SLKMUX
+	jmp dmHexA
+
+; X = a GET_HEALTH offset of a single saturating byte. Prints the run's
+; delta. These counters are deliberately not cleared by a session reset
+; (gpu64_apidiag.h), so the absolute value carries boot leftovers and only
+; the difference against the opening snapshot means anything.
+keyDelta
+	sec
+	lda hbuf,x
+	sbc hbuf0,x
+	jmp dmHexA
+
+showBus
+	jsr showNib
+
+	; Row 18: of the MISSRD reads that were NOT $FF, how many held the
+	; previous sequence number, how many held the ERRCODE this same
+	; command had just read, and the last value that was neither.
+	lda #18
+	jsr dmRow
+	jsr showCol
+	lda mrPrev+1
+	jsr dmHexA
+	lda mrPrev
+	jsr dmHexA
+	jsr showSpc
+	lda mrErr+1
+	jsr dmHexA
+	lda mrErr
+	jsr dmHexA
+	jsr showSpc
+	lda mrOther
+	jsr dmHexA
+	jsr showSpc
+	lda mrErrVal
+	jsr dmHexA
+
+	; Row 19: the two denominators -- gpu64-window reads and writes the
+	; polling loop serviced during the run.
+	lda #19
+	jsr dmRow
+	jsr showCol
+	ldx #H_READS
+	jsr sub32
+	jsr showHex32
+	jsr showSpc
+	ldx #H_WRITES
+	jsr sub32
+	jsr showHex32
+	jsr showSpc
+	ldx #H_ARGDUM
+	jsr sub32
+	jsr showHex32
+
+	; Row 20: the mis-sample side. Anything non-zero here means an access
+	; WAS serviced but at an address no gpu64 register occupies, and the
+	; three address bytes name the bits that moved -- expect them in the
+	; high nibble, A4-A7, the pins the LVC257 multiplexes.
+	lda #20
+	jsr dmRow
+	jsr showCol
+	ldx #H_RDBAD
+	jsr sub16
+	jsr showHex16
+	jsr showSpc
+	ldx #H_WRBAD
+	jsr sub16
+	jsr showHex16
+	jsr showSpc
+	lda hbuf+H_LASTBAD
+	jsr dmHexA
+	jsr showSpc
+	lda hbuf+H_ORBAD
+	jsr dmHexA
+	jsr showSpc
+	lda hbuf+H_ANDBAD
+	jsr dmHexA
+	jsr showSpc
+	lda hbuf+H_LASTBW
+	jsr dmHexA
+	jsr showSpc
+	lda hbuf+H_ORBW			; the write-side twin of ORBAD/ANDBAD. If
+	jsr dmHexA			;   ANDBW also reads $80 then bad reads and
+	jsr showSpc			;   bad writes share one address-mux fault;
+	lda hbuf+H_ANDBW		;   if it does not, they are two problems.
+	jsr dmHexA
+
+	; Row 21: dispatches, firmware then C64, then WHY the run was being
+	; refused. The DEFER/FIRED pair that used to sit here was retired on
+	; 2026-09-10: dispatchDeferred counts only the read-modify-write path
+	; on CMD_LO, every write in this program is a plain sta, so the pair
+	; could never read anything but 0000 0000 and it did not.
+	;
+	; What replaced it answers the question those zeros could not. With
+	; CMT 06 large, exactly one of the two counters here is large too:
+	;
+	;   NOLOOP large    something stopped the class 1 loop, and WHY names
+	;                   it -- 01 the LOOP_STOP opcode, 02 SCENE_RESET, 03
+	;                   a session teardown (resetREU), 04 boot.
+	;   NOMODE large    the display left graphics mode, so the node
+	;                   updates were being refused as well, not just the
+	;                   commit.
+	;   both zero       neither: the frame clock lost calibration, which
+	;                   STATE bit 1 below says outright.
+	;
+	; STATE is the flag snapshot taken at the LAST refusal, not at the end
+	; of the run -- by then LOOP_STOP has legitimately cleared bit 0.
+	; Bits: 0 loop running, 1 frame clock calibrated, 2 graphics mode,
+	; 3 flip pending, 4 FRAME_READY, 5 BUSY, 6 framebuffer up. A healthy
+	; refusal-free run leaves STATE and WHY at whatever boot left them.
+	lda #21
+	jsr dmRow
+	jsr showCol
+	ldx #H_DISP
+	jsr sub32
+	jsr showHex24
+	jsr showSpc
+	jsr showDelta
+	jsr showSpc
+	ldx #H_NOLOOP
+	jsr sub16
+	jsr showHex16
+	jsr showSpc
+	ldx #H_NOMODE
+	jsr sub16
+	jsr showHex16
+	jsr showSpc
+	lda hbuf+H_RFSTATE
+	jsr dmHexA
+	jsr showSpc
+	lda hbuf+H_STOPWHY
+	jsr dmHexA
+	jsr showSpc
+	lda stopTry
+	jsr dmHexA
+
+	; Row 22: the SEQ-write detector, the recovered-read count, and the
+	; last value a second read of SEQACK answered.
+	lda #22
+	jsr dmRow
+	jsr showCol
+	ldx #H_SEQREP
+	jsr sub32
+	jsr showHex32
+	jsr showSpc
+	lda missRd+1
+	jsr dmHexA
+	lda missRd
+	jsr dmHexA
+	jsr showSpc
+	lda missRdFF+1
+	jsr dmHexA
+	lda missRdFF
+	jsr dmHexA
+	jsr showSpc
+	lda lastSeqAck
+	jsr dmHexA
+	jsr showSpc
+	lda healthErr
+	jsr dmHexA
+
+	; Row 23: where the command that stopped the class 1 loop came from.
+	; Only meaningful when WHY on row 21 reads 01 -- a LOOP_STOP opcode --
+	; which is the case bench run 11 caught and this program never asks
+	; for until finish. The firmware publishes the sequence number that
+	; dispatch was acting on and the one before it (GET_HEALTH 93/94), and
+	; their difference splits the two mechanisms that can put a $07 in
+	; CMD_LO:
+	;
+	;   00 PHANTOM   no command arrived at all. The SEQ write did not
+	;                happen, so CMD_LO was written by something that was
+	;                not this program -- a duplicated or phantom write.
+	;                Refusing a command whose SEQ has not advanced would
+	;                then close the whole class, and csDispatch already
+	;                copes with a refusal by re-sending.
+	;   01 REALCMD   a real command arrived and its DATA byte was
+	;                mis-sampled: almost certainly the $08 of a
+	;                SCENE_COMMIT latched as $07. No SEQ gate can see
+	;                that one.
+	;   03 REALCMD   the same, on the one dispatch per 253 where
+	;                seqCounter wraps $FE -> 01.
+	;   other        commands were lost either side of it as well.
+	;
+	; PREVOP is the opcode that ran immediately before, which says whether
+	; the stream was mid-frame ($21/$22/$25 node updates, $08 commit) or
+	; somewhere it should not have been.
+	jsr showSpc
+	lda healthTry
+	jsr dmHexA
+
+	; And the last non-OK code any health dispatch answered, not just the
+	; closing one. $03 OUT_OF_RANGE here means SET_DMA_WINDOW's own
+	; arguments were mis-sampled and the fence refused the readback -- the
+	; fail-safe direction, and the thing to check first if voidWin is not 00.
+	jsr showSpc
+	lda healthBad
+	jsr dmHexA
+
+	; Rows 16 and 17: the A/B experiment. Each row is
+	;
+	;   wrBad  rdBad  writes  dispatches
+	;
+	; pooled over that condition's eight windows, so the two lines are read
+	; against each other and nothing has to be subtracted by hand. The
+	; denominators are printed rather than assumed: both conditions issue
+	; the same commands over the same number of frames, so they should come
+	; out within a few per cent, and if they do not that is the first thing
+	; to disbelieve.
+	;
+	; Row 17 ends with two more bytes: failed LOOP_STARTs and the last code
+	; one answered. They must read 00 00. Anything else means a window
+	; labelled A ran with the loop stopped and the pooling is spoilt.
+	;
+	;   A large, B small     core 1's rendering is what dirties core 0's
+	;                        sampling. That is the hypothesis, and it also
+	;                        explains why the standalone probe reads clean
+	;                        and why the rate moves 30x between runs.
+	;   A and B alike        the second core is not the variable. The
+	;                        stall that eats the mux settling window comes
+	;                        from somewhere else -- core 0's own work.
+	;   both ~zero           the firmware's new settling floor
+	;                        (GPU64_MUX_SETTLE) closed it, and the A/B is
+	;                        moot. Run 12 measured 7980 bad writes in
+	;                        1148120, so 0000 across a run of this length
+	;                        is not a quiet-day reading.
+	;   B larger             phase B's own shape -- it runs flat out, with
+	;                        no wait on the render loop -- is the confound
+	;                        rather than core 1. Re-read before drawing
+	;                        anything from it.
+	jsr showPhases
+
+	jmp showStopSrc
+
+showFrame
+	lda #4
+	jsr dmRow
+	jsr showCol
+	lda frames+1
+	jsr dmHexA
+	lda frames
+	jsr dmHexA
+
+	lda #5
+	jsr dmRow
+	jsr showCol
+	lda okFrames+1
+	jsr dmHexA
+	lda okFrames
+	jsr dmHexA
+
+	lda #6
+	jsr dmRow
+	jsr showCol
+	lda missed+1
+	jsr dmHexA
+	lda missed
+	jsr dmHexA
+
+	; The one question this run exists to answer, as a word rather than a
+	; number the reader has to compare against a figure in a document:
+	; runs 28 and 29 dropped ~3000 command writes, run 30 dropped 77, and
+	; nothing in that build touched the bus. LO reproduces run 30 and the
+	; 39x fall is worth bisecting; HI says run 30 was the lucky tail of the
+	; known 30x between-run spread (gpu64-bus-fault-rate-varies-30x).
+	jsr showSpc
+	lda missed+1
+	bne mvNotLo
+	lda #12				; L
+	jsr showChr
+	lda #15				; O
+	jsr showChr
+	jmp mvDone
+mvNotLo
+	cmp #4				; >= 1024 is run-28/29 territory
+	bcs mvHi
+	lda #13				; M
+	jsr showChr
+	lda #9				; I
+	jsr showChr
+	lda #4				; D
+	jsr showChr
+	jmp mvDone
+mvHi
+	lda #8				; H
+	jsr showChr
+	lda #9				; I
+	jsr showChr
+mvDone
+
+	; Row 7: the last ERRCODE, then how often an ERRCODE read came back
+	; floating and had to be read again, then how many of those floated
+	; twice. Third field nonzero is the only one that means a genuinely
+	; lost answer; the second alone means the bus, not the firmware.
+	lda #7
+	jsr dmRow
+	jsr showCol
+	lda lastErr
+	jsr dmHexA
+	jsr showSpc
+	lda errBad+1
+	jsr dmHexA
+	lda errBad
+	jsr dmHexA
+	jsr showSpc
+	lda errBad2+1
+	jsr dmHexA
+	lda errBad2
+	jsr dmHexA
+	jsr showSpc
+	lda lastBadErr
+	jsr dmHexA
+
+	lda #8
+	jsr dmRow
+	jsr showCol
+	lda waitFail
+	jsr dmHexA
+
+	; Then the health readback's own failure count and reason, because a
+	; voided A/B window is only interpretable with them: hFailCt 00 means
+	; every GET_HEALTH landed first time and hErrF is meaningless.
+	jsr showSpc
+	lda hFailCt
+	jsr dmHexA
+	jsr showSpc
+	lda hErrF
+	jsr dmHexA
+
+	; Then the split -- magic missing / body corrupt -- the offset the
+	; block stopped arriving at, and voidWin, which until now was printed
+	; only at the end of row 17 where no bench photograph has ever been
+	; legible. hFailMag + hFailSum must equal hFailCt; if they do not, the
+	; saturation clamped one of them.
+	jsr showSpc
+	lda hFailMag
+	jsr dmHexA
+	jsr showSpc
+	lda hFailSum
+	jsr dmHexA
+	jsr showSpc
+	lda hFirstBad
+	jsr dmHexA
+	jsr showSpc
+	lda voidWin
+	jsr dmHexA
+
+	lda #10
+	jsr dmRow
+	jsr showCol
+	lda e06+1
+	jsr dmHexA
+	lda e06
+	jsr dmHexA
+
+	lda #11
+	jsr dmRow
+	jsr showCol
+	lda e07+1
+	jsr dmHexA
+	lda e07
+	jsr dmHexA
+
+	lda #12
+	jsr dmRow
+	jsr showCol
+	lda eXX+1
+	jsr dmHexA
+	lda eXX
+	jsr dmHexA
+	ldy #0
+	lda #$20
+	sta (DST),y
+	inc DST
+	bne +
+	inc DST+1
++	lda xxCode
+	jsr dmHexA
+
+	lda #13
+	jsr dmRow
+	jsr showCol
+	lda cmMiss+1
+	jsr dmHexA
+	lda cmMiss
+	jsr dmHexA
+
+	lda #14
+	jsr dmRow
+	jsr showCol
+	lda firstCode
+	jsr dmHexA
+	ldy #0
+	lda #$20			; dmHexA left DST on the next column
+	sta (DST),y
+	inc DST
+	bne +
+	inc DST+1
++	lda firstFrame+1
+	jsr dmHexA
+	lda firstFrame
+	jsr dmHexA
+	jsr dmSpace
+	lda reviveCt+1			; REVIVE: cameras put back, see reviveCamera
+	jsr dmHexA
+	lda reviveCt
+	jsr dmHexA
+
+	lda #15
+	jsr dmRow
+	jsr showCol
+	lda stallFrame+1
+	jsr dmHexA
+	lda stallFrame
+	jsr dmHexA
+	jsr dmSpace
+	lda lastOkFrame+1
+	jsr dmHexA
+	lda lastOkFrame
+	jsr dmHexA
+	jsr dmSpace
+	lda lastStat
+	jmp dmHexA
+
+; One blank column, for the fields that print two numbers on a row.
+dmSpace
+	ldy #0
+	lda #$20
+	sta (DST),y
+	inc DST
+	bne +
+	inc DST+1
++	rts
+
+; Past the widest label.
+showCol
+	clc
+	lda DST
+	adc #8
+	sta DST
+	bcc +
+	inc DST+1
++	rts
+
+; ======================================================================
+; State
+; ======================================================================
+camPosSh .fill 6, 0		; the camera as gpu64 last confirmed it -- see
+camRotSh .fill 2, 0		; sendCamera. Seeded by start-up's forced send.
+eyeZ	.word 0			; the eye, class 2 axes, 8.8 -- see the note
+				; on the zero page map above
+plYaw	.byte 0
+plPitch	.byte 0
+frameCt	.byte 0
+vecX	.byte 0
+vecY	.byte 0
+keyA	.byte $ff
+keyB	.byte $ff
+keyC	.byte $ff
+keyD	.byte $ff
+stopCt	.byte 0
+
+flashCt	.byte 0			; frames the muzzle flash has left
+flashArm .byte 0		; 0 = out and switched off, 1 = fired this
+				; frame, 2 = lit
+
+texN	.byte 0
+monN	.byte 0
+smTmp	.byte 0
+refreshCt .byte 0		; frames until the next ring entry goes out
+refreshIx .byte 0		; which entry that is, x2
+flashPosSave .fill 12, 0	; the flash's last staged SET_POSITION block
+dwTry	.byte 0			; SET_DMA_WINDOW attempts left
+ftTmp	.byte 0
+
+seqCounter .byte 0
+seqOp	.byte 0
+stopTry	.byte 0
+stuckRun .byte 0
+stuckDone .byte 0
+phase	.byte 0			; 0 = loop running, 1 = loop stopped
+tallies	.byte 0			; windows banked so far
+healthCt .word 0		; unsequenced GET_HEALTH dispatches
+accBase	.byte 0
+restartErr .byte 0		; LOOP_STARTs that did not restart the loop
+restartCode .byte 0
+reviveCt .word 0		; times reviveCamera had to put a camera back
+seqErr	.byte 0
+missed	.word 0			; SEQACK still wrong on a second read: the
+				;   firmware's state really is stale
+missRd	.word 0			; SEQACK wrong once and right immediately
+				;   after: the first READ was the failure
+lastSeqAck .byte 0		; the value the second read answered
+firstSeqAck .byte 0		; ... and the value the FIRST read answered
+missRdFF .word 0		; ... of which this many were $FF
+errBad	.word 0			; ERRCODE read back a value that is not a code
+				;   at all, and so was read a second time
+errBad2	.word 0			; ... of which this many were still not a code on
+				;   the re-read: the answer really is unrecoverable
+lastBadErr .byte 0		; the value the second read gave at the last one
+nibTop	.byte 0			; the fullest bad-write high-nibble bucket
+nibBest	.byte 0			;   ... and how many it holds
+nibNZ	.byte 0			; how many of the sixteen buckets are non-zero
+mrPrev  .word 0			; ... this many held the previous sequence number
+mrErr   .word 0			; ... this many equalled the ERRCODE just read
+mrOther .byte 0			; last first-read value that was none of those
+mrErrVal .byte 0		; the shared value at the last mrErr event
+healthTry .byte 0		; retries the closing GET_HEALTH needed
+hFail	.byte 0
+hErrF	.byte 0			; ERRCODE of the last health attempt that
+				; produced no block
+hFailCt	.byte 0			; how many attempts that was, saturating
+hFailMag .byte 0		; ... of which the magic was missing: the block
+				;   stopped arriving before its last four bytes
+hFailSum .byte 0		; ... and of which the magic was there but the
+				;   XOR/sum disagreed: the body is corrupt
+hFirstBad .byte $fe		; first hbuf offset still holding the $5a poison
+				;   on the most recent failure; $ff if none was,
+				;   $fe if there has been no failure at all
+hVoid	.byte 0			; ... so the NEXT window is unbankable too
+voidWin	.byte 0			; windows dropped for that reason, saturating
+healthBad .byte 0		; last non-OK ERRCODE any GET_HEALTH answered
+dispCt	.byte 0, 0, 0		; sequenced dispatches this program issued
+
+; The GET_HEALTH block, sampled once before the first frame and once after
+; the last one. Every number wanted from it is a difference, so both
+; samples are kept whole and subtracted at the end rather than accumulated.
+hbuf	.fill 132, 0		; 128 of health block, then the 4-byte
+				; self-verifying trailer
+hbuf0	.fill 128, 0
+hbufP	.fill 128, 0		; the previous phase boundary's sample
+acc	.fill 32, 0		; A at +0, B at +16; wrBad, rdBad, writes, disp
+healthErr .byte 0
+hSub	.byte 0, 0, 0, 0	; a 32-bit difference, for showing
+dSub	.byte 0, 0, 0, 0	; the signed dispatch delta
+
+frames	.word 0
+okFrames .word 0
+lastErr	.byte 0
+loopErr	.byte 0
+waitCt	.word 0
+waitFail .byte 0
+stallSet .byte 0		; first-stall stamp taken yet?
+stallFrame .word 0		; ...and the frame it happened on
+lastOkFrame .word 0		; last frame a commit was accepted on
+lastStat .byte 0		; STATUS as read when waitReady gave up
+
+cmSnap	.byte 0			; missed, sampled either side of the commit
+cmMiss	.word 0
+e06	.word 0			; commits answered UNSUPPORTED
+e07	.word 0			; ...BUSY
+eXX	.word 0			; ...anything else
+xxCode	.byte 0			; the code of the last one of those
+firstSet .byte 0
+firstCode .byte 0
+firstFrame .word 0
+
+setupIdx .byte 0
+setupBadAt .byte 0
+setupBadCode .byte 0
+
+; A whole circle of sines, 256 units round, +-127.
+sinTab
+	.for i = 0, i < 256, i += 1
+	.byte round(127 * sin(i * 2 * pi / 256)) & $ff
+	.next
+
+; --- the palette: 8 hues x 32 brightnesses -----------------------------
+palHues = [[80,60,50], [150,120,95], [110,110,120], [90,130,90], [170,150,60], [70,90,150], [180,90,60], [200,200,200]]
+
+palData
+	.for h = 0, h < 8, h += 1
+	  .for s = 0, s < 32, s += 1
+	  .byte round(palHues[h][0] * s / 31.0), round(palHues[h][1] * s / 31.0), round(palHues[h][2] * s / 31.0)
+	  .next
+	.next
+
+SKY_COL	= 2*32+6		; what shows where nothing was drawn
+
+	.include "gpu64_quake_tex.inc"
+	.include "gpu64_demo_quake3d.inc"
+
+	.include "gpu64_rt.inc"

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """check_sfx.py - milestone 20: does the game make the right noises?
 
 Nobody can listen to a prgsim run, but the SID only ever hears register
@@ -46,8 +47,8 @@ from check_combat import KILL, RESPAWN, Verdict        # noqa: E402
 from check_ai import DOG_WARP                           # noqa: E402
 from check_env import SWIMOUT                           # noqa: E402
 
-SFX_INC = os.path.join(REPO, 'quake', 'gpu64_game_sfx.inc')
-GAME_A = os.path.join(REPO, 'quake', 'gpu64_demo_game.a')
+SFX_INC = os.path.join(REPO, 'games', 'quake', 'gpu64_game_sfx.inc')
+GAME_A = os.path.join(REPO, 'games', 'quake', 'gpu64_demo_game.a')
 
 
 def irqs_per_tick():

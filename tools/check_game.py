@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """check_game.py - did a door actually MOVE?
 
-tools/demos.sh normally asserts nothing: it establishes that a demo
+tools/examples.sh normally asserts nothing: it establishes that a demo
 assembles, runs and produces a picture, and leaves the verdict to whoever
 looks at the PPM. gpu64_demo_game is the one demo where that is not enough.
 Its whole claim is that a C64 can run the game logic -- read the level's
@@ -21,7 +22,7 @@ It is deliberately not a check that the door reached any particular
 fraction: DOOR_STEP is a gameplay constant and this must not break when
 somebody makes the doors slower.
 
-Usage (see the game) case in tools/demos.sh):
+Usage (see the game) case in tools/examples.sh):
   tools/check_game.py --prg=... --level=... --frame=110 --ent=310 --key=W:20-51 ...
   tools/check_game.py ... --frame=400 --ent=29 --shut   # and it closed again
 """

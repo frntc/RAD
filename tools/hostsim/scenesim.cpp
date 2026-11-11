@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 class-1 scene sim -- renders the frame stream tools/prgsim emits, with
  the firmware's own renderer.

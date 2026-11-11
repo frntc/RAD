@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64: frame clock calibration. See gpu64_vsync.h for why this exists and
  why the bus-watch loop never calls any of it.

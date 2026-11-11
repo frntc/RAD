@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 8 -- the class 2 raster core. See gpu64_raster_core.h.
 
@@ -1582,7 +1583,7 @@ u16 gpu64_rasterChecksum( const u8 *p, u32 nLen )
 //
 // A convex polygon in world space, arbitrarily oriented: the primitive both
 // a wall record and a sector's flats are special cases of. Rationale is in
-// project/milestone9_poly_design.md; what matters here is the arithmetic.
+// dev/milestone9_poly_design.md; what matters here is the arithmetic.
 //
 // The pipeline per face is: gather from the vertex pool, transform to view
 // space, clip against five planes, project, backface-cull, scan-convert.

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 A reference model of the gpu64 class 0 command API, written from
 docs/README.md and the files it indexes, rather than from the firmware.
@@ -450,7 +451,7 @@ class Gpu64Model(Class1Mixin):
         The hand-over is here, not in _commit_flip(), because a class 1
         autonomous frame starts rendering as soon as SCENE_COMMIT returns and
         must not be aimed at the page about to go on screen -- Stage 16's
-        Finding 2, see project/progress_tracker.md."""
+        Finding 2, see dev/progress_tracker.md."""
         self.pending_visible = self.draw_page
         # GET_HEALTH byte 18: what the Pi thinks it presented, against what
         # the program thinks it asked for. The firmware counts posts, which
@@ -2496,7 +2497,7 @@ class Gpu64Model(Class1Mixin):
     # ------------------------------------------------------------------
     # DRAW_POLYS -- milestone 9's polygon layer.
     #
-    # Written from docs/class2-raster-reference.md and project/milestone9_poly_design.md,
+    # Written from docs/class2-raster-reference.md and dev/milestone9_poly_design.md,
     # not from gpu64_raster_core.cpp. Every division goes through idiv() and
     # every shift is arithmetic, because the two implementations have to
     # agree on a truncation, not merely on a picture.

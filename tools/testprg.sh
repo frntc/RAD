@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 #
 # testprg.sh - assemble the gpu64 API conformance suite and desk-check it.
 #
-# For each Source/TestPRG/gpu64_test_*.a:
+# For each tests/gpu64_test_*.a:
 #   1. assemble it with 64tass into the matching .prg
 #   2. run it under tools/prgsim against a reference model of the API built
 #      from docs/README.md and the files it indexes, and require VERDICT PASS
@@ -16,7 +17,7 @@
 #
 # Note that 64tass is invoked WITHOUT --nostart: that option strips the
 # 2-byte load address and produces a PRG that loads to the wrong place and
-# silently never runs. See project/progress_tracker.md.
+# silently never runs. See dev/progress_tracker.md.
 #
 # Usage:
 #   tools/testprg.sh              # assemble + desk-check everything
@@ -26,7 +27,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRGDIR="$REPO_ROOT/Source/TestPRG"
+PRGDIR="$REPO_ROOT/tests"
 SIM="$REPO_ROOT/tools/prgsim/runsim.py"
 
 verbose=0

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 6, stage 14 -- the retained scene graph: nodes, transforms,
  and the active camera.
@@ -12,7 +13,7 @@
  lookup plus a call to the already-portable gpu64_3dDrawMesh(), not new
  rendering logic, exactly the way opDrawMesh() is a thin IO2 wrapper today.
 
- Wire formats and opcode semantics: project/milestone6_3d_design.md,
+ Wire formats and opcode semantics: dev/milestone6_3d_design.md,
  "Transforms: no matrices cross the bus", and docs/class1-3d-mesh-reference.md's
  Scene nodes / Transforms tables. Not restated here.
 */

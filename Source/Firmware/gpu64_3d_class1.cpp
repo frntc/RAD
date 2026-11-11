@@ -1,7 +1,8 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 6 -- class 1: session state, the resource table, and the
  opcode dispatcher. Through Stage 14 every class 1 opcode, render ops
- included, ran synchronously on core 0. Stage 15a (project/gap_filling_plan.md)
+ included, ran synchronously on core 0. Stage 15a (dev/gap_filling_plan.md)
  moves the three render ops -- CLEAR_VIEWPORT, DRAW_MESH, DRAW_NODE -- onto
  core 1, via the ring gpu64_3d_core1.cpp owns; everything else here is
  unchanged and still runs on core 0.
@@ -2311,7 +2312,7 @@ static u8 execute( u8 op )
 			return GPU64_ERR_BUSY;
 		// ARG[0] selects the mode: 0 is handshake (SCENE_COMMIT-driven,
 		// what this build implements), 1 is free-running vsync-driven,
-		// which is Stage 18 -- see project/gap_filling_plan.md. Answering
+		// which is Stage 18 -- see dev/gap_filling_plan.md. Answering
 		// UNSUPPORTED for mode 1 rather than silently treating it as mode
 		// 0 keeps a program written against a future firmware from
 		// running the wrong protocol against an old one without noticing.
@@ -2428,7 +2429,7 @@ static boolean isRenderOp( u8 op )
 }
 
 // Generous on purpose: this is a backstop against a wedged core 1, not a
-// tuned budget -- see project/gap_filling_plan.md's Stage 15 section. 50ms is
+// tuned budget -- see dev/gap_filling_plan.md's Stage 15 section. 50ms is
 // a large multiple of any real draw this arena's size limit allows, and the
 // cost of guessing too high is a slightly later ERRCODE on a build that was
 // already broken; the cost of guessing too low is a spurious WORKER_TIMEOUT
@@ -2640,7 +2641,7 @@ u8 gpu64_3dDispatch( u8 op )
 	// gpu64_3dHost.pushed is documented as "commands accepted onto the ring"
 	// (gpu64_3d_internals.h). Before Stage 15a that was every non-QUEUE_FULL
 	// dispatch, because every accepted op was pushed unconditionally, before
-	// validation. Hazard #2's fix (project/gap_filling_plan.md, Stage 15)
+	// validation. Hazard #2's fix (dev/gap_filling_plan.md, Stage 15)
 	// means a render op that fails its precheck, or a parked DRAW_NODE that
 	// needs no draw, now never touches the ring at all -- didPush tracks
 	// that exactly, so the counter keeps meaning what its comment says.
@@ -2763,7 +2764,7 @@ u8 gpu64_3dDispatch( u8 op )
 	// gpu64: put back what this dispatch just evicted, while the bus is still
 	// held. A DRAW_MESH walks a framebuffer, a z-buffer and the arena, which
 	// is far more than the class 0 CLEAR that was already enough to evict
-	// warmCache()'s work -- rule 4 in project/progress_tracker.md's polling-loop
+	// warmCache()'s work -- rule 4 in dev/progress_tracker.md's polling-loop
 	// timing rules, "preloaded at start-up is not durable". Doing it here
 	// rather than in the loop is rule 5, and it is what makes the cost free:
 	// it lands inside the window the C64 is already stopped for.

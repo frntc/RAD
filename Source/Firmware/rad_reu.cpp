@@ -59,7 +59,7 @@ void gpu64_showHoldingScreen( void );
 // masked to 5 bits same as REU's own partial IO2 decode, really any of
 // $DF0B/$DF2B/$DF4B/$DF6B/$DF8B/$DFAB/$DFCB/$DFEB -- any program that scans
 // or fills across IO2, e.g. an REU-detection utility, can trip this
-// incidentally). Per project/bus_access_design.md, screen-mirror mode and
+// incidentally). Per dev/bus_access_design.md, screen-mirror mode and
 // framebuffer-API mode are mutually exclusive: once true, the periodic
 // mirror snapshot in reuUsingPolling()'s main loop stops firing.
 //
@@ -684,7 +684,7 @@ static u8 gpu64MirrorD018 = 0x15;
 // every tick bails after the two probe bytes, a ~6 cycle hold at 4Hz -- and
 // HDMI simply holds the last mirrored frame, which is the intended
 // end state anyway.
-// Scoped per project/bus_access_design.md: fixed default addresses only (no VIC
+// Scoped per dev/bus_access_design.md: fixed default addresses only (no VIC
 // bank detection yet -- a program that relocates its screen will render
 // wrong until that's added; $D018's charset select *is* followed), standard
 // text mode only, and gpu64's own bundled copy
@@ -1301,7 +1301,7 @@ mirrorIdleLoop:
 // The commit is bracketed in a DMA hold, exactly like the command dispatch
 // and the mirror snapshot. SetVirtualOffset() is a mailbox round-trip to the
 // VideoCore whose cost nobody has measured (it was open question 1 in
-// project/milestone4_2d_api_design.md), and this runs while the C64 is
+// dev/milestone4_2d_api_design.md), and this runs while the C64 is
 // free-running through the loop -- so without the hold, a slow mailbox call
 // would silently eat the C64's next IO2 access, which is milestone 4's
 // bug #2 all over again. With the hold, the cost stops mattering for
@@ -1371,7 +1371,7 @@ void gpu64_vsyncCommitFlip( void )
 // commit path before the loop needs it. The dispatch that queues a flip is
 // the biggest instruction-cache consumer in the system and will have evicted
 // whatever warmCache() preloaded at REU start -- see the general rule in
-// project/progress_tracker.md. Doing it here rather than at the point of use is
+// dev/progress_tracker.md. Doing it here rather than at the point of use is
 // what keeps the loop's own exposure to a single short call.
 void gpu64_vsyncWarmCommit( void )
 {
@@ -1588,7 +1588,7 @@ static void *s_PollLoopBase = 0;
 
 // gpu64: re-warms everything the polling loop depends on and a command
 // dispatch has just evicted. Called at the end of a class 1 dispatch, with
-// the bus still held -- rule 5 in project/progress_tracker.md's polling-loop
+// the bus still held -- rule 5 in dev/progress_tracker.md's polling-loop
 // timing rules: warm from upstream, where the C64 is already stopped, never
 // at the point of use.
 //
@@ -2101,7 +2101,7 @@ reuEmulationMainLoop:
 				// same immediate-mode model milestone 2's test pattern and
 				// milestone 3's mirror already use on real hardware. The C64
 				// free-runs through this loop (see the "Operating modes"
-				// section of project/project_description.md); a command that
+				// section of dev/project_description.md); a command that
 				// moves a payload steals the bus for one bounded burst,
 				// proportional to a length the C64 itself chose.
 				if ( addr >= GPU64_REG_CMD_HI )

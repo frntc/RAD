@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 6 -- mesh and texture construction, and the per-mesh draw:
  transform, cull, light, near-clip, project, rasterise.
@@ -243,7 +244,7 @@ static unsigned clipNear( ClipVert *pOut, const ClipVert *pIn, unsigned n, s32 n
 // vertices the rasteriser takes its plane gradients from, and on a close-up
 // wall in the quake3d demo guards of 1, 2, 4 and 16 disagree with each other
 // across 50-79% of the frame. That is a separate precision defect -- see
-// project/progress_tracker.md section 63 -- and until there is an oracle that
+// dev/progress_tracker.md section 63 -- and until there is an oracle that
 // says which of those pictures is right, narrowing this number is a change
 // with an unknown sign.
 #define GPU64_3D_GUARD		64

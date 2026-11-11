@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 Run a gpu64 conformance-suite .prg against the reference model and print
 the C64 screen it produced.
 
-    tools/prgsim/runsim.py Source/TestPRG/gpu64_test_system.prg
+    tools/prgsim/runsim.py tests/gpu64_test_system.prg
 
 Exit status is 0 only if the program reached its summary line and that line
 says VERDICT PASS, so this drops straight into a build script.
@@ -73,7 +74,7 @@ Options:
                 SET_PERSPECTIVE run on SET_POSITION's staged bytes.
         There is no defect here to find: this exists so that a probe's
         diagnosis of a defect can be checked against a known answer on a PC.
-        Source/TestPRG/gpu64_probe_bus.a is the one that needs it, and its
+        tests/gpu64_probe_bus.a is the one that needs it, and its
         header says which verdict each kind must produce. The injector is
         indiscriminate -- it will happily eat a CMD_LO write and turn a
         command into nothing -- so keep N well above the number of accesses
@@ -341,7 +342,7 @@ class Machine:
             try:
                 slots = pack_levels.unpack(image)
             except ValueError:
-                slots = []              # a game's own image (million.reu): no level pack
+                slots = []              # a game's own image: no level pack
             if slots:
                 self.gpu.c1_level_data = slots[0][1]
                 self.gpu.c1_level_data2 = slots[1][1] if len(slots) > 1 else None

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 6 -- resources, render state, and the rasteriser.
 
@@ -7,7 +8,7 @@
  by tools/hostsim -- which is the point. Every pixel-level bug in the
  pipeline is findable on a PC.
 
- Formats and semantics: project/milestone6_3d_design.md. Not restated here.
+ Formats and semantics: dev/milestone6_3d_design.md. Not restated here.
 */
 #ifndef _gpu64_3d_render_h
 #define _gpu64_3d_render_h

@@ -1,0 +1,4822 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 -- STUNT CAR RACER, on the second screen.
+;
+;      Geoff Crammond's game drew an elevated track on a 6510 at a few
+;      frames a second. This is the same game rebuilt on gpu64's retained
+;      scene, from the cockpit: eight tracks on embankments, with ramps,
+;      gaps, humps and a drawbridge, a rival car over three laps, and a
+;      league of twelve drivers in four divisions. Each track and both cars
+;      are uploaded once. From then on a frame on the C64 is the game itself
+;      plus a few small commands: two cars, a camera, the horizon, the
+;      cockpit's sprites, and the commit. gpu64 renders all of it,
+;      textured, lit and depth-buffered, at the Pi's own frame clock.
+;
+;      Every screen is HDMI graphics -- the menus and the league
+;      (stunt_league.inc) are LEVEL_PICTUREs out of stunts.reu, text
+;      included -- so the game plays with no VIC screen connected. The
+;      SID plays Led Storm in the menus and the engine and the effects in
+;      a race (stunt_sfx.inc). The player's guide is games/stunts/PLAYING.md.
+;
+;      THE CONTROLS
+;
+;              W / stick up    accelerate
+;              S / stick down  brake
+;              A / D / stick   steer
+;              SPACE / fire    boost -- a tankful per lap
+;              F3              autopilot on / off, in practice only
+;              RUN/STOP        held: leave the race
+;
+;      THE RULES
+;
+;      Fall off the side, hit the end of a gap short, or land in the grass
+;      and the crane puts you back on the road, with damage. Land hard and
+;      you take damage. At 255 the car is wrecked and the race is lost.
+;      Three laps; a win is 2 league points and the race's fastest lap 1.
+;
+;      runsim skips the title and the menus ($02ab): then the program races
+;      every track in turn from --level-slot against the fastest rival, as
+;      it did before the league, which is what tools/examples.sh checks.
+;
+;      HOW IT IS BUILT
+;
+;      games/stunts/gen_stunt.py generates everything this program uploads:
+;      each track's meshes, the ground, a ring of hills, the two cars, the
+;      cockpit, the palette, the textures, stunts.reu's pictures -- and the
+;      tables the physics reads the track through: the centre line, height,
+;      heading, pitch and gap flag at each of 256 points 1.5 units apart. A car's
+;      place on the track is one byte of segment and two of fraction, so a
+;      lap is the segment byte wrapping.
+;
+;      The retained-scene discipline is gpu64_demo_game.a's, unchanged:
+;      every class 1 command goes through stage2 (written twice, checked
+;      with GPU64_KEY_CHECKED), every send is absolute, and a refresh ring
+;      re-creates one node or one piece of scene state every frame, so a
+;      phantom command's damage lasts less than a second. See
+;      docs/state-refresh.md.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+	.include "gpu64.inc"
+
+OP_SCENE_RESET       = $00
+OP_SET_VIEWPORT      = $01
+OP_SET_PERSPECTIVE   = $02
+OP_SET_LIGHT3D       = $03
+OP_BUILD_COLORMAP    = $04
+OP_SET_BACKGROUND    = $05
+OP_LOOP_START        = $06
+OP_LOOP_STOP         = $07
+OP_SCENE_COMMIT      = $08
+OP_UPLOAD_MESH       = $10
+OP_UPLOAD_TEXTURE    = $11
+OP_CREATE_OBJECT     = $20
+OP_CREATE_CAMERA     = $21
+OP_SET_ACTIVE_CAMERA = $23
+OP_CREATE_SPRITE     = $25
+OP_SET_SPRITE        = $27
+OP_SET_POSITION      = $30
+OP_SET_ORIENTATION   = $31
+OP_WORLD_TICK        = $6C
+
+KEY_DESTRUCTIVE = $a5
+KEY_CHECKED	= $d0		; | n, see stage2
+CHK_TRIES	= 4
+UPLOAD_TRIES	= 4
+
+SEQ      = $df67
+SEQACK   = $df68
+ST_FRAME_READY = $10
+READY_WAIT = 20000
+
+; --- the scene's ids ---------------------------------------------------
+CAM_ID    = 1
+NODE_CAR  = 2			; + car index: 2 the player, 3 the rival
+NODE_GND  = 4
+NODE_HILL = 5
+NODE_TRK  = 10			; + chunk, as staticTab lists them
+NODE_DECK = 8			; + 0/1: a drawbridge's two decks
+NODE_BAL  = 40			; + 0..BAL_N-1: the balloons
+
+VP_W = 320
+VP_H = 200
+FOV   = $4600		; about 99 degrees: wide, like the original's
+NEARZ = $0040		; 0.25
+FARZ  = $7fff		; the 8.8 format's limit
+
+; --- the keyboard ------------------------------------------------------
+CIA_PRA = $dc00
+CIA_PRB = $dc01
+COL_A   = %11111110
+COL_B   = %11111101
+COL_C   = %11111011
+COL_D   = %01111111
+KA_F1   = $10
+KA_F3   = $20
+KB_W    = $02
+KB_A    = $04
+KB_S    = $20
+KC_D    = $04
+KD_SPC  = $10
+KD_STOP = $80
+STOP_HOLD = 4
+
+; --- the millisecond clock, as gpu64_demo_game.a runs it ---------------
+CIA2_TALO = $dd04
+CIA2_TAHI = $dd05
+CIA2_TBLO = $dd06
+CIA2_TBHI = $dd07
+CIA2_CRA  = $dd0e
+CIA2_CRB  = $dd0f
+CLK_PERIOD = 985
+
+; --- the physics -------------------------------------------------------
+;
+; Units. A car's place along the track is s.f.sub, a 24-bit count of
+; segments; its speed v is in 1/65536 segment a frame, so it adds straight
+; on. lat is 8.8 in 1/64 world unit (hi byte signed, +-96 is the road's
+; edge). rel is the car's heading against the track's, a 16-bit binary
+; angle. y is 8.16 world units, vy 1/65536 unit a frame.
+;
+; Tuned in tools/prgsim with the autopilot driving, against the one
+; requirement that matters: the jump is clearable at full speed without
+; boost, and not at much less.
+ACC	= 480		; engine, a frame
+DRAG_SH	= 5		; v -= v >> 5: terminal speed ACC << 5 = $3c00
+BOOST_ACC = 200
+BRAKE	= 256		; the brakes: with the drag, a second or so from cruise
+SLIDE_V	= $28		; braking faster than this, the tyres hold half as well
+KICK_MAX = $0c		; a hard landing twists the car up to this (rel hi, 17 deg)
+SLOPE	= 4		; v -= dy * SLOPE, dy the ground's 8.8 rise this frame
+V_MAX	= $6000
+FUEL	= 150		; boost frames per lap
+GRAV	= 917		; 0.014 units a frame, squared
+SNAP_LO	= $98		; 0.6 units: below the deck by more is a crash
+SAFE	= $2666		; 0.15 units a frame: a landing softer is free
+EDGE	= 100		; |lat| past this is off the road: 1.56 units
+STEER0	= 48
+STEER_V	= 8		; the turning circle: a hairpin's radius at walking pace
+STEER_MAX  = 120	; the player's wheel, -STEER_MAX..STEER_MAX: full lock
+STEER_IN   = 12		;   takes 10 frames (about a quarter second) to wind
+STEER_BACK = 24		;   on, and half that to come back
+GRIP_K	= 12000		; the tyres' grip: a yaw rate past GRIP_K / vHi slides
+AI_STEER = 320
+AI_BRAKE = 6		; the autopilot brakes this far over its speed
+REL_LIM	= $3000
+CRANE_WAIT = 40
+CRANE_DMG  = 12
+BUMP_DMG   = 2
+BUMP_LEN   = $c0		; 1.12 units: the cars' length, in s.f
+BUMP_WID   = 58		; 0.92 units: their width, in lat
+BUMP_HARD  = 3			; closing vHi below this is a nudge
+BUMP_COOL  = 25			; frames: one contact, one lot of damage
+LAPS	= 3
+LANE_NEAR  = 4			; segments: closer than this, keep apart
+LANE_LAT   = 44			; 0.69 units off the centre line
+
+; car states
+S_DRIVE	= 0
+S_FALL	= 1
+S_WAIT	= 2
+S_CRANE	= 3
+S_WRECK	= 4
+
+; race states
+R_COUNT	= 0
+R_RACE	= 1
+R_OVER	= 2
+COUNT_FRAMES = 180
+CHAIN_T	= 60		; the count's last second: on the road, chains gone
+OVER_FRAMES  = 250
+START_S	= 250
+SIM_TRACK = $02ae		; runsim --level-slot: the track, title skipped
+FETCH_TRIES = 8
+DECK_UP_AT   = 96		; the drawbridge's 256-frame cycle: rises here,
+DECK_DOWN_AT = 192		;   lowers here, two frames a step
+
+	#basicStub
+
+; ======================================================================
+; Start-up: everything from here to LOOP_START happens once.
+; ======================================================================
+	jsr dmInit
+	jsr setFence
+	jsr title			; logo, credits, music: stunt_title.inc
+	jsr showLabels
+
+	#argb 0, BLACK
+	#cmd OP_SET_BORDER
+	#argb 0, BLACK
+	#cmd OP_CLEAR
+
+	; Is this stunts.reu? Its header page, fetched and checked like any
+	; track page, says so -- and nothing in the image is used before.
+	jsr checkImage
+	beq +
+	jmp wrongImage
++
+	; 8 hues x 32 levels, straight out of the image. PAL_LOAD's count is
+	; a byte: two halves. Class 0, so before the loop ever runs; while it
+	; does PAL_* answers BUSY, which is why the palette needs no refresh.
+	#argreu 0, PAL_REU, 128*3
+	#argb 6, 0
+	#argb 7, 128
+	#cmd OP_PAL_LOAD
+	#argreu 0, PAL_REU+128*3, 128*3
+	#argb 6, 128
+	#argb 7, 128
+	#cmd OP_PAL_LOAD
+
+	lda #KEY_DESTRUCTIVE
+	sta ARG+15
+	lda #OP_SCENE_RESET
+	jsr cmd1
+	jsr logSetup
+
+	lda #OP_BUILD_COLORMAP
+	ldx #$ff
+	jsr stId0
+	jsr stage2
+	jsr logSetup
+
+	; --- the textures, then the meshes: every track's, once -------------
+	; SCENE_RESET leaves resources alone, so a race only rebuilds nodes.
+	lda #0
+	sta upIx
+upTex
+	jsr uploadTex
+	jsr logSetup
+	inc upIx
+	lda upIx
+	cmp #TEX_N
+	bne upTex
+
+	lda #<meshTab
+	sta upPtr
+	lda #>meshTab
+	sta upPtr+1
+	lda #0
+	sta upIx
+upMesh
+	lda #11
+	jsr dmRow
+	jsr dmText
+	.text "UPLOADING MESH "
+	.byte 0
+	lda upIx
+	jsr dmDecA
+	jsr uploadMesh
+	jsr logSetup
+	clc
+	lda upPtr
+	adc #16
+	sta upPtr
+	bcc +
+	inc upPtr+1
++	inc upIx
+	lda upIx
+	cmp #MESH_N
+	bne upMesh
+	lda #11
+	jsr dmRow
+	jsr dmText
+	.text "                    "
+	.byte 0
+
+	lda simRun
+	bne +
+	jmp mainMenu			; stunt_league.inc: never returns
++	lda SIM_TRACK			; runsim: every track in turn, against
+	and #TRACKS-1			;   the fastest rival
+	sta curTrack
+	lda #15
+	jsr setRival
+simLoop
+	jsr runRace
+	bcc +
+	jmp finish
++	inc curTrack
+	lda curTrack
+	and #TRACKS-1
+	sta curTrack
+	jmp simLoop
+
+; ======================================================================
+; A race on curTrack: the track's tables into TRK, a scene of its own,
+; the loop, until the result has been shown. C set = abandoned, RUN/STOP
+; held. The loop is stopped again on the way out.
+; ======================================================================
+runRace
+	lda #0
+	sta stopHold
+	jsr fetchTrack
+	beq +
+	jmp wrongImage			; a track that never checks: not our image
++	jsr buildScene
+	jsr sfxInit			; stunt_sfx.inc: engine on
+
+; ======================================================================
+; A frame.
+; ======================================================================
+frame
+	jsr readKeys
+	jsr viewKeys
+	jsr raceTick
+	jsr deckTick
+	jsr physics
+	jsr sfxTick
+	jsr doRefresh			; before the sends: a re-created car
+	jsr sendCars			;   gets its pose in the same commit
+	jsr sendDecks
+	jsr sendCamera
+	jsr sendHorizon
+	jsr sendCockpit
+	jsr waitReady
+
+	lda #0
+	sta ID_LO
+	sta ID_HI
+	lda #KEY_CHECKED ^ 1 ^ OP_SCENE_COMMIT
+	sta ARG+14
+	lda #KEY_CHECKED
+	sta ARG+15
+	lda #OP_SCENE_COMMIT
+	jsr cmdSeq1
+	lda seqErr
+	beq frOk
+	cmp #ERR_BUSY
+	bne +
+	inc e07
+	bne frCount
+	inc e07+1
+	jmp frCount
++	sta xxCode
+	inc eXX
+	bne frCount
+	inc eXX+1
+	jmp frCount
+frOk
+	inc okFrames
+	bne frCount
+	inc okFrames+1
+frCount
+	inc frames
+	bne +
+	inc frames+1
++
+	jsr showHud
+	lda raceDone
+	bne raceEnd
+
+	lda keyD
+	and #KD_STOP
+	beq frStopKey
+	lda #0
+	sta stopHold
+	jmp frame
+frStopKey
+	inc stopHold
+	lda stopHold
+	cmp #STOP_HOLD
+	bcs raceQuit
+	jmp frame
+
+; The race is over and its result has been shown.
+raceEnd
+	jsr loopStop
+	jsr sfxOff
+	clc
+	rts
+raceQuit
+	jsr loopStop
+	jsr sfxOff
+	sec
+	rts
+
+; ======================================================================
+; Shutting down. LOOP_STOP is what hands the framebuffer back.
+; ======================================================================
+finish
+	jsr loopStop
+	jsr showDiag
+	lda #1
+	jsr dmRow
+	jsr dmText
+	.text "STOPPED - RUN/STOP AGAIN TO EXIT"
+	.byte 0
+
+-	jsr readKeys			; the key that stopped us back up,
+	lda keyD			; so the second press is a real one
+	and #KD_STOP
+	beq -
+-	jsr readKeys
+	lda keyD
+	and #KD_STOP
+	bne -
+	jsr $e544
+	rts
+
+; ======================================================================
+; The race: a countdown, three laps, a result, and round again.
+; ======================================================================
+raceReset
+	lda #0
+	sta pSteer
+	ldx #1
+-	lda #START_S
+	sta cS,x
+	lda #0
+	sta cF,x
+	sta cSub,x
+	sta cVLo,x
+	sta cVHi,x
+	sta cLatLo,x
+	sta cRelLo,x
+	sta cRelHi,x
+	sta cVyLo,x
+	sta cVyHi,x
+	sta cDmg,x
+	sta cPitLo,x
+	sta cPitHi,x
+	sta cY0,x
+	sta cState,x
+	lda #FUEL
+	sta cFuel,x
+	lda #$ff
+	sta cLap,x
+	lda #1
+	sta cGnd,x
+	sta cOnPrev,x
+	; on the ground, on the road
+	ldy cS,x
+	lda cyLo,y
+	sta cY1,x
+	sta cGPLo,x
+	lda cyHi,y
+	sta cY2,x
+	sta cGPHi,x
+	dex
+	bpl -
+	lda #<-40
+	sta cLatHi+0			; the player on the left
+	lda #40
+	sta cLatHi+1
+
+	lda #R_COUNT
+	sta raceSt
+	lda #COUNT_FRAMES
+	sta raceT
+	lda #0
+	sta lapSec
+	sta lapTen
+	sta lapMs
+	sta lapMs+1
+	sta winner
+	sta bmCool
+	sta bestSec
+	sta bestTen
+	sta raceTen
+	sta raceTen+1
+	sta cBestLo
+	sta cBestLo+1
+	sta cBestHi
+	sta cBestHi+1
+	sta raceDone
+	sta deckT
+	lda #$ff
+	sta deckPrev			; patch the drawbridge on the first tick
+	jsr hudClearStatus
+	rts
+
+raceTick
+	jsr clkLap			; ms since the last frame -> clkTmp
+	lda raceSt
+	cmp #R_COUNT
+	bne rtNotCount
+	dec raceT
+	bne +
+	lda #R_RACE
+	sta raceSt
++	rts
+rtNotCount
+	cmp #R_OVER
+	bne rtRace
+	dec raceT
+	bne +
+	inc raceDone
++	rts
+rtRace
+	; the lap clock: milliseconds into tenths into seconds
+	clc
+	lda lapMs
+	adc clkTmp
+	sta lapMs
+	bcc +
+	inc lapMs+1
++
+-	lda lapMs+1
+	bne rtTenth
+	lda lapMs
+	cmp #100
+	bcc rtDone
+rtTenth
+	sec
+	lda lapMs
+	sbc #100
+	sta lapMs
+	bcs +
+	dec lapMs+1
++	inc raceTen
+	bne +
+	inc raceTen+1
++	inc lapTen
+	lda lapTen
+	cmp #10
+	bcc -
+	lda #0
+	sta lapTen
+	inc lapSec
+	bne -
+	dec lapSec			; 255.9 and holds
+	jmp -
+rtDone
+	rts
+
+; X = the car that just crossed the line. A lap, and maybe the race.
+lapDone
+	lda raceSt
+	cmp #R_RACE
+	bne +				; past the finish: the clock has stopped
+	jsr lapTime
++	inc cLap,x
+	lda #FUEL
+	sta cFuel,x
+	cpx #0
+	bne ldRival
+	lda cLap
+	bne ldLap
+	sta lapSec			; the first crossing is the start
+	sta lapTen
+	beq ldRival
+ldLap
+	; a lap by the player: keep the best
+	lda bestSec
+	ora bestTen
+	beq ldBest
+	lda lapSec
+	cmp bestSec
+	bcc ldBest
+	bne ldTime
+	lda lapTen
+	cmp bestTen
+	bcs ldTime
+ldBest
+	lda lapSec
+	sta bestSec
+	lda lapTen
+	sta bestTen
+ldTime
+	lda lapSec
+	sta lastSec
+	lda lapTen
+	sta lastTen
+	lda #0
+	sta lapSec
+	sta lapTen
+ldRival
+	lda cLap,x
+	cmp #LAPS
+	bne ldDone
+	lda raceSt
+	cmp #R_RACE
+	bne ldDone
+	txa
+	sta winner
+	jsr raceOver
+ldDone
+	rts
+
+; X = a car on the line, cLap not yet counted: the lap it finished
+; against its best, and the next one's start. Both cars, for the league.
+lapTime
+	lda cLap,x
+	cmp #$ff
+	beq ltStart			; the first crossing is the start
+	sec
+	lda raceTen
+	sbc cStLo,x
+	sta ltT
+	lda raceTen+1
+	sbc cStHi,x
+	sta ltT+1
+	lda cBestLo,x
+	ora cBestHi,x
+	beq ltBest
+	lda ltT
+	cmp cBestLo,x
+	lda ltT+1
+	sbc cBestHi,x
+	bcs ltStart
+ltBest
+	lda ltT
+	sta cBestLo,x
+	lda ltT+1
+	sta cBestHi,x
+ltStart
+	lda raceTen
+	sta cStLo,x
+	lda raceTen+1
+	sta cStHi,x
+	rts
+
+raceOver
+	lda #R_OVER
+	sta raceSt
+	lda #OVER_FRAMES
+	sta raceT
+	rts
+
+; ======================================================================
+; The keys. Read twice and ANDed, as in gpu64_demo_game.a -- a phantom
+; key is a bad CIA read, and a steering twitch is the cheapest symptom.
+; ======================================================================
+readKeys
+	sei
+	lda #$ff
+	sta $dc02
+	lda #$00
+	sta $dc03
+	lda #$ff			; joystick 2: no column driven, so
+	sta CIA_PRA			;   $dc00 reads back only the stick
+	lda CIA_PRA
+	ora CIA_PRA
+	sta keyJ
+	lda #COL_B
+	sta CIA_PRA
+	lda CIA_PRB
+	ora CIA_PRB
+	sta keyB
+	lda #COL_C
+	sta CIA_PRA
+	lda CIA_PRB
+	ora CIA_PRB
+	sta keyC
+	lda #COL_D
+	sta CIA_PRA
+	lda CIA_PRB		; once: runsim's --stop-after counts these
+	sta keyD
+	lda #COL_A
+	sta CIA_PRA
+	lda CIA_PRB
+	ora CIA_PRB
+	sta keyA
+	lda #$ff
+	sta CIA_PRA
+	cli
+	; The stick presses the keys it stands for: up W, down S, left A,
+	; right D, fire SPACE. Active low, like the keys.
+	ldx #4
+-	lda keyJ
+	and rkJoyBit,x
+	bne +
+	ldy rkJoyKey,x
+	lda keyB,y
+	and rkJoyMask,x
+	sta keyB,y
++	dex
+	bpl -
+	rts
+; up, down, left, right, fire: the key byte (keyB+y) and the key's bit
+rkJoyBit	.byte $01, $02, $04, $08, $10
+rkJoyKey	.byte 0, 0, 0, 1, 2
+rkJoyMask	.byte $ff ^ KB_W, $ff ^ KB_S, $ff ^ KB_A, $ff ^ KC_D, $ff ^ KD_SPC
+
+; F3 toggles on the second consecutive frame it reads down, and not
+; again until it has been released.
+viewKeys
+	lda keyA
+	and #KA_F3
+	bne vkF3Up
+	inc f3Hold
+	lda f3Hold
+	cmp #2
+	bne vkDone
+	lda apLock			; a league race: no autopilot
+	bne vkDone
+	lda autoPilot
+	eor #1
+	sta autoPilot
+	rts
+vkF3Up
+	lda #0
+	sta f3Hold
+vkDone
+	rts
+
+; ======================================================================
+; Physics, both cars, then the bump between them.
+; ======================================================================
+physics
+	ldx #0
+	jsr carInput
+	lda inThr			; the player's own, for the sound: the
+	sta pThr			;   rival's input overwrites these
+	lda inBoost
+	sta pBoost
+	jsr ckSteerIn
+	ldx #0
+	jsr carStep
+	jsr carPose
+	ldx #1
+	jsr carInput
+	jsr carStep
+	jsr carPose
+	jmp bump
+
+; The player's wheel: winds towards the stick's lock at STEER_IN a
+; frame, and back towards the centre (or through it) at STEER_BACK.
+steerRamp
+	lda inSteer
+	beq srCentre
+	bmi srLeft
+	lda pSteer			; right
+	bmi srUp2
+	clc
+	adc #STEER_IN
+	cmp #STEER_MAX+1
+	bcc srSet
+	lda #STEER_MAX
+	bne srSet
+srUp2
+	clc
+	adc #STEER_BACK
+	jmp srSet
+srLeft
+	lda pSteer
+	beq +
+	bpl srDn2
++	sec
+	sbc #STEER_IN
+	cmp #256-STEER_MAX
+	bcs srSet
+	lda #256-STEER_MAX
+	bne srSet
+srDn2
+	sec
+	sbc #STEER_BACK
+	jmp srSet
+srCentre
+	lda pSteer
+	beq srSet
+	bmi +
+	sec
+	sbc #STEER_BACK
+	bpl srSet
+	lda #0
+	beq srSet
++	clc
+	adc #STEER_BACK
+	bmi srSet
+	lda #0
+srSet
+	sta pSteer
+	rts
+
+; The cockpit's front wheels follow the player's steering, a step a
+; frame towards full lock either way (ckSteer -2..2, right positive), and
+; turn with the speed (ckSpin).
+ckSteerIn
+	ldy #0
+	lda inAuto
+	beq ckSkKeys
+	sec				; the autopilot: aiD >= 96 is right,
+	lda aiDLo			;   <= -96 left
+	sbc #96
+	lda aiDHi
+	sbc #0
+	bmi +
+	ldy #2
+	bne ckSkGo
++	clc
+	lda aiDLo
+	adc #95
+	lda aiDHi
+	adc #0
+	bpl ckSkGo
+	ldy #$fe
+	bne ckSkGo
+ckSkKeys
+	lda pSteer			; the wheel: past 24 a step, past 72 two
+	bpl +
+	eor #$ff
+	clc
+	adc #1
++	cmp #24
+	bcc ckSkGo
+	ldy #1
+	cmp #72
+	bcc +
+	iny
++	lda pSteer
+	bpl ckSkGo
+	tya
+	eor #$ff
+	clc
+	adc #1
+	tay
+ckSkGo
+	sty tmp0
+	lda ckSteer
+	sec
+	sbc tmp0
+	beq ckSkSpin
+	bmi +
+	dec ckSteer
+	jmp ckSkSpin
++	inc ckSteer
+ckSkSpin
+	clc
+	lda ckSpin
+	adc cVHi
+	sta ckSpin
+	bcc +
+	inc ckSpin+1
++	rts
+
+; X = car. Leaves inThr (1 accelerate, 2 brake), inSteer (-1/0/1 for the
+; player, a rate for the autopilot, see inRate) and inBoost.
+carInput
+	lda #0
+	sta inThr
+	sta inSteer
+	sta inBoost
+	sta inAuto
+	lda raceSt
+	cmp #R_COUNT
+	bne +
+	rts				; engines off on the grid
++	cpx #0
+	bne ciAuto
+	lda raceSt
+	cmp #R_OVER
+	beq ciAuto			; the player's car drives itself home
+	lda autoPilot
+	bne ciAuto
+
+	lda keyB
+	and #KB_W
+	bne +
+	lda #1
+	sta inThr
++	lda keyB
+	and #KB_S
+	bne +
+	lda #2
+	sta inThr
++	lda keyB
+	and #KB_A
+	bne +
+	dec inSteer
++	lda keyC
+	and #KC_D
+	bne +
+	inc inSteer
++	jsr steerRamp
+	lda keyD
+	and #KD_SPC
+	bne +
+	lda #1
+	sta inBoost
++	rts
+
+; The autopilot. Holds a speed, boosts up the ramp, and steers for the
+; centre line: the heading it wants is proportional to how far off the
+; centre it is, and it turns towards that at a limited rate.
+ciAuto
+	lda #1
+	sta inAuto
+	; the speed it wants
+	lda #$3c
+	cpx #1
+	bne ciSpd
+	; the rival rubber-bands: slower when it leads, flat out behind
+	jsr leadP			; C set = the player leads
+	lda rvBack
+	bcs ciSpd
+	lda rvLead			; setRival: the league's skill
+ciSpd
+	sta aiTgt
+	ldy cS,x			; the track says what speed to hold
+	lda aiSpd,y			;   (flat out on a run-up to a jump,
+	beq +				;   less on a crest that would throw it
+	sta aiTgt			;   off) and where to use the boost
++	lda cVHi,x
+	cmp aiTgt
+	bcc ciSlow
+	sbc aiTgt			; fast enough: neither, and well
+	cmp #AI_BRAKE			;   over it (a bend ahead): brake
+	bcc +
+	lda #2
+	sta inThr
+	bne +
+ciSlow
+	lda #1
+	sta inThr
+	lda aiFlg,y
+	and #AI_BOOST
+	beq +
+	lda #1
+	sta inBoost
++
+	; The line it wants: the centre, unless the other car is within a
+	; few segments, and then the half of the road it is not on.
+	lda #0
+	sta aiLane
+.weak
+BUMPTEST = 0
+.endweak
+.if BUMPTEST
+	; test builds (-D BUMPTEST=1): both on the centre line, into each other
+	jmp ciLaneSet
+.endif
+	ldy cS,x			; a jump is single file: a lane there
+	lda aiFlg,y			;   flies the car off the curve's side
+	and #AI_SINGLE			;   before it lands
+	bne ciLaneSet
+	txa
+	eor #1
+	tay
+	lda cS,y
+	sec
+	sbc cS,x
+	clc
+	adc #LANE_NEAR
+	cmp #2*LANE_NEAR+1
+	bcs ciLaneSet
+	lda cLatHi,y
+	bmi +
+	lda #<-LANE_LAT
+	sta aiLane
+	jmp ciLaneSet
++	lda #LANE_LAT
+	sta aiLane
+ciLaneSet
+	; relTgt = (lane - lat) * 32, i.e. rel16 hi = (lane - lat)/8
+	sec
+	lda aiLane
+	sbc cLatHi,x
+	bvc ++
+	lda #$7f			; overflowed: well off, steer hard --
+	bit aiLane			;   towards the lane's own side
+	bpl +
+	lda #$80
++
++	cmp #$80
+	ror a
+	cmp #$80
+	ror a
+	cmp #$80
+	ror a
+ciRelT
+	sta aiRelHi			; target rel, hi byte; lo 0
+	; diff = target - rel, clamped to +-AI_STEER
+	sec
+	lda #0
+	sbc cRelLo,x
+	sta aiDLo
+	lda aiRelHi
+	sbc cRelHi,x
+	sta aiDHi
+	bmi ciNeg
+	bne ciPosClamp
+	lda aiDLo
+	cmp #<AI_STEER
+	bcc ciSet
+ciPosClamp
+	lda #<AI_STEER
+	sta aiDLo
+	lda #>AI_STEER
+	sta aiDHi
+	jmp ciSet
+ciNeg
+	cmp #$ff
+	bne ciNegClamp
+	lda aiDLo
+	cmp #<-AI_STEER
+	bcs ciSet
+ciNegClamp
+	lda #<-AI_STEER
+	sta aiDLo
+	lda #>-AI_STEER
+	sta aiDHi
+ciSet
+	rts
+
+; C set if the player is ahead of the rival (or level).
+leadP
+	lda cLap+0
+	clc
+	adc #1
+	sta tmp0
+	lda cLap+1
+	clc
+	adc #1
+	cmp tmp0
+	bne +
+	lda cS+1
+	cmp cS+0
+	bne +
+	lda cF+1
+	cmp cF+0
++	; C clear = rival < player
+	bcc lpPlayer
+	beq lpPlayer
+	clc
+	rts
+lpPlayer
+	sec
+	rts
+
+; ----------------------------------------------------------------------
+; One car, one frame. X = car, preserved throughout.
+; ----------------------------------------------------------------------
+carStep
+	lda cState,x
+	cmp #S_DRIVE
+	bne +
+	jmp csDrive
++	cmp #S_FALL
+	bne +
+	jmp csFall
++	cmp #S_WAIT
+	bne +
+	jmp csWait
++	cmp #S_CRANE
+	bne +
+	jmp csCrane
++	rts				; wrecked: it stays where it stopped
+
+csWait
+	dec cTimer,x
+	bne +
+	; up she goes. A car that fell into the gap is carried across it.
+	ldy cS,x
+	lda flTab,y
+	and #FL_GAP
+	beq csWaitGo
+-	iny
+	lda flTab,y
+	and #FL_GAP
+	bne -
+	tya
+	sta cS,x
+	lda #0
+	sta cF,x
+	sta cSub,x
+csWaitGo
+	lda #S_CRANE
+	sta cState,x
++	rts
+
+csCrane
+	; lat towards the centre line
+	lda cLatHi,x
+	beq ccLatDone
+	bmi +
+	sec
+	sbc #2
+	bcs ccLatSet
+	lda #0
+	jmp ccLatSet
++	clc
+	adc #2
+	bcc ccLatSet
+	lda #0
+ccLatSet
+	sta cLatHi,x
+	lda #0
+	sta cLatLo,x
+ccLatDone
+	; y up by 0.05 a frame until it is 0.7 above the road
+	clc
+	lda cY1,x
+	adc #13
+	sta cY1,x
+	bcc +
+	inc cY2,x
++	jsr roadY			; ivLo/ivHi = the road here
+	clc
+	lda ivLo
+	adc #$b3
+	sta tmp0
+	lda ivHi
+	adc #0
+	sta tmp1
+	lda cY1,x
+	cmp tmp0
+	lda cY2,x
+	sbc tmp1
+	bcc ccDone			; still below
+	lda cLatHi,x
+	bne ccDone			; still swinging in
+	; set it down
+	lda ivLo
+	sta cY1,x
+	sta cGPLo,x
+	lda ivHi
+	sta cY2,x
+	sta cGPHi,x
+	lda #0
+	sta cY0,x
+	sta cVLo,x
+	sta cVHi,x
+	sta cVyLo,x
+	sta cVyHi,x
+	sta cRelLo,x
+	sta cRelHi,x
+	lda #1
+	sta cGnd,x
+	sta cOnPrev,x
+	lda #S_DRIVE
+	sta cState,x
+	lda #CRANE_DMG
+	jsr addDamage
+ccDone
+	rts
+
+; Falling to the grass: under a deck it hit, or off the edge.
+csFall
+	jsr csGravity
+	jsr csAdvance
+	lda cY2,x
+	bpl +
+	jmp csLanded			; below 0: the grass
++	rts
+
+csLanded
+	lda #0
+	sta cY0,x
+	sta cY1,x
+	sta cY2,x
+	sta cVyLo,x
+	sta cVyHi,x
+	sta cVLo,x
+	sta cVHi,x
+	lda #S_WAIT
+	sta cState,x
+	lda #CRANE_WAIT
+	sta cTimer,x
+	rts
+
+csGravity
+	sec
+	lda cVyLo,x
+	sbc #<GRAV
+	sta cVyLo,x
+	lda cVyHi,x
+	sbc #>GRAV
+	sta cVyHi,x
+	; terminal velocity, -0.375 a frame: a fall from the ramp's height
+	; would otherwise wrap vy past -0.5 to +0.5 and bounce the car back
+	; up before it ever reached the grass, forever
+	bpl +
+	cmp #$a0
+	bcs +
+	lda #$a0
+	sta cVyHi,x
+	lda #0
+	sta cVyLo,x
++	; y += vy, sign-extended
+	ldy #0
+	lda cVyHi,x
+	bpl +
+	dey
++	clc
+	lda cY0,x
+	adc cVyLo,x
+	sta cY0,x
+	lda cY1,x
+	adc cVyHi,x
+	sta cY1,x
+	tya
+	adc cY2,x
+	sta cY2,x
+	rts
+
+; s.f.sub += v, and the line.
+csAdvance
+	clc
+	lda cSub,x
+	adc cVLo,x
+	sta cSub,x
+	lda cF,x
+	adc cVHi,x
+	sta cF,x
+	bcc +
+	inc cS,x
+	bne +
+	jsr lapDone
++	rts
+
+csDrive
+	; --- speed ---------------------------------------------------------
+	lda cGnd,x
+	beq csNoPower			; no grip in the air
+	lda inThr
+	cmp #1
+	bne csNoAcc
+	clc
+	lda cVLo,x
+	adc #<ACC
+	sta cVLo,x
+	lda cVHi,x
+	adc #>ACC
+	sta cVHi,x
+csNoAcc
+	lda inThr
+	cmp #2
+	bne csNoBrake
+	sec
+	lda cVLo,x
+	sbc #<BRAKE
+	sta cVLo,x
+	lda cVHi,x
+	sbc #>BRAKE
+	sta cVHi,x
+	bcs csNoBrake
+	lda #0
+	sta cVLo,x
+	sta cVHi,x
+csNoBrake
+	lda inBoost
+	beq csNoPower
+	lda cFuel,x
+	beq csNoPower
+	dec cFuel,x
+	lda #1
+	sta cBoost,x			; the cockpit's flames, cleared when shown
+	clc
+	lda cVLo,x
+	adc #<BOOST_ACC
+	sta cVLo,x
+	lda cVHi,x
+	adc #>BOOST_ACC
+	sta cVHi,x
+csNoPower
+	; drag: v -= v >> DRAG_SH. It is the tyres and the drivetrain, so
+	; on the ground only: in the air a car keeps its speed across a jump.
+	lda cGnd,x
+	beq csNoSlope
+	lda cVHi,x
+	sta tmp1
+	lda cVLo,x
+	.rept DRAG_SH
+	lsr tmp1
+	ror a
+	.next
+	sta tmp0
+	sec
+	lda cVLo,x
+	sbc tmp0
+	sta cVLo,x
+	lda cVHi,x
+	sbc tmp1
+	sta cVHi,x
+	; the hill: v -= dy * SLOPE, dy = the ground's rise last frame
+	lda cGnd,x
+	beq csNoSlope
+	lda cDyLo,x
+	sta tmp0
+	lda cDyHi,x
+	sta tmp1
+	.rept 2				; SLOPE = 4
+	asl tmp0
+	rol tmp1
+	.next
+	sec
+	lda cVLo,x
+	sbc tmp0
+	sta cVLo,x
+	lda cVHi,x
+	sbc tmp1
+	sta cVHi,x
+	; a climb can stall the car but never roll it backwards; a descent
+	; can speed it past V_MAX only as far as the clamp
+	lda tmp1
+	bmi csNoSlope			; downhill: v grew, no underflow
+	bcs csNoSlope
+	lda #0
+	sta cVLo,x
+	sta cVHi,x
+csNoSlope
+	lda cVHi,x
+	cmp #>V_MAX
+	bcc +
+	lda #>V_MAX
+	sta cVHi,x
+	lda #0
+	sta cVLo,x
++
+	; --- steering (on the ground only) --------------------------------
+	lda cGnd,x
+	bne +
+	jmp csNoSteer
++	lda inAuto
+	beq csSteerKeys
+	clc
+	lda cRelLo,x
+	adc aiDLo
+	sta cRelLo,x
+	lda cRelHi,x
+	adc aiDHi
+	sta cRelHi,x
+	jmp csNoSteer
+csSteerKeys
+	; the player: yaw = the wheel * the rate the speed allows. Below the
+	; grip a turn is geometric (STEER0 + vHi * STEER_V at full lock); above it
+	; the tyres slide and the car runs wide. Nothing straightens the car
+	; up for you: hands off, it keeps its heading and the road bends away.
+	ldy cVHi,x
+	beq csNoSteer			; standing still: no turning
+	lda gripLo,y
+	sta mbLo
+	lda gripHi,y
+	sta mbHi
+	lda inThr			; braking hard: the tyres are busy
+	cmp #2				;   stopping the car, and it slides
+	bne +				;   wide in a bend
+	lda cVHi,x
+	cmp #SLIDE_V
+	bcc +
+	lsr mbHi
+	ror mbLo
++	lda pSteer
+	jsr smulS8			; pr1:pr2 = rate * wheel / 256
+	clc
+	lda cRelLo,x
+	adc pr1
+	sta cRelLo,x
+	lda cRelHi,x
+	adc pr2
+	sta cRelHi,x
+csNoSteer
+	; --- the road turns under the car: rel -= dh * vHi / 256 -----------
+	ldy cS,x
+	lda dhLo,y
+	sta mbLo
+	lda dhHi,y
+	sta mbHi
+	lda cVHi,x
+	jsr smul
+	sec
+	lda cRelLo,x
+	sbc pr1
+	sta cRelLo,x
+	lda cRelHi,x
+	sbc pr2
+	sta cRelHi,x
+	; clamp rel to +-REL_LIM
+	lda cRelHi,x
+	bmi csRelNeg
+	cmp #>REL_LIM
+	bcc csRelOk
+	lda #>REL_LIM
+	sta cRelHi,x
+	lda #0
+	sta cRelLo,x
+	jmp csRelOk
+csRelNeg
+	cmp #>-REL_LIM
+	bcs csRelOk
+	lda #>-REL_LIM
+	sta cRelHi,x
+	lda #0
+	sta cRelLo,x
+csRelOk
+	; --- sideways: lat += sin(rel) * vHi * 3/8 -------------------------
+	ldy cRelHi,x
+	lda sinLo,y
+	sta mbLo
+	lda sinHi,y
+	sta mbHi
+	lda cVHi,x
+	jsr smul			; pr0:pr1 = sin256 * vHi, signed
+	lda pr1
+	cmp #$80
+	ror a
+	sta tmp1
+	lda pr0
+	ror a
+	sta tmp0
+	lda tmp1
+	cmp #$80
+	ror tmp1
+	ror tmp0			; tmp = pr >> 2
+	lda tmp1
+	cmp #$80
+	ror a
+	sta tmp3
+	lda tmp0
+	ror a
+	sta tmp2			; tmp2:3 = pr >> 3
+	clc
+	lda tmp0
+	adc tmp2
+	sta tmp0
+	lda tmp1
+	adc tmp3
+	sta tmp1
+	clc
+	lda cLatLo,x
+	adc tmp0
+	sta cLatLo,x
+	lda cLatHi,x
+	adc tmp1
+	bvc +
+	; overflowed past +-2 units: it is long gone anyway
+	lda cLatHi,x
++	sta cLatHi,x
+
+	jsr csAdvance
+
+	; --- the ground under the new position ----------------------------
+	jsr groundAt			; ivLo/ivHi, and onRoad
+	jsr csGravity
+
+	lda onRoad
+	bne csOnRoad
+	; over the grass or the gap
+	lda #0
+	sta cGnd,x
+	sta cOnPrev,x
+	lda cY2,x
+	bpl +
+	jmp csLanded
++	rts
+
+csOnRoad
+	; the ground's rise since last frame, for the slope and the landing;
+	; nothing to compare with if the car was not over road last frame
+	lda cOnPrev,x
+	bne +
+	lda ivLo
+	sta cGPLo,x
+	lda ivHi
+	sta cGPHi,x
++	sec
+	lda ivLo
+	sbc cGPLo,x
+	sta cDyLo,x
+	lda ivHi
+	sbc cGPHi,x
+	sta cDyHi,x
+	lda ivLo
+	sta cGPLo,x
+	lda ivHi
+	sta cGPHi,x
+	lda #1
+	sta cOnPrev,x
+
+	; below the deck by more than SNAP: it hit the road's end or side
+	sec
+	lda ivLo
+	sbc #SNAP_LO
+	sta tmp0
+	lda ivHi
+	sbc #0
+	sta tmp1
+	lda cY1,x
+	cmp tmp0
+	lda cY2,x
+	sbc tmp1
+	bcs csNotUnder
+	lda #S_FALL
+	sta cState,x
+	lda #0
+	sta cVyLo,x
+	sta cVyHi,x
+	sta cGnd,x
+	lsr cVHi,x
+	ror cVLo,x
+	lsr cVHi,x
+	ror cVLo,x
+	rts
+
+csNotUnder
+	; y <= g?
+	lda cY0,x
+	cmp #1
+	lda cY1,x
+	sbc ivLo
+	lda cY2,x
+	sbc ivHi
+	bcc csContact
+	lda #0				; above it: in the air
+	sta cGnd,x
+	jmp csPitch
+
+csContact
+	; the ground's own vertical speed, in vy's units: dy * 256
+	lda #0
+	sta tmp0
+	lda cDyLo,x
+	sta tmp1
+	lda cGnd,x
+	bne csStick
+	; landing: impact = groundVy - vy
+	sec
+	lda tmp0
+	sbc cVyLo,x
+	sta tmp2
+	lda tmp1
+	sbc cVyHi,x
+	sta tmp3
+	bmi csStick
+	sec
+	lda tmp2
+	sbc #<SAFE
+	lda tmp3
+	sbc #>SAFE
+	bcc csStick
+	lsr a				; (impact - SAFE) >> 10
+	lsr a
+	beq csStick
+	pha
+	jsr landKick
+	pla
+	jsr addDamage
+csStick
+	lda tmp0
+	sta cVyLo,x
+	lda tmp1
+	sta cVyHi,x
+	lda #0
+	sta cY0,x
+	lda ivLo
+	sta cY1,x
+	lda ivHi
+	sta cY2,x
+	lda #1
+	sta cGnd,x
+
+csPitch
+	; nose to the road's pitch on the ground, drooping in the air
+	lda cGnd,x
+	beq cpAir
+	ldy cS,x
+	lda #0
+	sta tmp0
+	lda ptTab,y
+	sta tmp1
+	jmp cpSmooth
+cpAir
+	clc
+	lda cPitLo,x
+	adc #$60
+	sta tmp0
+	lda cPitHi,x
+	adc #0
+	sta tmp1
+	bmi cpSmooth
+	cmp #$14
+	bcc cpSmooth
+	lda #$14
+	sta tmp1
+cpSmooth
+	; pitch += (target - pitch) >> 2
+	sec
+	lda tmp0
+	sbc cPitLo,x
+	sta tmp0
+	lda tmp1
+	sbc cPitHi,x
+	cmp #$80
+	ror a
+	ror tmp0
+	cmp #$80
+	ror a
+	ror tmp0
+	sta tmp1
+	clc
+	lda cPitLo,x
+	adc tmp0
+	sta cPitLo,x
+	lda cPitHi,x
+	adc tmp1
+	sta cPitHi,x
+	rts
+
+; A = damage to add, saturating. At 255 the car is wrecked.
+addDamage
+	clc
+	adc cDmg,x
+	bcc +
+	lda #$ff
++	sta cDmg,x
+	cmp #$ff
+	bne +
+	lda #S_WRECK
+	sta cState,x
+	lda #0
+	sta cVLo,x
+	sta cVHi,x
+	lda raceSt
+	cmp #R_RACE
+	bne +
+	txa
+	eor #1				; the other car wins
+	sta winner
+	jsr raceOver
++	rts
+
+; X = car. ivLo/ivHi = the ground under it (8.8), onRoad = 1 if that is
+; the road and 0 if it is the grass: a gap, or past the edge.
+groundAt
+	lda #0
+	sta onRoad
+	sta ivLo
+	sta ivHi
+	ldy cS,x
+	lda flTab,y
+	and #FL_GAP
+	bne gaDone
+	lda cLatHi,x
+	bpl +
+	eor #$ff
+	clc
+	adc #1
++	cmp #EDGE+1
+	bcs gaDone
+	inc onRoad
+	jmp roadY
+gaDone
+	rts
+
+; ivLo/ivHi = the road's height at car X's s and f. The physics does not
+; ride the polygons' straight segments: their kinks would throw a car off
+; every change of slope at any speed. It rides a quadratic B-spline through
+; the segment midpoints instead, so a crest's pull grows with speed squared
+; and a car leaves it only when it is going too fast to follow it. Within
+; 0.04 units of the drawn road; next to a gap or a deck, the plain line.
+roadY
+	lda cS,x
+	sta curS
+	lda cF,x
+	sta curF
+	ldy curS
+	lda curF
+	bmi +
+	dey				; first half: the curve from s-1's midpoint
++	sty ryJ
+	lda flTab,y
+	iny
+	ora flTab,y
+	iny
+	ora flTab,y
+	and #FL_GAP|FL_DECK
+	beq ryCurve
+	#interp cyLo, cyHi
+	rts
+ryCurve
+	ldy ryJ
+	lda cyLo,y
+	sta ry0L
+	lda cyHi,y
+	sta ry0H
+	iny
+	lda cyLo,y
+	sta ry1L
+	lda cyHi,y
+	sta ry1H
+	iny
+	lda cyLo,y
+	sta ry2L
+	lda cyHi,y
+	sta ry2H
+	lda curF
+	eor #$80
+	sta ryW				; w = the way from the midpoint, /256
+	sta mbLo
+	lda #0
+	sta mbHi
+	lda ryW
+	jsr smul
+	lda pr1
+	lsr a
+	sta ryW2			; w*w/2, /256
+	; y = (y0 + y1)/2 + w*(y1 - y0) + w*w/2 * (y0 - 2*y1 + y2)
+	clc
+	lda ry0L
+	adc ry1L
+	sta ivLo
+	lda ry0H
+	adc ry1H
+	cmp #$80
+	ror a
+	sta ivHi
+	ror ivLo
+	sec
+	lda ry1L
+	sbc ry0L
+	sta mbLo
+	lda ry1H
+	sbc ry0H
+	sta mbHi
+	lda ryW
+	jsr smul
+	clc
+	lda ivLo
+	adc pr1
+	sta ivLo
+	lda ivHi
+	adc pr2
+	sta ivHi
+	asl ry1L
+	rol ry1H
+	clc
+	lda ry0L
+	adc ry2L
+	sta mbLo
+	lda ry0H
+	adc ry2H
+	sta mbHi
+	sec
+	lda mbLo
+	sbc ry1L
+	sta mbLo
+	lda mbHi
+	sbc ry1H
+	sta mbHi
+	lda ryW2
+	jsr smul
+	clc
+	lda ivLo
+	adc pr1
+	sta ivLo
+	lda ivHi
+	adc pr2
+	sta ivHi
+	rts
+
+; ======================================================================
+; Where a car is in the world, from where it is on the track.
+; ======================================================================
+carPose
+	lda cS,x
+	sta curS
+	lda cF,x
+	sta curF
+	; the track's heading here, and the car's = that + rel
+	#interpD hdLo, hdHi, dhLo, dhHi
+	lda ivLo
+	sta trkLo
+	lda ivHi
+	sta trkHi
+	clc
+	lda ivLo
+	adc cRelLo,x
+	sta cYawLo,x
+	lda ivHi
+	adc cRelHi,x
+	sta cYawHi,x
+
+	#interp cxLo, cxHi
+	lda ivLo
+	sta cPxLo,x
+	lda ivHi
+	sta cPxHi,x
+	#interp czLo, czHi
+	lda ivLo
+	sta cPzLo,x
+	lda ivHi
+	sta cPzHi,x
+
+	; the right-hand vector is (cos hd, -sin hd); lat is in 1/64 units, so
+	; the offset in 8.8 is trig256 * lat >> 6
+	ldy trkHi
+	lda cosLo,y
+	sta mbLo
+	lda cosHi,y
+	sta mbHi
+	lda cLatHi,x
+	jsr smulS8
+	jsr prShr6
+	clc
+	lda cPxLo,x
+	adc pr1
+	sta cPxLo,x
+	lda cPxHi,x
+	adc pr2
+	sta cPxHi,x
+	ldy trkHi
+	lda sinLo,y
+	sta mbLo
+	lda sinHi,y
+	sta mbHi
+	lda cLatHi,x
+	jsr smulS8
+	jsr prShr6
+	sec
+	lda cPzLo,x
+	sbc pr1
+	sta cPzLo,x
+	lda cPzHi,x
+	sbc pr2
+	sta cPzHi,x
+	rts
+
+; Car-to-car: the two cars are solid boxes, BUMP_LEN long and BUMP_WID
+; wide, and never sit inside each other. Whichever way they overlap less
+; is the way they hit. Nose to tail, the one ahead is put clear of the
+; one behind and the closing speed is shared, the one ahead shoved on and
+; the one behind thrown back. Side by side, they are pushed apart across
+; the road, perhaps off it. A real hit damages both, once per contact.
+bmOut
+	rts
+bump
+	lda #0				; no contact yet this frame
+	sta bmEvt
+	lda bmCool
+	beq +
+	dec bmCool
++	lda cState+0
+	ora cState+1
+	bne bmOut
+	; along = rival - player, in s.f
+	sec
+	lda cF+1
+	sbc cF+0
+	sta tmp0
+	lda cS+1
+	sbc cS+0
+	sta tmp1
+	; |along| < BUMP_LEN?
+	bpl +
+	lda tmp0
+	eor #$ff
+	clc
+	adc #1
+	sta tmp2
+	lda tmp1
+	eor #$ff
+	adc #0
+	jmp bmAbs
++	lda tmp0
+	sta tmp2
+	lda tmp1
+bmAbs
+	bne bmOut
+	lda tmp2
+	cmp #BUMP_LEN
+	bcs bmOut
+	lda #BUMP_LEN
+	sec
+	sbc tmp2
+	sta bmPenA			; the overlap along, s.f units
+	; |lat difference| < BUMP_WID?
+	sec
+	lda cLatHi+1
+	sbc cLatHi+0
+	bvs bmOut
+	sta tmp3
+	bpl +
+	eor #$ff
+	clc
+	adc #1
++	cmp #BUMP_WID
+	bcs bmOut
+	sta tmp2
+	lda #BUMP_WID
+	sec
+	sbc tmp2
+	sta bmPenL			; the overlap across, lat units
+	; the heights too: at the bridge the two roads are 5 units apart
+	lda cY2+1
+	sec
+	sbc cY2+0
+	bpl +
+	eor #$ff
+	clc
+	adc #1
++	cmp #2
+	bcc +
+	rts
++	lda #1				; touching: the sound's cue
+	sta bmEvt
+	; a lat unit is 1/64, an s.f unit 1/171: 3 * across < along means
+	; the overlap across is the smaller, a hit from the side
+	lda bmPenL
+	asl a
+	adc bmPenL
+	cmp bmPenA
+	bcc bmSide
+
+	; --- nose to tail ---------------------------------------------------
+	ldx #1				; rival ahead
+	ldy #0
+	lda tmp1
+	bpl +
+	ldx #0
+	ldy #1
++	stx bmFront
+	sty bmBack
+	; the one ahead is put clear, forward, across the line if it must
+	clc
+	lda cF,x
+	adc bmPenA
+	sta cF,x
+	bcc +
+	inc cS,x
+	bne +
+	jsr lapDone
++	ldx bmFront
+	ldy bmBack
+	; closing = behind - ahead
+	sec
+	lda cVHi,y
+	sbc cVHi,x
+	bcc bmNo			; it was falling back already
+	beq bmNo
+	sta bmClose
+	; three quarters of it changes hands
+	lsr a
+	lsr a
+	sta tmp0
+	lda bmClose
+	sec
+	sbc tmp0
+	sta tmp0
+	lda cVHi,y
+	sec
+	sbc tmp0
+	sta cVHi,y
+	lda cVHi,x
+	clc
+	adc tmp0
+	cmp #>V_MAX
+	bcc +
+	lda #>V_MAX
++	sta cVHi,x
+	lda bmClose
+	cmp #BUMP_HARD
+	bcc bmNo			; a nudge
+	lsr a
+	lsr a
+	clc
+	adc #BUMP_DMG
+	jmp bmHit
+bmNo
+	rts
+
+	; --- side by side ---------------------------------------------------
+bmSide
+	lda bmPenL
+	lsr a
+	clc
+	adc #1
+	sta tmp0			; each car moves half the overlap
+	eor #$ff
+	clc
+	adc #1
+	sta tmp1			; and the other way
+	ldx #0				; the player away from the rival
+	lda tmp0
+	ldy tmp3
+	bmi +
+	lda tmp1
++	jsr bmLat
+	ldx #1				; and the rival away from the player
+	lda tmp1
+	ldy tmp3
+	bmi +
+	lda tmp0
++	jsr bmLat
+	; both scrub 1/16 of their speed against each other, once a contact
+	; like the damage: every frame, two cars that touch in the air or
+	; ride side by side up a climb would brake each other to a stop
+	lda bmCool
+	bne bmScrubbed
+	ldx #1
+-	lda cVHi,x
+	lsr a
+	lsr a
+	lsr a
+	lsr a
+	sta tmp2
+	lda cVHi,x
+	sec
+	sbc tmp2
+	sta cVHi,x
+	dex
+	bpl -
+bmScrubbed
+	lda #BUMP_DMG
+
+; A = the damage to each, once per contact
+bmHit
+	ldx bmCool
+	bne bmNone			; still the same contact
+	sta bmDmg
+	lda #BUMP_COOL
+	sta bmCool
+	inc bumps
+	ldx #0
+	lda bmDmg
+	jsr addDamage
+	ldx #1
+	lda bmDmg
+	jsr addDamage
+bmNone
+	rts
+
+; X = car, A = a hard landing's damage: the car twists on it, further
+; the way it was already turned, so a bad landing is a fight to hold.
+landKick
+	asl a
+	cmp #KICK_MAX
+	bcc +
+	lda #KICK_MAX
++	sta tmp2
+	lda cRelHi,x
+	bmi +
+	clc
+	adc tmp2
+	bvs lkOut
+	sta cRelHi,x
+	rts
++	sec
+	sbc tmp2
+	bvs lkOut
+	sta cRelHi,x
+lkOut
+	rts
+
+; X = car, A = signed lat units across; a car at the far edge stays there
+bmLat
+	clc
+	adc cLatHi,x
+	bvs +
+	sta cLatHi,x
++	rts
+
+; ======================================================================
+; Sending. All absolute, all through stage2.
+; ======================================================================
+; Only the rival: the player's car is the cockpit, never a scene node.
+sendCars
+	ldx #1
+sendCar
+	stx carN
+	jsr stCarPos
+	jsr stCarId
+	lda #OP_SET_POSITION
+	ldx #11
+	jsr stage2
+	ldx carN
+	lda cYawLo,x
+	sta stBuf+0
+	lda cYawHi,x
+	sta stBuf+1
+	lda cPitLo,x
+	sta stBuf+2
+	lda cPitHi,x
+	sta stBuf+3
+	lda #0
+	sta stBuf+4
+	sta stBuf+5
+	jsr stCarId
+	lda #OP_SET_ORIENTATION
+	ldx #5
+	jsr stage2
+	ldx carN
+	rts
+
+stCarId
+	lda carN
+	clc
+	adc #NODE_CAR
+	sta stId
+	lda #0
+	sta stId+1
+	rts
+
+; stBuf = car carN's position as three 16.16 values
+stCarPos
+	ldx carN
+	lda #0
+	sta stBuf+0
+	lda cPxLo,x
+	sta stBuf+1
+	lda cPxHi,x
+	jsr stSign
+	sta stBuf+2
+	stx stBuf+3
+	ldx carN
+	lda cY0,x
+	sta stBuf+4
+	lda cY1,x
+	sta stBuf+5
+	lda cY2,x
+	sta stBuf+6
+	lda #0
+	sta stBuf+7
+	sta stBuf+8
+	lda cPzLo,x
+	sta stBuf+9
+	lda cPzHi,x
+	jsr stSign
+	sta stBuf+10
+	stx stBuf+11
+	ldx carN
+	rts
+
+; A = a high byte. Returns it in A, and its sign extension in X.
+stSign
+	ldx #0
+	cmp #$80
+	bcc +
+	dex
++	rts
+
+; The camera: the driver's eye, over the roll cage, looking where the car
+; looks. During the count the car is still coming down on the crane's
+; chains, so the eye is lifted by (raceT - 60) * 6/256 until the last
+; second.
+sendCamera
+	lda cYawLo
+	sta camYawLo
+	lda cYawHi
+	sta camYawHi
+	lda cPxLo
+	sta camXLo
+	lda cPxHi
+	sta camXHi
+	lda cPzLo
+	sta camZLo
+	lda cPzHi
+	sta camZHi
+	clc
+	lda cY1
+	adc #$a0			; 0.62
+	sta camYLo
+	lda cY2
+	adc #0
+	sta camYHi
+	lda raceSt
+	cmp #R_COUNT
+	bne scLevel
+	sec
+	lda raceT
+	sbc #CHAIN_T
+	bcc scLevel
+	sta tmp0			; * 6 = * 4 + * 2
+	lda #0
+	sta tmp1
+	asl tmp0
+	rol tmp1
+	lda tmp0
+	ldx tmp1
+	asl tmp0
+	rol tmp1
+	clc
+	adc tmp0
+	sta tmp0
+	txa
+	adc tmp1
+	sta tmp1
+	clc
+	lda camYLo
+	adc tmp0
+	sta camYLo
+	lda camYHi
+	adc tmp1
+	sta camYHi
+scLevel
+	clc
+	lda cPitLo
+	adc #<$0200
+	sta camPitLo
+	lda cPitHi
+	adc #>$0200
+	sta camPitHi
+
+scSend
+	lda #0
+	sta stBuf+0
+	sta stBuf+4
+	sta stBuf+8
+	lda camXLo
+	sta stBuf+1
+	lda camXHi
+	jsr stSign
+	sta stBuf+2
+	stx stBuf+3
+	lda camYLo
+	sta stBuf+5
+	lda camYHi
+	jsr stSign
+	sta stBuf+6
+	stx stBuf+7
+	lda camZLo
+	sta stBuf+9
+	lda camZHi
+	jsr stSign
+	sta stBuf+10
+	stx stBuf+11
+	jsr stCamId
+	lda #OP_SET_POSITION
+	ldx #11
+	jsr stage2
+	lda camYawLo
+	sta stBuf+0
+	lda camYawHi
+	sta stBuf+1
+	lda camPitLo
+	sta stBuf+2
+	lda camPitHi
+	sta stBuf+3
+	lda #0
+	sta stBuf+4
+	sta stBuf+5
+	jsr stCamId
+	lda #OP_SET_ORIENTATION
+	ldx #5
+	jmp stage2
+
+; The mountains stand round the camera, always, and at its height less
+; MTN_EYE, the height they were rendered from, so they stay on the
+; horizon however high the track is; their skirt reaches down past the
+; ground. The ground follows the camera in whole 32-unit cells so its
+; texture never slides.
+sendHorizon
+	lda #0
+	sta stBuf+0
+	sta stBuf+4
+	sta stBuf+8
+	lda camYLo
+	sta stBuf+5
+	sec
+	lda camYHi
+	sbc #MTN_EYE
+	jsr stSign
+	sta stBuf+6
+	stx stBuf+7
+	lda camXLo
+	sta stBuf+1
+	lda camXHi
+	jsr stSign
+	sta stBuf+2
+	stx stBuf+3
+	lda camZLo
+	sta stBuf+9
+	lda camZHi
+	jsr stSign
+	sta stBuf+10
+	stx stBuf+11
+	lda #NODE_HILL
+	sta stId
+	lda #0
+	sta stId+1
+	lda #OP_SET_POSITION
+	ldx #11
+	jsr stage2
+
+	lda camXHi
+	and #$e0
+	cmp gndX
+	bne +
+	lda camZHi
+	and #$e0
+	cmp gndZ
+	beq shDone
++
+sendGround
+	lda camXHi
+	and #$e0
+	sta gndX
+	lda camZHi
+	and #$e0
+	sta gndZ
+	lda #0
+	ldx #11
+-	sta stBuf,x
+	dex
+	bpl -
+	lda gndX
+	sta stBuf+2
+	jsr stSign
+	stx stBuf+3
+	lda gndZ
+	sta stBuf+10
+	jsr stSign
+	stx stBuf+11
+	lda #NODE_GND
+	sta stId
+	lda #0
+	sta stId+1
+	lda #OP_SET_POSITION
+	ldx #11
+	jmp stage2
+shDone
+	rts
+
+; ======================================================================
+; The cockpit: CK_N view-space sprites (stunt_cockpit.py) posed by one
+; WORLD_TICK block a frame. The template in ckTab has every node, texture,
+; flag and position; this patches what moves -- the crack, the flames, the
+; chains, the bars and the digits -- and sends it. Every record is
+; absolute, and the block is checked whole, so a lost one costs a frame of
+; stale dials; nothing reads the answer.
+; ======================================================================
+WT_IN	= 16 + (CK_N + BAL_N) * 20
+WT_LEN	= WT_IN + 12			; an actors-only answer: 8, then the trailer
+CKA	= wtBlk + 16			; actor k at CKA + 20 * k
+BLA	= CKA + 20 * CK_N		; and the balloons after the cockpit
+	.cerror CK_N * 10 > 255 || CK_N % 2, "the cockpit's loops count in bytes"
+	.cerror CK_N + BAL_N > 32, "WORLD_TICK poses 32 actors at most"
+
+ckTex	.macro	k
+	sta CKA + 20 * \k + 2
+	.endm
+ckHide	.macro	k
+	lda #2				; still view space, not visible
+	sta CKA + 20 * \k + 4
+	.endm
+
+sendCockpit
+	; The template goes in once -- and again after any refused tick, in
+	; case what was refused is a record the bus damaged. A frame then
+	; rewrites only the texture and the flags of each record.
+	lda ckInit
+	bne ckWarm
+	ldx #CK_N * 10
+-	lda ckTab - 1,x
+	sta CKA - 1,x
+	lda ckTab + CK_N * 10 - 1,x
+	sta CKA + CK_N * 10 - 1,x
+	dex
+	bne -
+	lda #0
+	ldx #15
+-	sta wtBlk,x
+	dex
+	bpl -
+	inc ckInit
+ckWarm
+	.for ki = 0, ki < CK_N, ki += 1
+	lda ckTab + 20 * ki + 2
+	sta CKA + 20 * ki + 2
+	lda #3
+	sta CKA + 20 * ki + 4
+	.next
+
+	#ckHide CK_SPARE
+	; the front wheels: steered as the wheel is, and turning with the speed
+	lda ckSpin			; (spin >> 7) & 3, backwards: the top of a
+	asl a				; tyre runs away from the driver
+	lda ckSpin+1
+	rol a
+	and #3
+	eor #3
+	sta tmp0
+	lda ckSteer
+	clc
+	adc #2
+	sta tmp1
+	asl a
+	asl a
+	adc tmp0
+	adc #<TX_TYRE
+	#ckTex CK_TYREL
+	adc #20
+	#ckTex CK_TYRER
+	lda tmp1
+	adc #<TX_WHEEL
+	#ckTex CK_WHEEL
+
+	; the crack runs across the roll cage, a stage per 16 of damage
+	lda cDmg
+	lsr a
+	lsr a
+	lsr a
+	lsr a
+	bne +
+	#ckHide CK_CRACK
+	jmp ckFlames
++	clc
+	adc #<TX_CRACK
+	#ckTex CK_CRACK
+ckFlames
+	lda cBoost
+	bne +
+	#ckHide CK_FLAME
+	jmp ckChains
++	lda #0
+	sta cBoost
+	lda frames
+	lsr a
+	and #1
+	clc
+	adc #<TX_FLAME
+	#ckTex CK_FLAME
+ckChains
+	; on the crane: coming down at the start, or being put back
+	lda cState
+	cmp #S_CRANE
+	beq ckBars
+	lda raceSt
+	cmp #R_COUNT
+	bne +
+	lda raceT
+	cmp #CHAIN_T
+	bcs ckBars
++	#ckHide CK_CHAIN
+ckBars
+	; the speed bar: vHi >> 2, flat out ($3c) is 15 of the 24 steps and
+	; only boost reaches the end
+	lda cVHi
+	lsr a
+	lsr a
+	cmp #BAR_N
+	bcc +
+	lda #BAR_N-1
++	clc
+	adc #<TX_BAR
+	#ckTex CK_SPEED
+	; the boost: what is left of the tank, 0-99 (FUEL * 0.656 = 98)
+	lda cFuel
+	lsr a
+	sta tmp0
+	lsr a
+	lsr a
+	sta tmp1
+	lsr a
+	lsr a
+	clc
+	adc tmp0
+	adc tmp1
+	cmp #100
+	bcc +
+	lda #99
++	clc
+	adc #<TX_PAIR
+	#ckTex CK_BOOST
+
+	; the lap, as the HUD counts it
+	lda cLap
+	clc
+	adc #1
+	bne +
+	lda #1
++	cmp #LAPS+1
+	bcc +
+	lda #LAPS
++	clc
+	adc #<TX_DIG
+	#ckTex CK_LAP
+
+	; this lap's time, m:ss.t
+	lda lapSec
+	jsr ckMinSec
+	#ckTex CK_TIMES
+	txa
+	#ckTex CK_TIMEM
+	lda lapTen
+	clc
+	adc #<TX_DIG
+	#ckTex CK_TIMET
+
+	; the best lap, or dashes until there is one
+	lda bestSec
+	ora bestTen
+	bne +
+	lda #<(TX_DIG+10)
+	#ckTex CK_BESTM
+	#ckTex CK_BESTT
+	lda #<(TX_PAIR+100)
+	#ckTex CK_BESTS
+	jmp ckGap
++	lda bestSec
+	jsr ckMinSec
+	#ckTex CK_BESTS
+	txa
+	#ckTex CK_BESTM
+	lda bestTen
+	clc
+	adc #<TX_DIG
+	#ckTex CK_BESTT
+
+ckGap
+	; the distance to the rival, + ahead and - behind: the two cars'
+	; lap.s.f apart, >> 4, so a segment is 16 and a lap 4096
+	sec
+	lda cF+0
+	sbc cF+1
+	sta gap0
+	lda cS+0
+	sbc cS+1
+	sta gap1
+	lda cLap+0
+	sbc cLap+1
+	sta gap2
+	ldy #0
+	bit gap2
+	bpl +
+	ldy #10				; behind: the minus half of TX_SGN
+	sec
+	lda #0
+	sbc gap0
+	sta gap0
+	lda #0
+	sbc gap1
+	sta gap1
+	lda #0
+	sbc gap2
+	sta gap2
++	sty tmp2
+	ldx #4
+-	lsr gap2
+	ror gap1
+	ror gap0
+	dex
+	bne -
+	lda gap2			; >= 9999: 9999
+	bne +
+	lda gap0
+	cmp #<9999
+	lda gap1
+	sbc #>9999
+	bcc ++
++	lda #<9999
+	sta gap0
+	lda #>9999
+	sta gap1
++	ldx #0				; the thousands
+-	sec
+	lda gap0
+	sbc #<1000
+	tay
+	lda gap1
+	sbc #>1000
+	bcc +
+	sta gap1
+	sty gap0
+	inx
+	bne -
++	txa
+	clc
+	adc tmp2
+	adc #<TX_SGN
+	#ckTex CK_GAPS
+	ldx #0				; the hundreds
+-	sec
+	lda gap0
+	sbc #100
+	tay
+	lda gap1
+	sbc #0
+	bcc +
+	sta gap1
+	sty gap0
+	inx
+	bne -
++	stx tmp0
+	lda gap0
+	jsr dec2
+	clc
+	adc #<TX_DIG
+	#ckTex CK_GAPD
+	lda tmp0			; hundreds * 10 + tens
+	asl a
+	asl a
+	adc tmp0
+	asl a
+	stx tmp0
+	adc tmp0
+	adc #<TX_PAIR
+	#ckTex CK_GAPP
+
+	jsr balPose
+
+	; the header and its sum (bytes 6-7 zero while it is taken)
+	lda #$d8
+	sta wtBlk+0
+	lda #CK_N + BAL_N
+	sta wtBlk+1
+	lda frames
+	sta wtBlk+5
+	lda #0
+	sta wtBlk+2
+	sta wtBlk+3
+	sta wtBlk+4
+	sta wtBlk+6
+	sta wtBlk+7
+	; the sum: CK_SUM0 has every fixed byte, header bytes 2-4 and 6-15
+	; are zero, and the rest is added here
+CK_B	= (CK_SUM0 + $d8 + CK_N + BAL_N) & $ffff
+	ldy #>CK_B
+	lda #<CK_B
+	clc
+	adc wtBlk+5
+	bcc +
+	iny
++	.for ki = 0, ki < CK_N, ki += 1
+	clc
+	adc CKA + 20 * ki + 2
+	bcc +
+	iny
++	clc
+	adc CKA + 20 * ki + 4
+	bcc +
+	iny
++	.next
+	ldx #0				; the balloons: every byte changes
+-	clc
+	adc BLA,x
+	bcc +
+	iny
++	inx
+	cpx #BAL_N * 20
+	bne -
+	sta wtBlk+6
+	sty wtBlk+7
+
+	lda #SPACE_C64
+	sta stBuf+0
+	lda #<wtBlk
+	sta stBuf+1
+	lda #>wtBlk
+	sta stBuf+2
+	lda #0
+	sta stBuf+3
+	sta stId
+	sta stId+1
+	lda #<WT_LEN
+	sta stBuf+4
+	lda #>WT_LEN
+	sta stBuf+5
+	lda #OP_WORLD_TICK
+	ldx #5
+	jsr stage2
+	beq +
+	lda #0
+	sta ckInit			; refused: the template again next frame
+	inc ckErrs
+	bne +
+	dec ckErrs
++	rts
+
+; ======================================================================
+; The balloons: three sprites in the sky, at a bearing, distance and
+; height round the camera picked from balX/Y/Z at the start of a race.
+; Like the mountains they ride with the camera -- inside the mountains'
+; ring, whose panels hide anything beyond it -- so they hang far off on
+; the horizon wherever the track goes. They drift with a slow wind (a
+; triangle of +-2 units over 2048 frames, all of them alike) and each
+; bobs half a unit on its own phase. World-space actors in the cockpit's
+; WORLD_TICK block, so they cost no commands of their own.
+; ======================================================================
+balPose
+	lda frames			; the wind: t = frames & $7ff, folded
+	sta balDLo			;   at $400, less $200
+	lda frames+1
+	and #7
+	cmp #4
+	bcc +
+	eor #7
+	tax
+	lda balDLo
+	eor #$ff
+	sta balDLo
+	txa
++	sec
+	sbc #2
+	sta balDHi
+	.for bk = 0, bk < BAL_N, bk += 1
+	lda #NODE_BAL + bk
+	sta BLA + 20 * bk + 0
+	lda #TEX_BAL + bk
+	sta BLA + 20 * bk + 2
+	lda #0
+	sta BLA + 20 * bk + 1
+	sta BLA + 20 * bk + 3
+	sta BLA + 20 * bk + 5
+	sta BLA + 20 * bk + 6
+	sta BLA + 20 * bk + 7
+	lda #1				; visible, world space
+	sta BLA + 20 * bk + 4
+	ldy balIx + bk
+	clc				; x: the bearing's, and the wind
+	lda balXLo,y
+	adc balDLo
+	sta balT0
+	lda balXHi,y
+	adc balDHi
+	sta balT1
+	lda camXLo
+	sta balT2
+	lda camXHi
+	sta balT3
+	ldx #20 * bk + 8
+	jsr balAxis
+	lda frames			; y: the bearing's, and the bob,
+	lsr a				;   (frames / 2 + phase) folded at $80
+	clc
+	adc #bk * 85
+	bpl +
+	eor #$ff
++	clc
+	adc balYLo,y
+	sta balT0
+	lda balYHi,y
+	adc #0
+	sta balT1
+	lda camYLo
+	sta balT2
+	lda camYHi
+	sta balT3
+	ldx #20 * bk + 12
+	jsr balAxis
+	lda balZLo,y			; z: the bearing's
+	sta balT0
+	lda balZHi,y
+	sta balT1
+	lda camZLo
+	sta balT2
+	lda camZHi
+	sta balT3
+	ldx #20 * bk + 16
+	jsr balAxis
+	.next
+	rts
+
+; balT0-1 + balT2-3, two signed 8.8s, as a 16.16 at BLA + X.
+balAxis
+	lda #0
+	sta BLA + 0,x
+	clc
+	lda balT0
+	adc balT2
+	sta BLA + 1,x
+	lda balT1
+	adc balT3
+	sta BLA + 2,x
+	lda #0				; the sign bytes, and the carry
+	bit balT1
+	bpl +
+	lda #$ff
++	sta balT4
+	lda #0
+	bit balT3
+	bpl +
+	lda #$ff
++	adc balT4
+	sta BLA + 3,x
+	rts
+
+; A new race, a new sky: three of the BAL_DIRS bearings, each two to five
+; on from the last, so they spread over a quarter to half of the horizon.
+balPick
+	lda $d012
+	eor $dc04
+	eor frames
+	sta balT0
+	and #BAL_DIRS - 1
+	sta balIx
+	ldx #1
+-	lda balT0
+	lsr a
+	lsr a
+	sta balT0
+	and #3
+	clc
+	adc #2
+	adc balIx - 1,x
+	and #BAL_DIRS - 1
+	sta balIx,x
+	inx
+	cpx #BAL_N
+	bne -
+	rts
+
+; A = 0-255 -> X = tens, A = units, of A capped at 99
+dec2
+	cmp #100
+	bcc +
+	lda #99
++	ldx #$ff
+	sec
+-	inx
+	sbc #10
+	bcs -
+	adc #10
+	rts
+
+; the full-lock yaw rate at each vHi, doubled (pSteer's full lock is
+; 120/256): geometric up to the grip, GRIP_K / vHi past it
+gripLo
+	.for vi = 0, vi < 256, vi += 1
+	.byte <(2 * ((vi == 0) ? 0 : ((STEER0 + STEER_V * vi) < (GRIP_K / (vi + (vi == 0)))) ? (STEER0 + STEER_V * vi) : (GRIP_K / (vi + (vi == 0)))))
+	.next
+gripHi
+	.for vi = 0, vi < 256, vi += 1
+	.byte >(2 * ((vi == 0) ? 0 : ((STEER0 + STEER_V * vi) < (GRIP_K / (vi + (vi == 0)))) ? (STEER0 + STEER_V * vi) : (GRIP_K / (vi + (vi == 0)))))
+	.next
+
+; A = seconds -> A = TX_PAIR's low byte for the seconds, X = TX_DIG's for
+; the minutes
+ckMinSec
+	ldx #<(TX_DIG-1)
+	sec
+-	inx
+	sbc #60
+	bcs -
+	adc #<(60+TX_PAIR)
+	rts
+
+waitReady
+	lda #<READY_WAIT
+	sta waitCt
+	lda #>READY_WAIT
+	sta waitCt+1
+wrPoll
+	lda STATUS
+	and #( ST_FRAME_READY | ST_BUSY )
+	cmp #ST_FRAME_READY
+	beq wrDone
+	lda waitCt
+	bne +
+	dec waitCt+1
++	dec waitCt
+	lda waitCt
+	ora waitCt+1
+	bne wrPoll
+	inc stalls
+	bne wrDone
+	inc stalls+1
+wrDone
+	rts
+
+; ======================================================================
+; The refresh ring: one step a frame, round everything this program ever
+; set -- the scene state, then every node, re-created and re-placed. See
+; gpu64_demo_game.a for why re-creating is the only repair for a node
+; whose creation argument a phantom replaced.
+; ======================================================================
+RG_SCENE = 6
+RG_TRK   = RG_SCENE
+RG_MISC  = RG_TRK + STATIC_N
+RG_CK    = RG_MISC + 6		; two cars, the ground, the hills, two decks
+RG_BAL   = RG_CK + CK_N		; the cockpit's sprites
+RG_N     = RG_BAL + BAL_N		; the balloons
+
+doRefresh
+	jsr ringStep
+	beq +
+	inc rgErrs
+	bne +
+	dec rgErrs
++	rts
+
+; Runs entry rgIx and advances it. Returns the ERRCODE, flags set.
+ringStep
+	lda rgIx
+	pha
+	inc rgIx
+	lda rgIx
+	cmp #RG_N
+	bcc +
+	lda #0
+	sta rgIx
++	pla
+	cmp #RG_TRK
+	bcs rsNode
+	asl a
+	tax
+	lda rgTab,x
+	sta rsCall+1
+	lda rgTab+1,x
+	sta rsCall+2
+rsCall	jmp $ffff			; patched above
+
+rsNode
+	cmp #RG_MISC
+	bcs rsMisc
+	sec
+	sbc #RG_TRK
+	jmp rgChunk
+rsMisc
+	cmp #RG_BAL
+	bcc +
+	sbc #RG_BAL
+	jmp rgBal
++	cmp #RG_CK
+	bcc +
+	sbc #RG_CK
+	jmp rgCk
++	sec
+	sbc #RG_MISC
+	bne +
+	jmp rgCarP
++	cmp #1
+	bne +
+	jmp rgCarA
++	cmp #2
+	bne +
+	jmp rgGround
++	cmp #3
+	bne +
+	jmp rgHills
++	sec
+	sbc #4
+	jmp rgDeck
+
+rgTab
+	.word rgViewport
+	.word rgPersp
+	.word rgActiveCam
+	.word rgBackground
+	.word rgLight
+	.word rgDmaWin
+
+argreu	.macro	off, addr, len
+	lda #SPACE_REU
+	sta ARG+\off
+	lda #<(\addr)
+	sta ARG+\off+1
+	lda #>(\addr)
+	sta ARG+\off+2
+	lda #((\addr) >> 16) & $ff
+	sta ARG+\off+3
+	lda #<(\len)
+	sta ARG+\off+4
+	lda #>(\len)
+	sta ARG+\off+5
+	.endm
+stb	.macro	off, val
+	lda #\val
+	sta stBuf+\off
+	.endm
+stw	.macro	off, val
+	lda #<(\val)
+	sta stBuf+\off
+	lda #>(\val)
+	sta stBuf+\off+1
+	.endm
+
+rgViewport
+	jsr stId0
+	#stw 0, 0
+	#stw 2, 0
+	#stw 4, VP_W
+	#stw 6, VP_H
+	lda #OP_SET_VIEWPORT
+	ldx #7
+	jmp stage2
+
+rgPersp
+	jsr stId0
+	#stw 0, FOV
+	#stw 2, NEARZ
+	#stw 4, FARZ
+	lda #OP_SET_PERSPECTIVE
+	ldx #5
+	jmp stage2
+
+rgBackground
+	jsr stId0
+	#stb 0, SKY_COL
+	lda #OP_SET_BACKGROUND
+	ldx #0
+	jmp stage2
+
+; The sun is high and behind the start line's left shoulder; the ambient is
+; generous, because a stilted track's undersides are most of what a chase
+; camera sees of it on the far side of the circuit.
+rgLight
+	jsr stId0
+	#stw 0, -102
+	#stw 2, 218
+	#stw 4, -90
+	#stb 6, 6
+	lda #OP_SET_LIGHT3D
+	ldx #6
+	jmp stage2
+
+; BAD_ID: the camera is not a camera any more. Make it one again.
+rgActiveCam
+	jsr stCamId
+	lda #OP_SET_ACTIVE_CAMERA
+	ldx #$ff
+	jsr stage2
+	cmp #ERR_BAD_ID
+	beq +
+	cmp #0
+	rts
++	jsr stCamId
+	lda #OP_CREATE_CAMERA
+	ldx #$ff
+	jsr stage2
+	jsr stCamId
+	lda #OP_SET_ACTIVE_CAMERA
+	ldx #$ff
+	jsr stage2
+	inc camFix
+	lda #ERR_BAD_ID
+	rts
+
+rgDmaWin
+	jmp setFence
+
+; A = chunk. CREATE_OBJECT, then SET_POSITION, from staticTab.
+rgChunk
+	sta tmp0
+	asl a
+	asl a
+	adc tmp0			; * 5 words = * 10 bytes
+	asl a
+	tay
+	lda staticTab+0,y
+	sta stId
+	lda staticTab+1,y
+	sta stId+1
+	lda staticTab+2,y
+	sta stBuf+0
+	lda staticTab+3,y
+	sta stBuf+1
+	sty rgY
+	lda #OP_CREATE_OBJECT
+	ldx #1
+	jsr stage2
+	sta rgErr
+	ldy rgY
+	lda #0
+	sta stBuf+0
+	sta stBuf+4
+	sta stBuf+8
+	lda staticTab+4,y
+	sta stBuf+1
+	lda staticTab+5,y
+	jsr stSign
+	sta stBuf+2
+	stx stBuf+3
+	lda staticTab+6,y
+	sta stBuf+5
+	lda staticTab+7,y
+	jsr stSign
+	sta stBuf+6
+	stx stBuf+7
+	lda staticTab+8,y
+	sta stBuf+9
+	lda staticTab+9,y
+	jsr stSign
+	sta stBuf+10
+	stx stBuf+11
+	lda #OP_SET_POSITION
+	ldx #11
+	jsr stage2
+	ora rgErr
+	rts
+
+; A = 0 or 1: a drawbridge deck, mesh 1000 + 32 * track + 16 + A, on a
+; track that has one. Its pose goes out every frame, from deckTick.
+rgDeck
+	ldy deckS
+	bne +
+	lda #0
+	rts
++	sta tmp0
+	clc
+	adc #NODE_DECK
+	sta stId
+	lda #0
+	sta stId+1
+	lda curTrack
+	asl a
+	asl a
+	asl a
+	asl a
+	asl a
+	clc
+	adc tmp0
+	clc
+	adc #<(1000+16)
+	sta stBuf+0
+	lda #>(1000+16)
+	adc #0
+	sta stBuf+1
+	lda #OP_CREATE_OBJECT
+	ldx #1
+	jmp stage2
+
+; A = CK_*: CREATE_SPRITE, then SET_SPRITE its size, unlit. Creating it
+; clears its view-space flag; the frame's WORLD_TICK, after the ring,
+; sets it again before the commit.
+rgCk
+	sta tmp0
+	clc
+	adc #NODE_CK
+	sta stId
+	lda #0
+	sta stId+1
+	lda tmp0
+	asl a
+	asl a
+	sta rgY
+	asl a
+	asl a
+	adc rgY				; * 20
+	tay
+	lda ckTab+2,y
+	sta stBuf+0
+	lda ckTab+3,y
+	sta stBuf+1
+	lda #OP_CREATE_SPRITE
+	ldx #1
+	jsr stage2
+	sta rgErr
+	ldy rgY
+	ldx #0
+-	lda ckSize,y
+	sta stBuf,x
+	iny
+	inx
+	cpx #4
+	bne -
+	lda #8				; unlit
+	sta stBuf+4
+	lda #OP_SET_SPRITE
+	ldx #4
+	jsr stage2
+	ora rgErr
+	rts
+
+; A = balloon: CREATE_SPRITE, then SET_SPRITE its size, unlit. Its pose
+; is in every frame's WORLD_TICK.
+rgBal
+	sta tmp0
+	clc
+	adc #NODE_BAL
+	sta stId
+	lda #0
+	sta stId+1
+	sta stBuf+1
+	lda tmp0
+	clc
+	adc #TEX_BAL
+	sta stBuf+0
+	lda #OP_CREATE_SPRITE
+	ldx #1
+	jsr stage2
+	sta rgErr
+	lda #<BAL_SIZE
+	sta stBuf+0
+	sta stBuf+2
+	lda #>BAL_SIZE
+	sta stBuf+1
+	sta stBuf+3
+	lda #8				; unlit
+	sta stBuf+4
+	lda #OP_SET_SPRITE
+	ldx #4
+	jsr stage2
+	ora rgErr
+	rts
+
+; The moving nodes need only exist: their pose is sent every frame, and
+; the ground's is forced out again on the frame it is re-created.
+rgCarP
+	lda #0				; the player's car is the cockpit
+	rts
+rgCarA
+	lda #NODE_CAR+1
+	ldx #<MESH_CARAI
+	jmp rgObj
+rgGround
+	lda #$55			; never a multiple of 32: forces the send
+	sta gndX
+	lda #NODE_GND
+	ldx #<MESH_GROUND
+	jmp rgObj
+rgHills
+	lda #NODE_HILL
+	ldx #<MESH_HILLS
+rgObj
+	sta stId
+	stx stBuf+0
+	lda #0
+	sta stId+1
+	sta stBuf+1
+	lda #OP_CREATE_OBJECT
+	ldx #1
+	jmp stage2
+
+stCamId
+	lda #<CAM_ID
+	sta stId
+	lda #>CAM_ID
+	sta stId+1
+	rts
+
+stId0
+	pha
+	lda #0
+	sta stId
+	sta stId+1
+	pla
+	rts
+
+; ======================================================================
+; Uploads. Checked like everything else, and a mesh is believed only when
+; RESULT reads back its own face count: the blob comes over REU-style DMA,
+; the path that carries both of the bus's known defects.
+; ======================================================================
+uploadTex
+	; texTab + upIx*8, 16-bit: TEX_N is past the 32 entries Y can index
+	lda #0
+	sta SRC+1
+	lda upIx
+	asl a
+	rol SRC+1
+	asl a
+	rol SRC+1
+	asl a
+	rol SRC+1
+	clc
+	adc #<texTab
+	sta SRC
+	lda SRC+1
+	adc #>texTab
+	sta SRC+1
+	ldy #0
+	lda (SRC),y
+	sta stId
+	ldy #1
+	lda (SRC),y
+	sta stId+1
+	lda #SPACE_REU
+	sta stBuf+0
+	ldy #2
+	lda (SRC),y
+	sta stBuf+1
+	ldy #3
+	lda (SRC),y
+	sta stBuf+2
+	ldy #4
+	lda (SRC),y
+	sta stBuf+3
+	ldy #5
+	lda (SRC),y
+	sta stBuf+4
+	ldy #6
+	lda (SRC),y
+	sta stBuf+5
+	ldy #7
+	lda (SRC),y
+	and #$0f
+	sta stBuf+6
+	ldy #7
+	lda (SRC),y
+	lsr a
+	lsr a
+	lsr a
+	lsr a
+	sta stBuf+7
+	lda #OP_UPLOAD_TEXTURE
+	ldx #7
+	jmp stage2
+
+; upPtr = a meshTab entry: id, the vertex blob (3) and its length, the
+; face blob (3) and its length, the face count.
+uploadMesh
+	lda upPtr
+	sta SRC
+	lda upPtr+1
+	sta SRC+1
+	ldy #0
+	lda (SRC),y
+	sta stId
+	iny
+	lda (SRC),y
+	sta stId+1
+	lda #SPACE_REU
+	sta stBuf+0
+	sta stBuf+6
+	ldy #6				; entry 2-6 -> stBuf 1-5
+-	lda (SRC),y
+	sta stBuf-1,y
+	dey
+	cpy #2
+	bcs -
+	ldy #11				; entry 7-11 -> stBuf 7-11
+-	lda (SRC),y
+	sta stBuf,y
+	dey
+	cpy #7
+	bcs -
+	ldy #12
+	lda (SRC),y
+	sta upFaces
+	lda #UPLOAD_TRIES
+	sta upTry
+umSend
+	lda #OP_UPLOAD_MESH
+	ldx #11
+	jsr stage2
+	bne umRetry
+	lda RESULT
+	cmp upFaces
+	beq umOk
+	lda RESULT			; a bad read of a good answer?
+	cmp upFaces
+	beq umOk
+umRetry
+	inc upRetries
+	dec upTry
+	bne umSend
+	lda #$ff			; never confirmed
+	rts
+umOk
+	lda #0
+	rts
+
+; A = an ERRCODE, returned unchanged. Remembers the first failure.
+logSetup
+	tay
+	inc setupIdx
+	cpy #0
+	beq +
+	lda setupBadCode
+	bne +
+	sty setupBadCode
+	lda setupIdx
+	sta setupBadAt
++	tya
+	rts
+
+; ======================================================================
+; The command machinery, from gpu64_demo_game.a unchanged in substance.
+; See there for the bench runs behind every line of it.
+; ======================================================================
+
+; stId and stBuf hold the block; A = the class 1 opcode, X = the last ARG
+; index, or $FF for none. Returns the ERRCODE, Z set on OK. Destroys A X Y.
+; stage0 is the same for a class 0 opcode (the title's BLITs and text).
+stage0
+	ldy #0
+	.byte $2c			; bit abs: skip the ldy
+stage2
+	ldy #1
+	sty stCls
+	sta stOp
+	stx stLast
+	inx
+	txa
+	ora #KEY_CHECKED
+	sta stKey
+	eor stCls			; CMD_HI
+	eor stOp
+	eor stId
+	eor stId+1
+	ldx stLast
+	bmi +
+-	eor stBuf,x
+	dex
+	bpl -
++	sta stChk
+	lda #CHK_TRIES
+	sta stTry
+st2Send
+	ldy #1				; one pass: the check replaced the second
+st2Pass
+	lda stId
+	sta ID_LO
+	lda stId+1
+	sta ID_HI
+	ldx stLast
+	bmi +
+-	lda stBuf,x
+	sta ARG,x
+	dex
+	bpl -
++	lda stChk
+	sta ARG+14
+	lda stKey
+	sta ARG+15
+	dey
+	bne st2Pass
+	lda stCls
+	sta CMD_HI
+	lda stOp
+	jsr cEntry
+	cmp #ERR_BAD_ARGS
+	bne st2Done
+	inc chkRetry
+	bne +
+	inc chkRetry+1
++	dec stTry
+	bne st2Send
+	lda #ERR_BAD_ARGS
+st2Done
+	cmp #0
+	rts
+
+cmdClass0
+	ldx #0
+	stx CMD_HI
+	jmp cEntry
+cmd1
+	ldx #1
+	stx CMD_HI
+cEntry
+	sta CMD_LO
+	lda ERRCODE
+	cmp #$0d			; the valid codes run $00-$0C
+	bcc c1Done
+	ldx #7
+c1ReRead
+	lda ERRCODE
+	cmp #$0d
+	bcc c1Done
+	dex
+	bne c1ReRead
+	inc errBad
+	bne +
+	inc errBad+1
++	lda #0				; the reply was lost, not the command
+c1Done
+	cmp #0
+	rts
+
+cmdSeq1
+	sta seqOp
+	inc seqCounter
+	lda seqCounter
+	beq csqWrap
+	cmp #$ff
+	bne csqOk
+csqWrap	lda #1
+	sta seqCounter
+csqOk
+	lda seqCounter
+	sta SEQ
+	lda seqOp
+	jsr cmd1
+	sta seqErr
+	lda SEQACK
+	cmp seqCounter
+	beq csqSeen
+	lda SEQACK
+	cmp seqCounter
+	beq csqSeen
+	inc missed
+	bne +
+	inc missed+1
++	lda #1
+	sta seqMiss
+	rts
+csqSeen
+	lda #0
+	sta seqMiss
+	rts
+
+; The readback fence. Nothing reads anything back once the loop runs, so
+; then the window is a small dead buffer: a phantom readback lands in it
+; instead of in the code. Fetching a track it is the track block.
+FENCE_LEN  = 32
+setFence
+	lda #<fenceBuf
+	sta winLo
+	lda #>fenceBuf
+	sta winHi
+	lda #<(FENCE_LEN+WT_LEN)
+	sta wlnLo
+	lda #>(FENCE_LEN+WT_LEN)
+	sta wlnHi
+	jmp setWin
+setTrkWin
+	lda #<TRK
+	sta winLo
+	lda #>TRK
+	sta winHi
+	lda #<(TRK_PAGES*256)
+	sta wlnLo
+	lda #>(TRK_PAGES*256)
+	sta wlnHi
+
+; winLo/Hi, wlnLo/Hi -> SET_DMA_WINDOW, believed when RESULT echoes it.
+; A = 0 and Z set when it took.
+setWin
+	lda winLo
+	eor winHi
+	eor wlnLo
+	eor wlnHi
+	eor #$a5
+	sta winEcho
+	ldx #3
+swTry
+	stx fenceTry
+	lda winLo
+	sta ARG+0
+	lda winHi
+	sta ARG+1
+	lda wlnLo
+	sta ARG+2
+	lda wlnHi
+	sta ARG+3
+	lda #OP_SET_DMA_WINDOW
+	jsr cmdClass0
+	lda RESULT
+	sta fenceEcho
+	cmp winEcho
+	beq swOk
+	lda RESULT
+	cmp winEcho
+	beq swOk
+	ldx fenceTry
+	dex
+	bne swTry
+	lda #$ff
+	rts
+swOk
+	lda #0
+	rts
+
+; ======================================================================
+; Out of stunts.reu into C64 RAM: MAT_TRANSPOSE of a 1 x 128 matrix of
+; 8.8 values is a 256-byte copy. Each page is poisoned first and judged
+; by its own sum and xor, not by the answer: the answer is a register
+; read, the page is what the game will use.
+; ======================================================================
+
+; fpSrcMid/Hi = the REU page, fpDst = the C64 page, fpSum/fpXor what it
+; must add up to. A = 0 and Z set once it does.
+fetchPage
+	lda #FETCH_TRIES
+	sta fpTry
+fpSend
+	lda #0
+	sta SRC
+	lda fpDst
+	sta SRC+1
+	ldy #0
+-	tya				; poison: sums to $80, xors to 0
+	sta (SRC),y
+	iny
+	bne -
+	lda #1
+	sta stBuf+0			; m
+	lda #128
+	sta stBuf+1			; n
+	lda #SPACE_REU
+	sta stBuf+2
+	lda #0
+	sta stBuf+3
+	sta stBuf+7
+	sta stBuf+9
+	lda fpSrcMid
+	sta stBuf+4
+	lda fpSrcHi
+	sta stBuf+5
+	lda #SPACE_C64
+	sta stBuf+6
+	lda fpDst
+	sta stBuf+8
+	jsr stId0
+	lda #OP_MAT_TRANSPOSE
+	ldx #9
+	jsr stage0
+	jsr pageSum
+	lda psSum
+	cmp fpSum
+	bne fpRetry
+	lda psXor
+	cmp fpXor
+	bne fpRetry
+	lda #0
+	rts
+fpRetry
+	inc fetchRetries
+	dec fpTry
+	bne fpSend
+	lda #$ff
+	rts
+
+; psSum, psXor = the page at fpDst's sum and xor.
+pageSum
+	lda #0
+	sta SRC
+	sta psSum
+	sta psXor
+	lda fpDst
+	sta SRC+1
+	ldy #0
+-	lda (SRC),y
+	tax
+	clc
+	adc psSum
+	sta psSum
+	txa
+	eor psXor
+	sta psXor
+	iny
+	bne -
+	rts
+
+; Track curTrack's block into TRK. A = 0 and Z set when every page checks.
+fetchTrack
+	jsr setTrkWin
+	ldx curTrack
+	lda trkMid,x
+	sta fpSrcMid
+	lda trkBank,x
+	sta fpSrcHi
+	txa				; * TRK_PAGES (15) = * 16 - 1
+	asl a
+	asl a
+	asl a
+	asl a
+	sec
+	sbc curTrack
+	sta ftIx
+	lda #>TRK
+	sta fpDst
+ftPage
+	ldx ftIx
+	lda trkSum,x
+	sta fpSum
+	lda trkXor,x
+	sta fpXor
+	jsr fetchPage
+	bne ftDone
+	inc fpSrcMid
+	bne +
+	inc fpSrcHi
++	inc fpDst
+	inc ftIx
+	lda fpDst
+	cmp #(>TRK) + TRK_PAGES
+	bne ftPage
+	lda #0
+ftDone
+	pha
+	jsr setFence
+	pla
+	rts
+
+; The image's header page, into the drawbridge-free last page of TRK: a
+; fetch that checks is "STNT" and this build's id, or the sum would differ.
+checkImage
+	jsr setTrkWin
+	lda #(GAME_REU >> 8) & $ff
+	sta fpSrcMid
+	lda #GAME_REU >> 16
+	sta fpSrcHi
+	lda #(>TRK) + TRK_PAGES - 1
+	sta fpDst
+	lda #HDR_SUM
+	sta fpSum
+	lda #HDR_XOR
+	sta fpXor
+	jsr fetchPage
+	jmp ftDone
+
+; Not stunts.reu, or not this build's: say so on both screens, for good.
+wrongImage
+	jsr loopStop
+	lda #12
+	jsr dmRow
+	jsr dmText
+	.text "  SELECT STUNTS.REU IN THE RAD MENU   "
+	.byte 0
+	ldx #24
+	lda #0
+-	sta tiRowCol,x
+	dex
+	bpl -
+	lda #ROW_USED | LTRED
+	sta tiRowCol+12
+-	jsr tiHdmiScreen
+	jmp -
+
+; LOOP_STOP, keyed, until SEQACK says it arrived.
+loopStop
+	ldx #8
+lsTry
+	stx stopTry
+	lda #KEY_DESTRUCTIVE
+	sta ARG+15
+	lda #OP_LOOP_STOP
+	jsr cmdSeq1
+	lda seqMiss
+	beq lsDone
+	ldx stopTry
+	dex
+	bne lsTry
+lsDone
+	lda #0
+	sta CMD_HI
+	rts
+
+; ======================================================================
+; A fresh scene for curTrack: every node gone, then built again by the
+; refresh ring, then the loop. The uploads stay.
+; ======================================================================
+buildScene
+	lda #KEY_DESTRUCTIVE
+	sta ARG+15
+	lda #OP_SCENE_RESET
+	jsr cmd1
+	jsr logSetup
+
+	jsr rgViewport
+	jsr logSetup
+	jsr rgPersp
+	jsr logSetup
+	jsr rgLight
+	jsr logSetup
+	jsr rgBackground
+	jsr logSetup
+
+	; The camera first: the ring's own camera entry expects one.
+	jsr stCamId
+	lda #OP_CREATE_CAMERA
+	ldx #$ff
+	jsr stage2
+	jsr logSetup
+	jsr stCamId
+	lda #OP_SET_ACTIVE_CAMERA
+	ldx #$ff
+	jsr stage2
+	jsr logSetup
+
+	; Every node is built by running the refresh ring round, twice -- the
+	; second pass is the repair for a CREATE whose creation argument was
+	; lost, which is the one thing a transform refresh cannot put back.
+	; It is also, by construction, exactly what the ring re-asserts later.
+	lda #2
+	sta bsPass
+bsLoop
+	lda #0
+	sta rgIx
+-	jsr ringStep
+	jsr logSetup
+	lda rgIx
+	bne -
+	dec bsPass
+	bne bsLoop
+
+	jsr raceReset
+	jsr balPick
+	jsr deckTick
+	jsr physics
+	jsr sendCars
+	jsr sendDecks
+	jsr sendCamera
+	jsr sendHorizon
+
+	jsr stId0
+	#stb 0, 0
+	lda #OP_LOOP_START
+	ldx #0
+	jsr stage2
+	sta loopErr
+
+	jsr showSetup
+	jmp clkInit
+
+; ======================================================================
+; The drawbridge. Every 256 frames it rises in 16 steps, stays up, and
+; comes down again; the C64 owns its segments' height, pitch and gap bit
+; in the track tables, and poses the two decks to match.
+; ======================================================================
+deckTick
+	lda deckS
+	bne +
+	rts
++	inc deckT
+	lda deckT
+	ldx #0
+	cmp #DECK_UP_AT
+	bcc dtStep
+	ldx #DECK_STEPS-1
+	cmp #DECK_UP_AT + 2*DECK_STEPS
+	bcs +
+	sec
+	sbc #DECK_UP_AT
+	lsr a
+	tax
+	jmp dtStep
++	cmp #DECK_DOWN_AT
+	bcc dtStep
+	ldx #0
+	cmp #DECK_DOWN_AT + 2*DECK_STEPS
+	bcs dtStep
+	sec
+	sbc #DECK_DOWN_AT
+	lsr a
+	eor #DECK_STEPS-1
+	tax
+dtStep
+	stx deckStep
+	cpx deckPrev
+	bne +
+	rts
++	stx deckPrev
+	; the rise of one segment at this step, and the pitch
+	lda deckRiseLo,x
+	sta dkRLo
+	lda deckRiseHi,x
+	sta dkRHi
+	lda deckPitch,x
+	sta dkPit
+	; heights: k = 0..4 from each hinge, base + k * rise
+	lda deckYLo
+	sta tmp0
+	lda deckYHi
+	sta tmp1
+	ldy deckS
+	tya
+	clc
+	adc #2*DECK_SEGS
+	sta tmp2			; the second hinge's point
+	ldx #DECK_SEGS+1
+dtHeight
+	lda tmp0
+	sta cyLo,y
+	lda tmp1
+	sta cyHi,y
+	sty tmp3
+	ldy tmp2
+	lda tmp0
+	sta cyLo,y
+	lda tmp1
+	sta cyHi,y
+	dec tmp2
+	ldy tmp3
+	iny
+	clc
+	lda tmp0
+	adc dkRLo
+	sta tmp0
+	lda tmp1
+	adc dkRHi
+	sta tmp1
+	dex
+	bne dtHeight
+	; pitch, + nose down: up the first deck, down the second
+	ldy deckS
+	ldx #DECK_SEGS
+-	lda #0
+	sec
+	sbc dkPit
+	sta ptTab,y
+	iny
+	dex
+	bne -
+	ldx #DECK_SEGS
+-	lda dkPit
+	sta ptTab,y
+	iny
+	dex
+	bne -
+	; past half way the two tips part: a gap to jump
+	lda deckStep
+	cmp #DECK_STEPS/2
+	lda #FL_DECK
+	bcc +
+	ora #FL_GAP
++	ldy deckS
+	iny
+	iny
+	iny
+	sta flTab,y
+	sta flTab+1,y
+	rts
+
+; Both decks' pose, every frame on a track with a drawbridge.
+sendDecks
+	lda deckS
+	bne +
+	rts
++	ldx #0
+	jsr sdDeck
+	ldx #1
+sdDeck
+	stx carN
+	txa
+	clc
+	adc #NODE_DECK
+	sta stId
+	lda #0
+	sta stId+1
+	sta stBuf+0
+	sta stBuf+4
+	sta stBuf+8
+	txa
+	asl a
+	asl a
+	tay				; deckH1 or deckH2
+	lda deckH1+0,y
+	sta stBuf+1
+	lda deckH1+1,y
+	jsr stSign
+	sta stBuf+2
+	stx stBuf+3
+	lda deckYLo
+	sta stBuf+5
+	lda deckYHi
+	sta stBuf+6
+	lda #0
+	sta stBuf+7
+	lda deckH1+2,y
+	sta stBuf+9
+	lda deckH1+3,y
+	jsr stSign
+	sta stBuf+10
+	stx stBuf+11
+	lda #OP_SET_POSITION
+	ldx #11
+	jsr stage2
+	lda #0
+	sta stBuf+0
+	sta stBuf+2
+	sta stBuf+4
+	sta stBuf+5
+	lda deckYaw
+	sta stBuf+1
+	lda carN
+	beq +
+	lda dkPit			; the second deck: tip down the road's way
+	jmp ++
++	lda #0				; the first: nose up
+	sec
+	sbc dkPit
++	sta stBuf+3
+	lda carN
+	clc
+	adc #NODE_DECK
+	sta stId
+	lda #0
+	sta stId+1
+	lda #OP_SET_ORIENTATION
+	ldx #5
+	jmp stage2
+
+; ======================================================================
+; The millisecond clock: CIA2 timer A at 1ms, timer B counting it down.
+; ======================================================================
+clkInit
+	lda #<CLK_PERIOD
+	sta CIA2_TALO
+	lda #>CLK_PERIOD
+	sta CIA2_TAHI
+	lda #$ff
+	sta CIA2_TBLO
+	sta CIA2_TBHI
+	lda #%00010001
+	sta CIA2_CRA
+	lda #%01010001
+	sta CIA2_CRB
+	jsr clkNow
+	lda msNow
+	sta msMark
+	lda msNow+1
+	sta msMark+1
+	rts
+
+clkNow
+	lda CIA2_TBHI
+	sta msNow+1
+	lda CIA2_TBLO
+	sta msNow
+	lda CIA2_TBHI
+	cmp msNow+1
+	bne clkNow
+	rts
+
+; clkTmp = ms since the last call, clamped to 255
+clkLap
+	jsr clkNow
+	sec
+	lda msMark
+	sbc msNow
+	sta clkTmp
+	lda msMark+1
+	sbc msNow+1
+	beq +
+	lda #$ff
+	sta clkTmp
++	lda msNow
+	sta msMark
+	lda msNow+1
+	sta msMark+1
+	rts
+
+; ======================================================================
+; Maths.
+; ======================================================================
+
+; pr0:pr1:pr2 = A (unsigned) * mbLo:mbHi (signed). Destroys mb, Y.
+smul
+	sta mA
+	lda #0
+	sta mNeg
+smCont
+	lda mbHi
+	bpl +
+	lda mNeg
+	eor #1
+	sta mNeg
+	sec
+	lda #0
+	sbc mbLo
+	sta mbLo
+	lda #0
+	sbc mbHi
+	sta mbHi
++	lda #0
+	sta pr0
+	sta pr1
+	sta pr2
+	ldy #8
+-	asl pr0
+	rol pr1
+	rol pr2
+	asl mA
+	bcc +
+	clc
+	lda pr0
+	adc mbLo
+	sta pr0
+	lda pr1
+	adc mbHi
+	sta pr1
+	bcc +
+	inc pr2
++	dey
+	bne -
+	lda mNeg
+	beq +
+	sec
+	lda #0
+	sbc pr0
+	sta pr0
+	lda #0
+	sbc pr1
+	sta pr1
+	lda #0
+	sbc pr2
+	sta pr2
++	rts
+
+; The same with A signed.
+smulS8
+	sta mA
+	lda #0
+	sta mNeg
+	lda mA
+	bpl smCont
+	eor #$ff
+	clc
+	adc #1
+	sta mA
+	inc mNeg
+	jmp smCont
+
+; pr <<= 2, so pr1:pr2 is the product >> 6.
+prShr6
+	asl pr0
+	rol pr1
+	rol pr2
+	asl pr0
+	rol pr1
+	rol pr2
+	rts
+
+; iv = lo/hi[s] + (f * (lo/hi[s+1] - lo/hi[s])) >> 8, for s = curS and
+; f = curF. The segment byte wraps, so the lap closes on itself.
+interp	.macro	lo, hi
+	ldy curS
+	lda \lo,y
+	sta ivLo
+	lda \hi,y
+	sta ivHi
+	iny
+	sec
+	lda \lo,y
+	sbc ivLo
+	sta mbLo
+	lda \hi,y
+	sbc ivHi
+	sta mbHi
+	lda curF
+	jsr smul
+	clc
+	lda ivLo
+	adc pr1
+	sta ivLo
+	lda ivHi
+	adc pr2
+	sta ivHi
+	.endm
+
+; The same with the difference tabulated: the heading wraps at 65536, and
+; its step is only right when it is taken the short way round.
+interpD	.macro	lo, hi, dlo, dhi
+	ldy curS
+	lda \dlo,y
+	sta mbLo
+	lda \dhi,y
+	sta mbHi
+	lda curF
+	jsr smul
+	ldy curS
+	clc
+	lda \lo,y
+	adc pr1
+	sta ivLo
+	lda \hi,y
+	adc pr2
+	sta ivHi
+	.endm
+
+sinLo	.for i = 0, i < 256, i += 1
+	.byte <(round(sin(i * 2 * pi / 256) * 256))
+	.next
+sinHi	.for i = 0, i < 256, i += 1
+	.byte >(round(sin(i * 2 * pi / 256) * 256))
+	.next
+cosLo	.for i = 0, i < 256, i += 1
+	.byte <(round(cos(i * 2 * pi / 256) * 256))
+	.next
+cosHi	.for i = 0, i < 256, i += 1
+	.byte >(round(cos(i * 2 * pi / 256) * 256))
+	.next
+
+; ======================================================================
+; The C64 screen: the dashboard, and under it the bus's report card.
+; ======================================================================
+showLabels
+	lda #0
+	jsr dmRow
+	jsr dmText
+	.text "GPU64 STUNT CAR RACER   (HDMI SCREEN)"
+	.byte 0
+	lda #13
+	jsr dmRow
+	jsr dmText
+	.text "W/S GAS/BRAKE  A/D STEER  SPACE BOOST"
+	.byte 0
+	lda #14
+	jsr dmRow
+	jsr dmText
+	.text "F1 VIEW  F3 AUTOPILOT  RUN/STOP QUIT"
+	.byte 0
+	rts
+
+showSetup
+	lda #17
+	jsr dmRow
+	jsr dmText
+	.text "SETUP "
+	.byte 0
+	lda setupBadCode
+	bne +
+	jsr dmText
+	.text "OK"
+	.byte 0
+	jmp ssLoop
++	jsr dmText
+	.text "STEP "
+	.byte 0
+	lda setupBadAt
+	jsr dmDecA
+	jsr dmText
+	.text " ERR "
+	.byte 0
+	lda setupBadCode
+	jsr dmHexA
+ssLoop
+	jsr dmText
+	.text "  LOOP "
+	.byte 0
+	lda loopErr
+	jsr dmHexA
+	jsr dmText
+	.text "  UPRETRY "
+	.byte 0
+	lda upRetries
+	jmp dmHexA
+
+; One group of rows a frame, round robin: the C64 is the bottleneck.
+showHud
+	inc hudIx
+	lda hudIx
+	and #7
+	bne +
+	jmp hudLap
++	cmp #1
+	bne +
+	jmp hudSpeed
++	cmp #2
+	bne +
+	jmp hudDamage
++	cmp #3
+	bne +
+	jmp hudPos
++	cmp #4
+	bne +
+	jmp hudStatus
++	cmp #5
+	bne +
+	jmp hudView
++	cmp #6
+	bne +
+	jmp showDiag
++	jmp hudLap
+
+hudLap
+	lda #2
+	jsr dmRow
+	jsr dmText
+	.text "LAP "
+	.byte 0
+	lda cLap
+	clc
+	adc #1				; $ff before the start line: lap 1 too
+	bne +
+	lda #1
++	cmp #LAPS+1
+	bcc +
+	lda #LAPS
++	jsr dmDigit
+	jsr dmText
+	.text "/3 TIME "
+	.byte 0
+	lda lapSec
+	ldx lapTen
+	jsr dmTime
+	jsr dmText
+	.text " LAST "
+	.byte 0
+	lda lastSec
+	ldx lastTen
+	jsr dmTime
+	jsr dmText
+	.text " BEST "
+	.byte 0
+	lda bestSec
+	ldx bestTen
+	jmp dmTime
+
+; A = seconds, X = tenths
+dmTime
+	stx tmp0
+	jsr dmDecA
+	lda #'.'
+	ldy #0
+	sta (DST),y
+	jsr dstInc
+	lda tmp0
+	jmp dmDigit
+
+dmDigit
+	clc
+	adc #$30
+	ldy #0
+	sta (DST),y
+dstInc
+	inc DST
+	bne +
+	inc DST+1
++	rts
+
+; A = a length 0-20, printed as a bar of that many blocks then spaces.
+dmBar
+	sta tmp0
+	ldy #0
+-	lda #$a0			; reverse space
+	cpy tmp0
+	bcc +
+	lda #$2e			; '.'
++	sta (DST),y
+	iny
+	cpy #20
+	bne -
+	rts
+
+hudSpeed
+	lda #4
+	jsr dmRow
+	jsr dmText
+	.text "SPEED "
+	.byte 0
+	lda cVHi			; km/h, roughly: vHi * 3
+	sta tmp0
+	asl a
+	bcs +
+	adc tmp0
+	bcc ++
++	lda #255
++	jsr dmDecA
+	jsr dmText
+	.text " "
+	.byte 0
+	lda cVHi
+	lsr a
+	lsr a				; $60 max -> 24
+	cmp #21
+	bcc +
+	lda #20
++	jmp dmBar
+
+hudDamage
+	lda #5
+	jsr dmRow
+	jsr dmText
+	.text "DAMAGE "
+	.byte 0
+	lda cDmg
+	lsr a
+	lsr a
+	lsr a
+	lsr a
+	jsr dmBar
+	lda #6
+	jsr dmRow
+	jsr dmText
+	.text "BOOST  "
+	.byte 0
+	lda cFuel
+	lsr a
+	lsr a
+	lsr a
+	cmp #21
+	bcc +
+	lda #20
++	jmp dmBar
+
+hudPos
+	lda #8
+	jsr dmRow
+	jsr dmText
+	.text "POSITION "
+	.byte 0
+	jsr leadP
+	bcc +
+	jsr dmText
+	.text "1ST"
+	.byte 0
+	jmp hpDmg
++	jsr dmText
+	.text "2ND"
+	.byte 0
+hpDmg
+	jsr dmText
+	.text "   RIVAL DAMAGE "
+	.byte 0
+	lda cDmg+1
+	jmp dmDecA
+
+hudClearStatus
+	lda #9
+	jsr dmRow
+	jsr dmText
+	.text "                                        "
+	.byte 0
+	rts
+
+hudStatus
+	lda #9
+	jsr dmRow
+	lda raceSt
+	cmp #R_COUNT
+	bne hsNotCount
+	jsr dmText
+	.text "GET READY... "
+	.byte 0
+	lda raceT
+	ldx #$ff
+-	inx
+	sec
+	sbc #60
+	bcs -
+	txa
+	clc
+	adc #1
+	jsr dmDigit
+	jmp hsPad
+hsNotCount
+	cmp #R_OVER
+	bne hsRacing
+	lda cState
+	cmp #S_WRECK
+	bne +
+	jsr dmText
+	.text "WRECKED!  "
+	.byte 0
++	lda winner
+	bne +
+	jsr dmText
+	.text "YOU WIN!"
+	.byte 0
+	jmp hsPad
++	jsr dmText
+	.text "YOU LOSE"
+	.byte 0
+	jmp hsPad
+hsRacing
+	lda cState
+	cmp #S_DRIVE
+	bne hsCrash
+	lda cGnd
+	bne +
+	jsr dmText
+	.text "AIRBORNE"
+	.byte 0
+	jmp hsPad
++	lda cLatHi
+	bpl +
+	eor #$ff
+	clc
+	adc #1
++	cmp #80
+	bcc +
+	jsr dmText
+	.text "EDGE!   "
+	.byte 0
+	jmp hsPad
++	jsr dmText
+	.text "GO      "
+	.byte 0
+	jmp hsPad
+hsCrash
+	cmp #S_CRANE
+	bne +
+	jsr dmText
+	.text "CRANE   "
+	.byte 0
+	jmp hsPad
++	cmp #S_WRECK
+	bne +
+	jsr dmText
+	.text "WRECKED!"
+	.byte 0
+	jmp hsPad
++	jsr dmText
+	.text "CRASH!  "
+	.byte 0
+hsPad
+	jsr dmText
+	.text "          "
+	.byte 0
+	rts
+
+hudView
+	lda #11
+	jsr dmRow
+	jsr dmText
+	.text "AUTOPILOT "
+	.byte 0
+	lda autoPilot
+	bne +
+	jsr dmText
+	.text "OFF"
+	.byte 0
+	rts
++	jsr dmText
+	.text "ON "
+	.byte 0
+	rts
+
+; The bus's report card, for a bench photograph.
+showDiag
+	lda #19
+	jsr dmRow
+	jsr dmText
+	.text "FRAMES "
+	.byte 0
+	lda frames+1
+	jsr dmHexA
+	lda frames
+	jsr dmHexA
+	jsr dmText
+	.text " OK "
+	.byte 0
+	lda okFrames+1
+	jsr dmHexA
+	lda okFrames
+	jsr dmHexA
+	jsr dmText
+	.text " BUSY "
+	.byte 0
+	lda e07+1
+	jsr dmHexA
+	lda e07
+	jsr dmHexA
+	lda #20
+	jsr dmRow
+	jsr dmText
+	.text "ERR "
+	.byte 0
+	lda eXX+1
+	jsr dmHexA
+	lda eXX
+	jsr dmHexA
+	jsr dmText
+	.text "/"
+	.byte 0
+	lda xxCode
+	jsr dmHexA
+	jsr dmText
+	.text " CHK "
+	.byte 0
+	lda chkRetry+1
+	jsr dmHexA
+	lda chkRetry
+	jsr dmHexA
+	jsr dmText
+	.text " MISSED "
+	.byte 0
+	lda missed+1
+	jsr dmHexA
+	lda missed
+	jsr dmHexA
+	lda #21
+	jsr dmRow
+	jsr dmText
+	.text "BADRD "
+	.byte 0
+	lda errBad+1
+	jsr dmHexA
+	lda errBad
+	jsr dmHexA
+	jsr dmText
+	.text " STALLS "
+	.byte 0
+	lda stalls+1
+	jsr dmHexA
+	lda stalls
+	jsr dmHexA
+	jsr dmText
+	.text " RING "
+	.byte 0
+	lda rgErrs
+	jsr dmHexA
+	lda camFix
+	jmp dmHexA
+
+; ======================================================================
+; Data.
+; ======================================================================
+	.include "gpu64_demo_stunt.inc"
+
+; --- the cars: index 0 the player, 1 the rival ------------------------
+cS		.fill 2, 0
+cF		.fill 2, 0
+cSub		.fill 2, 0
+cVLo		.fill 2, 0
+cVHi		.fill 2, 0
+cLatLo		.fill 2, 0
+cLatHi		.fill 2, 0
+cRelLo		.fill 2, 0
+cRelHi		.fill 2, 0
+cY0		.fill 2, 0
+cY1		.fill 2, 0
+cY2		.fill 2, 0
+cVyLo		.fill 2, 0
+cVyHi		.fill 2, 0
+cGnd		.fill 2, 0
+cOnPrev		.fill 2, 0
+cGPLo		.fill 2, 0
+cGPHi		.fill 2, 0
+cDyLo		.fill 2, 0
+cDyHi		.fill 2, 0
+cPitLo		.fill 2, 0
+cPitHi		.fill 2, 0
+cState		.fill 2, 0
+cTimer		.fill 2, 0
+cDmg		.fill 2, 0
+cLap		.fill 2, 0
+cFuel		.fill 2, 0
+cYawLo		.fill 2, 0
+cYawHi		.fill 2, 0
+cPxLo		.fill 2, 0
+cPxHi		.fill 2, 0
+cPzLo		.fill 2, 0
+cPzHi		.fill 2, 0
+
+inThr		.byte 0
+inSteer		.byte 0
+inBoost		.byte 0
+inAuto		.byte 0
+aiTgt		.byte 0
+aiRelHi		.byte 0
+aiLane		.byte 0
+aiDLo		.byte 0
+aiDHi		.byte 0
+onRoad		.byte 0
+carN		.byte 0
+bumps		.byte 0
+bmCool		.byte 0
+bmEvt		.byte 0
+pThr		.byte 0
+pBoost		.byte 0
+bmPenA		.byte 0
+bmPenL		.byte 0
+bmFront		.byte 0
+bmBack		.byte 0
+bmClose		.byte 0
+bmDmg		.byte 0
+
+raceSt		.byte 0
+raceT		.byte 0
+winner		.byte 0
+lapMs		.word 0
+lapSec		.byte 0
+lapTen		.byte 0
+lastSec		.byte 0
+lastTen		.byte 0
+bestSec		.byte 0
+bestTen		.byte 0
+
+autoPilot	.byte 0
+f3Hold		.byte 0
+
+camXLo		.byte 0
+camXHi		.byte 0
+camYLo		.byte 0
+camYHi		.byte 4
+camZLo		.byte 0
+camZHi		.byte 0
+camYawLo	.byte 0
+camYawHi	.byte 0
+camPitLo	.byte 0
+camPitHi	.byte 0
+gndX		.byte $55
+gndZ		.byte $55
+
+curS		.byte 0
+curF		.byte 0
+ivLo		.byte 0
+ivHi		.byte 0
+trkLo		.byte 0
+trkHi		.byte 0
+mA		.byte 0
+mNeg		.byte 0
+mbLo		.byte 0
+mbHi		.byte 0
+pr0		.byte 0
+pr1		.byte 0
+pr2		.byte 0
+tmp0		.byte 0
+tmp1		.byte 0
+tmp2		.byte 0
+tmp3		.byte 0
+
+stId		.word 0
+stBuf		.fill 14, 0		; BLIT's 14, for the title
+stCls		.byte 1
+stOp		.byte 0
+stLast		.byte 0
+stKey		.byte 0
+stChk		.byte 0
+stTry		.byte 0
+chkRetry	.word 0
+
+rgIx		.byte 0
+rgY		.byte 0
+rgErr		.byte 0
+balIx		.fill BAL_N, 0
+balDLo		.byte 0
+balDHi		.byte 0
+balT0		.byte 0
+balT1		.byte 0
+balT2		.byte 0
+balT3		.byte 0
+balT4		.byte 0
+rgErrs		.byte 0
+camFix		.byte 0
+bsPass		.byte 0
+upIx		.byte 0
+upTry		.byte 0
+upFaces		.byte 0
+upRetries	.byte 0
+setupIdx	.byte 0
+setupBadAt	.byte 0
+setupBadCode	.byte 0
+loopErr		.byte 0
+stopTry		.byte 0
+stopHold	.byte 0
+
+frames		.word 0
+okFrames	.word 0
+e07		.word 0
+eXX		.word 0
+xxCode		.byte 0
+missed		.word 0
+errBad		.word 0
+stalls		.word 0
+waitCt		.word 0
+hudIx		.byte 0
+
+seqCounter	.byte 0
+seqOp		.byte 0
+seqErr		.byte 0
+seqMiss		.byte 0
+keyA		.byte 0
+keyB		.byte 0
+keyC		.byte 0
+keyD		.byte 0
+keyJ		.byte $ff
+
+msNow		.word 0
+msMark		.word 0
+clkTmp		.byte 0
+
+fenceTry	.byte 0
+fenceEcho	.byte 0
+winLo		.byte 0
+winHi		.byte 0
+wlnLo		.byte 0
+wlnHi		.byte 0
+winEcho		.byte 0
+
+curTrack	.byte 0
+raceDone	.byte 0
+upPtr		.word 0
+fpSrcMid	.byte 0
+fpSrcHi		.byte 0
+fpDst		.byte 0
+fpSum		.byte 0
+fpXor		.byte 0
+fpTry		.byte 0
+psSum		.byte 0
+psXor		.byte 0
+ftIx		.byte 0
+fetchRetries	.byte 0
+deckT		.byte 0
+deckStep	.byte 0
+deckPrev	.byte $ff
+dkRLo		.byte 0
+dkRHi		.byte 0
+dkPit		.byte 0
+fenceBuf	.fill FENCE_LEN, 0
+wtBlk		.fill WT_LEN, 0		; right after the fence: inside its window
+cBoost		.fill 2, 0
+ckErrs		.byte 0
+ckInit		.byte 0
+ckSteer		.byte 0
+pSteer		.byte 0
+ryJ		.byte 0
+ryW		.byte 0
+ryW2		.byte 0
+ry0L		.byte 0
+ry0H		.byte 0
+ry1L		.byte 0
+ry1H		.byte 0
+ry2L		.byte 0
+ry2H		.byte 0
+ckSpin		.word 0
+gap0		.byte 0
+gap1		.byte 0
+gap2		.byte 0
+
+	.include "stunt_league.inc"
+	.include "stunt_sfx.inc"
+	.include "gpu64_rt.inc"
+
+; ----------------------------------------------------------------------
+; Past the code: Led Storm, relocated to $a000 by tools/sidreloc.py so it
+; sits under BASIC, then the RLE-packed HONDANI logo (tools/hondani.py, a
+; copy of quake/'s), and from $c000 the title that uses both. The PRG
+; loads contiguously up to the title's end; the logo unpacks into VIC
+; bank 3 ($cc00 / $e000), which nothing else uses. The tune's .bin
+; carries a two-byte load address, skipped here.
+; ----------------------------------------------------------------------
+	.cerror * > TRK, "the game's code has grown into the track block"
+	.cerror * > TUNE_INIT, "the game's code has grown into the tune at $a000"
+	* = TUNE_INIT
+	.binary "gpu64_tune.bin", 2
+	.cerror * > LOGO_RLE, "the tune has grown into the logo"
+	* = LOGO_RLE
+	.binary "gpu64_hondani.bin"
+	.cerror * > $c000, "the logo has grown into the title"
+	* = $c000
+	.include "stunt_title.inc"
+	.cerror * > LOGO_SCREEN, "the title has grown into the logo's screen"

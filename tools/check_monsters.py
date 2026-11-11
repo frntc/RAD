@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """check_monsters.py -- every monster type a level's bank carries, awake.
 
 A level carries only the monster frames its map uses: one gpu64_bank entity
 per type (tools/quake_assets.py, build_bank), scanned before any monster,
 and the C64 animates a monster from those mesh indices alone
-(quake/gpu64_game_monsters.inc). check_ai.py proves the grunt and the
+(games/quake/gpu64_game_monsters.inc). check_ai.py proves the grunt and the
 dog on E1M1; this proves the rest, one type at a time, on whichever level
 it is given:
 
@@ -120,7 +121,7 @@ def main():
     if not (prg and level):
         sys.exit('check_monsters.py: --prg and --level are required')
 
-    demos = os.path.join(REPO, 'quake')
+    demos = os.path.join(REPO, 'games', 'quake')
     base = None
     for line in open(os.path.join(demos, 'gpu64_demo_game.a')):
         m = re.match(r'MESH_BASE\s*=\s*(\d+)', line)

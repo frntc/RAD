@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 //
 // gpu64_level.cpp -- the .g64lev parser and the level pack lookup.
 //

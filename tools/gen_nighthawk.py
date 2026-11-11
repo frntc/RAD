@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 Builds the theatre of gpu64_demo_nighthawk.a: the heightmap and tile map the
 6502 flies over and generates its terrain from, the palette, the textures,
 and -- with --probe -- a class-1 frame stream that scenesim can render
-without any 6502 at all. See project/milestone19_nighthawk_design.md.
+without any 6502 at all. See dev/milestone19_nighthawk_design.md.
 
 SCALE: 1 world unit = 100 m. The theatre is 256 x 256 units, 64 x 64 cells
 of 4 units, 8 x 8 tiles of 8 x 8 cells.
@@ -33,7 +34,7 @@ every cell -- the 6502 copies the two templates this file proves.
 import math, os, random, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "..", "Source", "Demos", "gpu64_demo_nighthawk.inc")
+OUT = os.path.join(HERE, "..", "games", "nighthawk", "gpu64_demo_nighthawk.inc")
 
 W      = 256        # theatre, world units
 CELL   = 4          # cell size, units

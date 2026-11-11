@@ -1,0 +1,409 @@
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 -- milestone 6 phase 1: the resource arena's limits, on purpose.
+;
+;      WHAT THIS TESTS
+;
+;      Two documented phase 1 behaviours that are easy to assert and easy to
+;      never actually exercise:
+;
+;        1. The arena allocator is bump-only, so re-uploading to a LIVE ID
+;           replaces the resource but does NOT reclaim the old bytes
+;           (dev/milestone6_3d_design.md, "Phase 1, as built"). This PRG
+;           uploads the same 4 KB texture to the same ID over and over. If
+;           the bytes were reclaimed the loop would never end.
+;
+;        2. OUT_OF_MEMORY is real and is returned, rather than being a code
+;           that exists in a header and has never once come back off the
+;           bus. An error path that has never fired is not a tested error
+;           path.
+;
+;      It also gives the arena a readable size. ARENA_STATUS ($09) returns
+;      the free arena in 128 KB units, which is exactly 0..256 for the 32 MB
+;      arena and so fits RESULT's single byte.
+;
+;      HOW TO READ THE RESULT
+;
+;        GPU64 3D ARENA TEST
+;
+;        START   FF        free arena before anything is uploaded. 32 MB is
+;                          256 units, saturated to FF.
+;        UPLOADS 2000      how many 4 KB uploads were accepted. 8192 x 4 KB
+;                          is exactly 32 MB, so this is the expected value
+;                          and an off-by-anything is a real finding.
+;        LEFT    00        free arena at the end
+;        ERR     08        the error that stopped it: 08 = OUT_OF_MEMORY
+;        LIVE    nn        free arena, updated every 256 uploads while it
+;                          runs, so a wedged run still shows how far it got
+;
+;        VERDICT PASS
+;
+;      A FAIL with ERR 04 is BAD_ARGS -- the descriptor or the shift values
+;      are wrong and no upload ever happened. A FAIL with UPLOADS well under
+;      2000 means something else is eating the arena. A run that never
+;      finishes means the allocator IS reclaiming, which would contradict
+;      the documented behaviour and is the most interesting outcome of all.
+;
+;      RUNTIME: each upload is a 4 KB DMA pull off the C64 bus and there are
+;      8192 of them, so expect this to take the better part of a minute. It
+;      is a one-shot test, not something to leave running.
+;
+;      Requires a firmware built with GPU64_3D_ENABLED, and the RAD menu
+;      switched to REU mode with T.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+CMD_HI   = $df50
+CMD_LO   = $df51
+ERRCODE  = $df53
+ID_LO    = $df54
+ID_HI    = $df55
+ARG      = $df56
+RESULT   = $df66
+
+OP_ARENA_STATUS   = $09
+OP_UPLOAD_TEXTURE = $11
+
+ERR_OK           = $00
+ERR_OUT_OF_MEM   = $08
+
+SCREEN   = $0400
+DST      = $fd
+SRC      = $fb
+
+TEXBUF   = $5000		; 64 x 64 texels
+TEX_ID   = 1
+
+; 8192 uploads x 4096 bytes = 33554432 = the whole 32 MB arena.
+EXPECT_HI = $20
+EXPECT_LO = $00
+
+* = $0801
+	.byte $0b, $08, $0a, $00, $9e
+	.text "2064"
+	.byte $00, $00, $00
+
+* = $0810
+
+start
+	jsr clearScreen
+	lda #<txtTitle
+	ldy #>txtTitle
+	ldx #0
+	jsr printAt
+	jsr showLabels
+
+	jsr fillTexture
+
+	; --- the arena before anything has been uploaded ----------------
+	lda #OP_ARENA_STATUS
+	jsr cmd1
+	lda RESULT
+	sta startFree
+	lda #3
+	jsr rowAddr
+	ldy #8
+	lda startFree
+	jsr putHex
+
+	; --- fill it ----------------------------------------------------
+upLoop
+	lda #<TEX_ID
+	sta ID_LO
+	lda #>TEX_ID
+	sta ID_HI
+
+	lda #0				; space 0 = C64 RAM
+	sta ARG+0
+	lda #<TEXBUF
+	sta ARG+1
+	lda #>TEXBUF
+	sta ARG+2
+	lda #0
+	sta ARG+3
+	lda #<4096
+	sta ARG+4
+	lda #>4096
+	sta ARG+5
+	lda #6				; 1<<6 = 64 wide
+	sta ARG+6
+	lda #6				; 1<<6 = 64 high
+	sta ARG+7
+
+	lda #OP_UPLOAD_TEXTURE
+	jsr cmd1
+	cmp #ERR_OK
+	bne upDone
+
+	inc uploads
+	bne +
+	inc uploads+1
++
+	; Every 256 uploads, show the arena shrinking. Reading it costs a
+	; command of its own, which is why it is not done every pass -- the
+	; point of the run is the upload count, not the sampling rate.
+	lda uploads
+	bne upLoop
+	jsr showLive
+	jmp upLoop
+
+upDone
+	sta lastErr
+
+	lda #OP_ARENA_STATUS
+	jsr cmd1
+	lda RESULT
+	sta endFree
+
+	jsr showAll
+	jsr verdict
+
+	lda #0
+	sta CMD_HI
+	rts
+
+; ----------------------------------------------------------------------
+
+cmd1
+	ldx #1
+	stx CMD_HI
+	sta CMD_LO
+	lda ERRCODE
+	rts
+
+verdict
+	; Every field is checked; VERDICT is the whole result, so that a run
+	; can be read from across the room and only looked at closely when it
+	; says FAIL.
+	lda uploads
+	cmp #EXPECT_LO
+	bne vFail
+	lda uploads+1
+	cmp #EXPECT_HI
+	bne vFail
+	lda lastErr
+	cmp #ERR_OUT_OF_MEM
+	bne vFail
+	lda endFree
+	bne vFail
+
+	lda #<txtPass
+	ldy #>txtPass
+	ldx #9
+	jmp printAt
+vFail
+	lda #<txtFail
+	ldy #>txtFail
+	ldx #9
+	jmp printAt
+
+showAll
+	lda #4
+	jsr rowAddr
+	ldy #8
+	lda uploads+1
+	jsr putHex
+	lda uploads
+	jsr putHex
+
+	lda #5
+	jsr rowAddr
+	ldy #8
+	lda endFree
+	jsr putHex
+
+	lda #6
+	jsr rowAddr
+	ldy #8
+	lda lastErr
+	jsr putHex
+	rts
+
+showLive
+	lda #OP_ARENA_STATUS
+	jsr cmd1
+	lda RESULT
+	pha
+	lda #7
+	jsr rowAddr
+	ldy #8
+	pla
+	jsr putHex
+
+	; and the running upload count, so a stall is distinguishable from
+	; slow progress
+	lda #4
+	jsr rowAddr
+	ldy #8
+	lda uploads+1
+	jsr putHex
+	lda uploads
+	jsr putHex
+	rts
+
+; The texture's content is irrelevant here -- only its size is -- but it is
+; filled rather than left as whatever BASIC had, so a run cannot accidentally
+; depend on uninitialised memory.
+fillTexture
+	lda #<TEXBUF
+	sta DST
+	lda #>TEXBUF
+	sta DST+1
+	ldx #16				; 16 pages of 256 = 4096
+ftPage
+	ldy #0
+ftByte
+	tya
+	sta (DST),y
+	iny
+	bne ftByte
+	inc DST+1
+	dex
+	bne ftPage
+	rts
+
+; ----------------------------------------------------------------------
+; Screen output.
+; ----------------------------------------------------------------------
+
+clearScreen
+	ldx #0
+	lda #$20
+cls1
+	sta SCREEN,x
+	sta SCREEN+$100,x
+	sta SCREEN+$200,x
+	sta SCREEN+$300,x
+	inx
+	bne cls1
+	rts
+
+showLabels
+	lda #<txtStart
+	ldy #>txtStart
+	ldx #3
+	jsr printAt
+	lda #<txtUploads
+	ldy #>txtUploads
+	ldx #4
+	jsr printAt
+	lda #<txtLeft
+	ldy #>txtLeft
+	ldx #5
+	jsr printAt
+	lda #<txtErr
+	ldy #>txtErr
+	ldx #6
+	jsr printAt
+	lda #<txtLive
+	ldy #>txtLive
+	ldx #7
+	jmp printAt
+
+printAt
+	sta SRC
+	sty SRC+1
+	txa
+	jsr rowAddr
+	ldy #0
+prLoop
+	lda (SRC),y
+	beq prDone
+	cmp #$41
+	bcc prPut
+	cmp #$5b
+	bcs prPut
+	sec
+	sbc #$40			; PETSCII upper case -> screen code
+prPut
+	sta (DST),y
+	iny
+	bne prLoop
+prDone
+	rts
+
+rowAddr
+	sta rowTmp
+	lda #<SCREEN
+	sta DST
+	lda #>SCREEN
+	sta DST+1
+	ldx rowTmp
+	beq rowDone
+rowAdd
+	clc
+	lda DST
+	adc #40
+	sta DST
+	lda DST+1
+	adc #0
+	sta DST+1
+	dex
+	bne rowAdd
+rowDone
+	rts
+
+putHex
+	pha
+	lsr
+	lsr
+	lsr
+	lsr
+	jsr hexDigit
+	sta (DST),y
+	iny
+	pla
+	and #$0f
+	jsr hexDigit
+	sta (DST),y
+	iny
+	rts
+
+hexDigit
+	cmp #10
+	bcs hexAlpha
+	clc
+	adc #$30
+	rts
+hexAlpha
+	sec
+	sbc #9
+	rts
+
+; ----------------------------------------------------------------------
+
+txtTitle	.text "GPU64 3D ARENA TEST"
+		.byte 0
+txtStart	.text "START"
+		.byte 0
+txtUploads	.text "UPLOADS"
+		.byte 0
+txtLeft		.text "LEFT"
+		.byte 0
+txtErr		.text "ERR"
+		.byte 0
+txtLive		.text "LIVE"
+		.byte 0
+txtPass		.text "VERDICT PASS"
+		.byte 0
+txtFail		.text "VERDICT FAIL"
+		.byte 0
+
+startFree	.byte 0
+endFree		.byte 0
+lastErr		.byte 0
+rowTmp		.byte 0
+uploads		.word 0

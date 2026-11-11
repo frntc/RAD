@@ -1,0 +1,1727 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 -- which layer arms the stage 16 latch.
+;
+;      WHY THIS EXISTS
+;
+;      Six stage 16 bench runs end the same way: the C64 accepts a few
+;      hundred SCENE_COMMITs and then the gpu64 interface collapses --
+;      arm B run 2 lost 98.5% of every register write after commit 204.
+;      That shape is a LATCH, not accumulating timing damage, and it is
+;      the signature CLAUDE.md documents for the $df00-$df0a REU decode
+;      path -- which the gpu64 window $df50-$df66 had never reproduced
+;      before stage 16. See dev/progress_tracker.md section 16b.
+;
+;      Stage 16 changed three things at once, and the bench data cannot
+;      separate them because all three scale with the same number
+;      (commits accepted):
+;
+;        1. it is the first workload to drive the command window at
+;           hundreds of writes per second continuously;
+;        2. it fires a deferred commit-flip from the polling loop ~60
+;           times a second, with C64 dispatches running inside the armed
+;           window (milestone 4b/4d never had any -- the C64 sat in a
+;           STATUS poll between the arm and the commit);
+;        3. it is the first workload in which core 1 renders a whole
+;           frame while core 0 polls a free-running C64. Stage 15a was
+;           zero-concurrency and 15b's overlap was narrow.
+;
+;      This probe adds those three, one rung at a time, in one launch:
+;
+;        Phase   Command issued             Adds
+;        -----   ------------------------   --------------------------
+;        NOP     class 0 NOP ($00)          write pressure only
+;        FLI0    class 0 PAGE_FLIP, arg 0   + the flip work, but done
+;                                             inside the DISPATCH's hold
+;        FLIW    class 0 PAGE_FLIP, arg 1,  + the deferred commit-flip,
+;                then STATUS-poll until       fired from the LOOP's hold,
+;                BUSY clears                  with an EMPTY armed window
+;        FLIP    class 0 PAGE_FLIP, arg 1,  + dispatch traffic inside
+;                flat out                     the armed window
+;        REND    class 1 SCENE_COMMIT       + core 1 rendering a frame
+;
+;      Each successive rung adds exactly one thing to the one above it,
+;      so whichever rung first derails names the mechanism.
+;
+;      The 2026-09-06 bench run settled the first two of those: NOP is
+;      spotless (20000/20000, three power cycles, zero dropped writes)
+;      and FLIP kills the C64 after 43 to 69 accepted flips, in under a
+;      second, with MISS still zero. So it is not write pressure, not the
+;      drop floor, and not core 1 -- REND never even ran. FLI0 and FLIW
+;      were added afterwards to split what is left three ways:
+;
+;        FLI0 dies too      the flip work itself, immediate path
+;                           included -- milestone 4b has carried this
+;                           all along and nothing ever issued enough
+;                           flips to find it
+;        FLI0 clean,        the deferred commit-flip is intrinsically
+;        FLIW dies          broken: its DMA hold, fired from the loop
+;                           rather than from a dispatch
+;        FLI0 and FLIW      the armed window is the mechanism. FLIW and
+;        clean, FLIP dies   FLIP run the same code at the same rate and
+;                           differ only in whether the C64 dispatches
+;                           anything between the arm and the boundary,
+;                           and the only thing that changes across that
+;                           line is instruction-cache residency of the
+;                           commit path -- which rad_reu.cpp:643 already
+;                           names, and whose re-warm has no class 0
+;                           call site
+;
+;      Each rung is built out of paths that are already hardware-verified
+;      on their own, and NO FIRMWARE CHANGE IS NEEDED -- which matters,
+;      because the thing under test is a cycle-critical loop that any new
+;      instrumentation would perturb.
+;
+;      FLIP is deliberately shaped like stage 16 rather than like
+;      milestone 4b: one flip may be outstanding at a time, so a program
+;      that asks flat out gets ~21% OK and ~79% BUSY, which is the same
+;      accept ratio and the same ~60 commit-flips a second that the
+;      stage 16 runs show -- with core 1 doing nothing at all.
+;
+;      REND runs an EMPTY scene: a camera and no objects. Core 1 still
+;      does the per-frame clear and the 200-row cache clean, which is the
+;      bulk of the store traffic, but not the mesh raster. So a clean REND
+;      here against a dying gpu64_loop_test narrows the answer further
+;      rather than leaving it open.
+;
+;      HOW TO READ THE RESULT
+;
+;        GPU64 PROBE LATCH
+;
+;        SETUP  00 00 00 00 00 00        the five class 1 setup commands
+;                                        and LOOP_START. All 00 = fine;
+;                                        FF = that step was never reached
+;
+;               ATT  ACC  MISS DUR       per phase, all hexadecimal:
+;        NOP    4E20 4E20 0000 00A3      ATT  dispatches attempted
+;        FLIP   1770 04B0 0091 04B2      ACC  answered OK
+;        REND   0BB8 025A 0048 025B      MISS SEQACK did not match the
+;                                             SEQ written for that
+;                                             dispatch -- a register write
+;                                             the bus-watch loop never
+;                                             sampled
+;                                        DUR  jiffies (1/60 s) the phase
+;                                             took, so every count can be
+;                                             normalised per second as
+;                                             well as per dispatch
+;
+;        FIRST ERR  EE @ P NNNN          first ERRCODE that was neither OK
+;                                        nor an expected BUSY, which phase
+;                                        (0/1/2) and which attempt.
+;                                        Sticky -- a later good dispatch
+;                                        cannot erase it
+;        PHASE  NFRV                     one letter per rung reached:
+;                                        N(op) F(lip) R(end) V(erdict).
+;                                        If it stops short, THAT rung is
+;                                        where the machine died
+;        ALIVE  -  STAGE 30              spinner, advanced every 32
+;                                        dispatches, and where in the
+;                                        iteration the program is: 10/11
+;                                        before/after the dispatch, 30
+;                                        between phases. A frozen spinner
+;                                        is a dead C64; a turning one with
+;                                        a dead interface is not
+;        TRAP  00 PC 0000                shown only if a BRK or an NMI was
+;                                        taken
+;        VERDICT PASS
+;
+;      WHAT EACH OUTCOME MEANS
+;
+;        All three rows complete and the C64 alive
+;              -- none of the three axes arms the latch on its own or in
+;                 this combination. The remaining difference from
+;                 gpu64_loop_test is the mesh raster burst and
+;                 ROTATE_LOCAL's argument writes; go there next.
+;        NOP dies, or its MISS is far above the ~1/180000 floor
+;              -- sheer write pressure on the command window arms it. The
+;                 decode path is the culprit and stage 16 is merely the
+;                 first workload fast enough to reach the rate. Nothing
+;                 about core 1 or the flip is involved.
+;        NOP clean, FLIP dies (or MISS/ACC is ~0.19, matching the bench)
+;              -- the deferred commit-flip window is the mechanism, and
+;                 core 1 is exonerated. It would also mean milestone
+;                 4b/4d was clean only because nothing ran between the
+;                 arm and the commit.
+;        NOP and FLIP clean, REND dies
+;              -- core 1 rendering while core 0 polls a free-running C64
+;                 is what arms it. That is milestone 6a's 448-byte burst
+;                 rule at 100% duty cycle, a regime 6a never measured
+;                 because its own ladder paced the bursts apart.
+;
+;      ONE CONFOUND WORTH KNOWING: the rungs run in one launch, in order,
+;      so a latch that needs total accumulated exposure could be armed by
+;      NOP and charged to FLIP. FIRST ERR's attempt number and the DUR
+;      column are what distinguish that -- an onset at the same absolute
+;      dispatch count regardless of which rung it lands in is cumulative;
+;      an onset at a fixed count WITHIN a rung is that rung's.
+;
+;      Requires a firmware built with GPU64_3D_ENABLED, and the RAD menu
+;      switched to REU mode with T. Power-cycle between runs: a re-launch
+;      from the RAD menu inherits firmware state from its predecessor.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+CMD_HI   = $df50
+CMD_LO   = $df51
+STATUS   = $df52
+ERRCODE  = $df53
+ID_LO    = $df54
+ID_HI    = $df55
+ARG      = $df56
+RESULT   = $df66
+SEQ      = $df67
+SEQACK   = $df68
+
+ERR_BUSY = $07
+
+; class 0
+OP_NOP           = $00
+OP_PAGE_FLIP     = $05
+OP_GET_HEALTH    = $0A
+
+; class 1 -- docs/class1-3d-mesh-reference.md
+OP_SET_VIEWPORT     = $01
+OP_SET_PERSPECTIVE  = $02
+OP_SET_BACKGROUND   = $05
+OP_LOOP_START       = $06
+OP_LOOP_STOP        = $07
+OP_SCENE_COMMIT     = $08
+OP_CREATE_CAMERA    = $21
+OP_SET_ACTIVE_CAMERA = $23
+
+SCREEN   = $0400
+
+; zero page scratch. $fb-$fe are free in a BASIC-hosted program.
+SRC      = $fb
+DST      = $fd
+
+CAM_ID   = 10
+
+; Rung budgets. Chosen so each rung gets several times the exposure at
+; which the stage 16 bench runs failed (204 to 365 commits), while the
+; whole program still finishes in well under a minute -- bench time is
+; the scarce resource, so this is sized for events per minute, not for
+; statistical power.
+;
+; NOP is far larger because it is the only rung not paced by a once-a-
+; frame boundary: it runs at whatever rate dispatch allows, so 20000 of
+; them is roughly ten times the register-write traffic of a whole
+; gpu64_loop_test run, in a few seconds.
+;
+; Declared weak so a desk run can shrink them without editing the source:
+;   64tass -D N_NOP=200 -D N_FLIP=400 -D N_REND=0 ...
+; The bench always builds the defaults.
+.weak
+N_NOP    = 20000
+N_FLIP0  = 2000			; measured 2000 in 0x32 jiffies = 0.83 s on the
+				; bench, i.e. ~2400/s -- the same rate as NOP.
+				; An immediate flip does NOT cost ~900 us; the
+				; mailbox round trip is asynchronous
+				; (gpu64_flipPost), so this rung is cheap.
+N_FLIW   = 300			; paced by the frame clock at 60/s, so ~5 s --
+				; six times the exposure at which FLIP dies
+N_FLIS   = 20000		; stores are cheap, so this is sized by wall clock
+				; rather than by count: ~6 s, i.e. ~400 armed
+				; windows, well past the 74 that killed FLIP
+N_FLIN   = 6000			; the same exposure as FLIP, and the same shape:
+				; one arming flip per ~37 dispatches, so ~160
+				; armed windows with ~5800 NOPs inside them
+N_FLIP   = 6000			; ~1200 accepted flips, ~20 s
+N_REND   = 3000			; ~600 accepted commits, ~10 s -- the same
+				; exposure as gpu64_loop_test's 600 attempts
+.endweak
+
+; Screen rows. Named because the spinner and the trap handlers write the
+; screen directly rather than through printAt.
+ROW_SETUP    = 2
+ROW_HEALTH   = 3
+ROW_HEAD     = 4
+ROW_NOP      = 5
+ROW_FLI0     = 6
+ROW_FLIW     = 7
+ROW_FLIS     = 8
+ROW_FLIN     = 9
+ROW_FLIP     = 10
+ROW_REND     = 11
+ROW_GAP      = 12
+ROW_BKT      = 13
+ROW_FIRSTERR = 14
+ROW_PHASE    = 15
+ROW_ALIVE    = 16
+ROW_TRAP     = 18
+ROW_VERDICT  = 20
+ROW_CURSOR   = 22
+
+COL_VAL      = 7		; first count column; the rest are +5 apart
+COL_LBL      = 14		; value column for the label rows below
+
+; Phase breadcrumb letters, as screen codes (letter - $40).
+PH_NOP     = $0e		; N
+PH_FLI0    = $09		; I
+PH_FLIW    = $17		; W
+PH_FLIS    = $13		; S -- "stores only"
+PH_FLIN    = $01		; A -- "armed window"
+PH_FLIP    = $06		; F
+PH_REND    = $12		; R
+PH_VERDICT = $16		; V
+
+; Trap markers.
+TRAP_BRK = $01
+TRAP_NMI = $02
+
+; KERNAL vectors and calls.
+CBINV = $0316			; BRK
+NMINV = $0318			; NMI
+PLOT  = $fff0
+
+* = $0801
+	.byte $0b, $08, $0a, $00, $9e
+	.text "2064"
+	.byte $00, $00, $00
+
+* = $0810
+
+start
+	; Remembered so a trap can put the stack back the way BASIC left it and
+	; still let the final RTS return there.
+	tsx
+	stx entrySP
+
+	jsr clearScreen
+	lda #<txtTitle
+	ldy #>txtTitle
+	ldx #0
+	jsr printAt
+
+	jsr installTraps
+	jsr showLabels
+
+	jsr doSetup
+	jsr showSetup
+	jsr doHealth
+
+	; Rung 1 -- write pressure alone.
+	lda #PH_NOP
+	jsr phase
+	lda #0
+	sta curPhase
+	jsr runNop
+
+	lda abortFlag
+	bne allDone
+
+	; Rung 2 -- the same flip work, but done inside the dispatch's own
+	; hold instead of the loop's. This is the discriminator: FLI0 and
+	; FLIP ask for identical work and differ only in which DMA hold
+	; performs it, so a clean FLI0 against a derailing FLIP acquits the
+	; flip itself and convicts the loop-fired hold.
+	lda #PH_FLI0
+	jsr phase
+	lda #1
+	sta curPhase
+	jsr runFlip0
+
+	lda abortFlag
+	bne allDone
+
+	; Rung 3 -- the deferred commit-flip, but shaped like milestone 4b
+	; instead of like stage 16: arm one flip, then read STATUS until BUSY
+	; clears before arming the next. Identical firmware path to FLIP,
+	; identical rate (both are paced at 60 a second by the frame clock),
+	; and identical DMA hold. The ONLY difference is that no dispatch
+	; runs inside the armed window.
+	;
+	; That is the axis the firmware's own comment at rad_reu.cpp:643
+	; names: gpu64_apiWarmPollingLoop() re-warms the commit path while a
+	; flip is armed, but it is called only from the class 1 and class 2
+	; dispatch paths -- there is no class 0 call site. So in FLIP the
+	; commit path is warmed once, at arm time, and then ~40 refused
+	; PAGE_FLIP dispatches run before the boundary with nothing to
+	; re-warm it. Here nothing runs at all.
+	;
+	; FLIW clean against a derailing FLIP convicts that eviction and
+	; nothing else -- not the hold's length, not the flip work, not the
+	; command window.
+	lda #PH_FLIW
+	jsr phase
+	lda #2
+	sta curPhase
+	jsr runFliw
+
+	lda abortFlag
+	bne allDone
+
+	; Rung 4 -- register WRITES inside the armed window, with no dispatch
+	; and therefore no DMA hold. SEQ, CMD_HI and ARG0 all go through
+	; gpu64_apiWriteReg() as plain stores; only a CMD_LO write dispatches.
+	; So this is FLIN's traffic on the bus with FLIN's hold removed, which
+	; is the one-bit split between "the write collides with the armed
+	; commit" and "the dispatch hold is required".
+	lda #PH_FLIS
+	jsr phase
+	lda #3
+	sta curPhase
+	jsr runFlis
+
+	lda abortFlag
+	bne allDone
+
+	; Rung 5 -- dispatch traffic inside the armed window, but neither a
+	; PAGE_FLIP nor a BUSY refusal: the flip is armed once, and then NOPs
+	; are hammered until the commit clears it. Same armed windows as FLIP,
+	; same dispatch rate, same DMA hold -- the only things removed are the
+	; flip opcode and the refusal path.
+	;
+	; This bisects the one ingredient FLIP still owns. It runs BEFORE FLIP
+	; deliberately: FLIP is what kills the machine, so a FLIN placed after
+	; it would never execute on exactly the runs its answer is needed for.
+	lda #PH_FLIN
+	jsr phase
+	lda #4
+	sta curPhase
+	jsr runFlin
+
+	lda abortFlag
+	bne allDone
+
+	; Rung 6 -- the same windows, now with the refused PAGE_FLIPs back.
+	lda #PH_FLIP
+	jsr phase
+	lda #5
+	sta curPhase
+	jsr runFlip
+
+	lda abortFlag
+	bne allDone
+
+	; Rung 7 -- plus core 1 rendering a frame.
+	lda #PH_REND
+	jsr phase
+	lda #6
+	sta curPhase
+	jsr runRend
+
+allDone
+	lda #PH_VERDICT
+	jsr phase
+	jsr verdict
+
+	jsr removeTraps
+
+	lda #0
+	sta CMD_HI
+
+	; Park the cursor below the report so BASIC's READY. does not scroll
+	; the thing the operator came to read off the top of the screen.
+	clc
+	ldx #ROW_CURSOR
+	ldy #0
+	jsr PLOT
+	rts
+
+; ----------------------------------------------------------------------
+; Setup: the minimum class 1 state a render loop needs. No palette, no
+; texture and no mesh -- REND runs an empty scene deliberately, so none
+; of them would be used, and leaving them out keeps the setup short
+; enough to read.  setupErr+0 .. setupErr+4; LOOP_START fills +5 later.
+; ----------------------------------------------------------------------
+
+doSetup
+	lda #0
+	sta setupIdx
+
+	; viewport 256x160, centred -- the same one gpu64_loop_test uses, so
+	; core 1's per-frame clear and cache clean cover the same area.
+	lda #32
+	sta ARG+0
+	lda #0
+	sta ARG+1
+	lda #20
+	sta ARG+2
+	lda #0
+	sta ARG+3
+	lda #<256
+	sta ARG+4
+	lda #>256
+	sta ARG+5
+	lda #<160
+	sta ARG+6
+	lda #>160
+	sta ARG+7
+	lda #OP_SET_VIEWPORT
+	jsr cmd1
+	jsr logSetup
+
+	; perspective: fov $2AAB (60 degrees), near 1.0, far 120.0 (8.8)
+	lda #$AB
+	sta ARG+0
+	lda #$2A
+	sta ARG+1
+	lda #$00
+	sta ARG+2
+	lda #$01
+	sta ARG+3
+	lda #$00
+	sta ARG+4
+	lda #$78
+	sta ARG+5
+	lda #OP_SET_PERSPECTIVE
+	jsr cmd1
+	jsr logSetup
+
+	lda #0
+	sta ARG+0
+	lda #OP_SET_BACKGROUND
+	jsr cmd1
+	jsr logSetup
+
+	lda #<CAM_ID
+	sta ID_LO
+	lda #>CAM_ID
+	sta ID_HI
+	lda #OP_CREATE_CAMERA
+	jsr cmd1
+	jsr logSetup
+
+	lda #<CAM_ID
+	sta ID_LO
+	lda #>CAM_ID
+	sta ID_HI
+	lda #OP_SET_ACTIVE_CAMERA
+	jsr cmd1
+	jsr logSetup
+
+	rts
+
+logSetup
+	ldx setupIdx
+	sta setupErr,x
+	inc setupIdx
+	rts
+
+; ----------------------------------------------------------------------
+; The three rungs.
+;
+; Each one sets its budget and its "is BUSY an expected answer" flag,
+; then runs the same iteration: dispatch, tally, count, show. The shared
+; iteration is the point -- the rungs differ in the command they issue
+; and in nothing else, so a difference between two rows is a difference
+; between two commands.
+; ----------------------------------------------------------------------
+
+runNop
+	lda #<N_NOP
+	sta budLo
+	lda #>N_NOP
+	sta budHi
+	lda #0				; every NOP must answer OK
+	sta allowBusy
+	jsr beginPhase
+nopLoop
+	lda #$10
+	jsr setStage
+	lda #OP_NOP
+	jsr cmdSeq0
+	jsr tally
+	lda #$11
+	jsr setStage
+	jsr endIter
+	lda phaseDone
+	beq nopLoop
+	jmp finishPhase
+
+runFlip0
+	lda #<N_FLIP0
+	sta budLo
+	lda #>N_FLIP0
+	sta budHi
+	; An immediate flip has no pending-flip branch to refuse on, so unlike
+	; FLIP there is no legitimate BUSY here: every one must answer OK.
+	lda #0
+	sta allowBusy
+	jsr beginPhase
+flip0Loop
+	lda #$20
+	jsr setStage
+	lda #0				; 0 = flip now, inside this dispatch's hold
+	sta ARG+0
+	lda #OP_PAGE_FLIP
+	jsr cmdSeq0
+	jsr tally
+	lda #$21
+	jsr setStage
+	jsr endIter
+	lda phaseDone
+	beq flip0Loop
+	jmp finishPhase
+
+runFliw
+	lda #<N_FLIW
+	sta budLo
+	lda #>N_FLIW
+	sta budHi
+	; The previous flip has always completed before the next is armed, so
+	; BUSY cannot legitimately happen here. Same standard as NOP.
+	lda #0
+	sta allowBusy
+	jsr beginPhase
+fliwLoop
+	lda #$40
+	jsr setStage
+	lda #1				; 1 = defer to the vblank boundary
+	sta ARG+0
+	lda #OP_PAGE_FLIP
+	jsr cmdSeq0
+	jsr tally
+	lda #$41
+	jsr setStage
+	jsr fliwWait
+	lda #$42
+	jsr setStage
+	jsr endIter
+	lda phaseDone
+	beq fliwLoop
+	jmp finishPhase
+
+; Reads STATUS until BUSY clears, exactly as gpu64_vblank_demo.a does.
+; Bounded, because a collapsed interface would otherwise hang the rung
+; with a frozen spinner and no reading: ~0.6 s, forty frames of margin.
+; A timeout is recorded as error $FE through the ordinary tally path, so
+; it lands in FIRST ERR with its phase and attempt number, and ends the
+; rung rather than burning bench time.
+fliwWait
+	lda #0
+	sta waitLo
+	sta waitHi
+fliwPoll
+	lda STATUS
+	and #$01			; GPU64_STATUS_BUSY
+	beq fliwClear
+	inc waitLo
+	bne fliwPoll
+	inc waitHi
+	bne fliwPoll
+	lda #$fe
+	jsr tally
+	lda #1
+	sta phaseDone
+fliwClear
+	rts
+
+; Rung 4. Same STATUS gate and same shape as FLIN, but inside the window
+; it issues stores instead of commands. ACC is tautological on those
+; iterations -- nothing can fail a write that is never acknowledged -- so
+; what this rung reports is exposure and, above all, whether the C64 is
+; still alive at the end of it. The arming flips are tallied for real.
+runFlis
+	lda #<N_FLIS
+	sta budLo
+	lda #>N_FLIS
+	sta budHi
+	lda #0
+	sta allowBusy
+	jsr beginPhase
+flisLoop
+	lda #$60
+	jsr setStage
+	lda STATUS
+	and #$01			; GPU64_STATUS_BUSY
+	bne flisStore
+	; No flip in flight: arm one. This is the only dispatch in the rung,
+	; and it happens with the window closed -- exactly as FLIW's do.
+	lda #1				; 1 = defer to the vblank boundary
+	sta ARG+0
+	lda #OP_PAGE_FLIP
+	jsr cmdSeq0
+	jsr tally
+	jmp flisNext
+flisStore
+	; A flip IS in flight. Write every register a command write touches
+	; except the one that triggers the dispatch.
+	jsr storeOnly
+	lda #0
+	jsr tally
+flisNext
+	lda #$61
+	jsr setStage
+	jsr endIter
+	lda phaseDone
+	beq flisLoop
+	jmp finishPhase
+
+; cmd0's writes with the dispatch trigger removed: CMD_LO is never
+; touched, so reuUsingPolling() samples and stores these and never takes
+; the bus (gpu64_apiWriteReg() in gpu64_api.h).
+storeOnly
+	jsr nextSeq
+	ldx #0
+	stx CMD_HI
+	lda #1
+	sta ARG+0
+	rts
+
+; Rung 5. STATUS is read to decide which opcode to send, so that the
+; arming flip is only ever sent when no flip is in flight -- which is why
+; allowBusy is 0 here: with that gate there is no legitimate BUSY, and any
+; refusal at all is the interface failing. The extra STATUS read per
+; iteration is not a new risk: FLIW already polls that register in a tight
+; loop, 300 times a rung, without ever derailing.
+runFlin
+	lda #<N_FLIN
+	sta budLo
+	lda #>N_FLIN
+	sta budHi
+	lda #0
+	sta allowBusy
+	jsr beginPhase
+flinLoop
+	lda #$50
+	jsr setStage
+	lda STATUS
+	and #$01			; GPU64_STATUS_BUSY
+	bne flinNop
+	; No flip in flight: arm one, and open a new window.
+	lda #1				; 1 = defer to the vblank boundary
+	sta ARG+0
+	lda #OP_PAGE_FLIP
+	jsr cmdSeq0
+	jmp flinTally
+flinNop
+	; A flip IS in flight, so this dispatch lands inside the armed window --
+	; the thing under test. NOP takes the identical class 0 path and the
+	; identical DMA hold, and cannot answer BUSY.
+	lda #OP_NOP
+	jsr cmdSeq0
+flinTally
+	jsr tally
+	lda #$51
+	jsr setStage
+	jsr endIter
+	lda phaseDone
+	beq flinLoop
+	jmp finishPhase
+
+runFlip
+	lda #<N_FLIP
+	sta budLo
+	lda #>N_FLIP
+	sta budHi
+	lda #1				; BUSY is the normal answer here
+	sta allowBusy
+	jsr beginPhase
+flipLoop
+	lda #$10
+	jsr setStage
+	; ARG0 is written every iteration rather than once before the loop:
+	; the register-write pressure is part of what this measures, and
+	; stage 16's own frame writes arguments too.
+	lda #1				; 1 = defer to the vblank boundary
+	sta ARG+0
+	lda #OP_PAGE_FLIP
+	jsr cmdSeq0
+	jsr tally
+	lda #$11
+	jsr setStage
+	jsr endIter
+	lda phaseDone
+	beq flipLoop
+	jmp finishPhase
+
+runRend
+	; LOOP_START, logged as setup step 5. If it fails there is nothing to
+	; measure, so the rung is skipped and the FF/00 in SETUP says why.
+	lda #0
+	sta ARG+0
+	lda #OP_LOOP_START
+	jsr cmd1
+	jsr logSetup
+	; Refreshed before the branch, not after it: if LOOP_START is what
+	; failed, its errcode is the single most useful byte on the screen and
+	; the rung is about to be skipped.
+	pha
+	jsr showSetup
+	pla
+	cmp #0
+	beq rendGo
+	rts
+rendGo
+
+	lda #<N_REND
+	sta budLo
+	lda #>N_REND
+	sta budHi
+	lda #1				; BUSY while a frame is in flight
+	sta allowBusy
+	jsr beginPhase
+rendLoop
+	lda #$10
+	jsr setStage
+	lda #OP_SCENE_COMMIT
+	jsr cmdSeq1
+	jsr tally
+	lda #$11
+	jsr setStage
+	jsr endIter
+	lda phaseDone
+	beq rendLoop
+	jsr finishPhase
+
+	; LOOP_STOP carries the one-shot key in ARG15 -- gpu64_api.h.
+	lda #$a5
+	sta ARG+15
+	lda #OP_LOOP_STOP
+	jmp cmd1
+
+; ----------------------------------------------------------------------
+; The shared iteration machinery.
+; ----------------------------------------------------------------------
+
+beginPhase
+	lda #0
+	sta att
+	sta att+1
+	sta acc
+	sta acc+1
+	sta missed
+	sta missed+1
+	sta phaseDone
+	lda #1
+	sta seqCounter
+	jsr readJiffy
+	sta durStart
+	stx durStart+1
+	jmp showPhaseRow
+
+finishPhase
+	jsr readJiffy
+	sec
+	sbc durStart
+	sta dur
+	txa
+	sbc durStart+1
+	sta dur+1
+	jsr showPhaseRow
+	jsr savePhase
+	jsr doHealth
+	lda #$30
+	jmp setStage
+
+; A = the ERRCODE the dispatch answered.
+tally
+	cmp #0
+	bne tBad
+	inc acc
+	bne tDone
+	inc acc+1
+	rts
+tBad
+	ldx allowBusy
+	beq tRecord
+	cmp #ERR_BUSY
+	beq tDone
+tRecord
+	ldx firstErrSet
+	bne tDone
+	sta firstErr
+	lda curPhase
+	sta firstErrPhase
+	lda att
+	sta firstErrAt
+	lda att+1
+	sta firstErrAt+1
+	inc firstErrSet
+	jmp showFirstErr
+tDone
+	rts
+
+endIter
+	inc att
+	bne eiCounted
+	inc att+1
+eiCounted
+	; Refreshing the row costs more 6502 time than the dispatch does, so
+	; it happens every 32 iterations -- often enough that the spinner
+	; still reads as alive at the bench, rare enough not to throttle the
+	; write rate this is trying to maximise.
+	lda att
+	and #$1f
+	bne eiNoShow
+	jsr spin
+	jsr showPhaseRow
+eiNoShow
+	; RUN/STOP, read the way the KERNAL does.
+	lda $91
+	cmp #$7f
+	bne eiNoStop
+	lda #1
+	sta abortFlag
+	sta phaseDone
+	rts
+eiNoStop
+	lda att+1
+	cmp budHi
+	bcc eiDone
+	bne eiFull
+	lda att
+	cmp budLo
+	bcc eiDone
+eiFull
+	lda #1
+	sta phaseDone
+eiDone
+	rts
+
+; Copies the live counters into this phase's slot for the verdict.
+savePhase
+	lda curPhase
+	asl
+	tax
+	lda att
+	sta attTbl,x
+	lda att+1
+	sta attTbl+1,x
+	lda acc
+	sta accTbl,x
+	lda acc+1
+	sta accTbl+1,x
+	rts
+
+; The jiffy clock, low word: A = low byte, X = high byte. Read twice
+; because the IRQ that advances it can land between the two loads, which
+; would otherwise show up as a 256-jiffy step in a DUR column.
+readJiffy
+	lda $a1
+	sta rowTmp
+	lda $a2
+	ldx $a1
+	cpx rowTmp
+	bne readJiffy
+	rts
+
+; ----------------------------------------------------------------------
+; Breadcrumb, traps, spinner: the three things that tell an operator at
+; the bench whether the C64 is alive, and if not, where it died. All of
+; them write the screen directly rather than through printAt, so they are
+; safe to call from an interrupt handler.
+; ----------------------------------------------------------------------
+
+; A = screen code. Appends one letter to the phase row.
+phase
+	ldx phaseIdx
+	cpx #16
+	bcs phaseFull
+	sta SCREEN + ROW_PHASE * 40 + COL_LBL, x
+	inc phaseIdx
+phaseFull
+	rts
+
+installTraps
+	lda CBINV
+	sta oldBrk
+	lda CBINV+1
+	sta oldBrk+1
+	lda NMINV
+	sta oldNmi
+	lda NMINV+1
+	sta oldNmi+1
+
+	sei
+	lda #<brkTrap
+	sta CBINV
+	lda #>brkTrap
+	sta CBINV+1
+	lda #<nmiTrap
+	sta NMINV
+	lda #>nmiTrap
+	sta NMINV+1
+	cli
+	rts
+
+; Put them back before returning to BASIC -- these vectors point into a
+; program BASIC is free to overwrite, so leaving them installed turns the
+; next RESTORE keypress into a jump into whatever is there now.
+removeTraps
+	sei
+	lda oldBrk
+	sta CBINV
+	lda oldBrk+1
+	sta CBINV+1
+	lda oldNmi
+	sta NMINV
+	lda oldNmi+1
+	sta NMINV+1
+	cli
+	rts
+
+; The KERNAL's IRQ entry has already pushed Y, X and A on top of the P/PCL/
+; PCH the hardware pushed, so the interrupted address is six and seven
+; bytes above the stack pointer. (The KERNAL NMI entry pushes nothing, but
+; nmiTrap below pushes the same three itself, which lines the offsets up.)
+brkTrap
+	tsx
+	lda $0105,x
+	sta trapPC
+	lda $0106,x
+	sta trapPC+1
+	lda #TRAP_BRK
+	sta trapKind
+	jsr showTrap
+
+	; Nothing here is trustworthy any more, but the report is worth more
+	; than the crash: put the stack back to what BASIC handed us and jump
+	; to the verdict, so the rows that were already filled in still print
+	; with a FAIL against them.
+	ldx entrySP
+	txs
+	cli
+	jmp allDone
+
+; An NMI is not necessarily fatal -- RESTORE is one -- so this one records
+; and resumes rather than unwinding. It still fails the verdict: nothing in
+; this program should be generating NMIs at all.
+nmiTrap
+	pha
+	txa
+	pha
+	tya
+	pha
+	tsx
+	lda $0105,x
+	sta trapPC
+	lda $0106,x
+	sta trapPC+1
+	lda #TRAP_NMI
+	sta trapKind
+
+	; showTrap goes through printAt, which owns SRC/DST, and rowAddr, which
+	; owns rowTmp. This handler resumes, so it has to hand all three back
+	; exactly as it found them -- otherwise the trap that was supposed to
+	; diagnose a fault causes one. rowTmp matters even though it looks like
+	; a pure scratch byte: readJiffy and rowAddr both keep it live across a
+	; handful of instructions, and every display routine in this program
+	; goes through rowAddr while the traps are installed.
+	lda SRC
+	sta nmiZp+0
+	lda SRC+1
+	sta nmiZp+1
+	lda DST
+	sta nmiZp+2
+	lda DST+1
+	sta nmiZp+3
+	lda rowTmp
+	sta nmiZp+4
+	jsr showTrap
+	lda nmiZp+0
+	sta SRC
+	lda nmiZp+1
+	sta SRC+1
+	lda nmiZp+2
+	sta DST
+	lda nmiZp+3
+	sta DST+1
+	lda nmiZp+4
+	sta rowTmp
+
+	pla
+	tay
+	pla
+	tax
+	pla
+	rti
+
+showTrap
+	lda #<txtTrap
+	ldy #>txtTrap
+	ldx #ROW_TRAP
+	jsr printAt
+	lda #ROW_TRAP
+	jsr rowAddr
+	ldy #COL_LBL
+	lda trapKind
+	jsr putHex
+	iny
+	lda trapPC+1
+	jsr putHex
+	lda trapPC
+	jsr putHex
+	rts
+
+; One glyph every 32 dispatches. A frozen spinner with a dead interface is
+; a dead C64; a turning one is a C64 that is merely being ignored.
+spin
+	inc spinIdx
+	lda spinIdx
+	and #3
+	sta spinIdx
+	tax
+	lda spinTable,x
+	sta SCREEN + ROW_ALIVE * 40 + COL_LBL
+	rts
+
+; A = where in the iteration we are; see the ALIVE line in the header.
+; Written straight to the screen so it is current even if the next
+; instruction is the one that never returns.
+setStage
+	pha
+	lsr
+	lsr
+	lsr
+	lsr
+	jsr hexDigit
+	sta SCREEN + ROW_ALIVE * 40 + COL_LBL + 8
+	pla
+	and #$0f
+	jsr hexDigit
+	sta SCREEN + ROW_ALIVE * 40 + COL_LBL + 9
+	rts
+
+; ----------------------------------------------------------------------
+; Command helpers.
+;
+; Writing CMD_LO is what dispatches; CMD_HI is sticky and selects the class.
+; The C64 is DMA-halted for the whole dispatch, so there is nothing to poll
+; and no handshake -- ERRCODE is valid on the very next instruction.
+; ----------------------------------------------------------------------
+
+cmd0
+	ldx #0
+	stx CMD_HI
+	sta CMD_LO
+	lda ERRCODE
+	rts
+
+cmd1
+	ldx #1
+	stx CMD_HI
+	sta CMD_LO
+	lda ERRCODE
+	rts
+
+; A = opcode. Same contract as cmd0/cmd1, but also writes an incrementing
+; SEQ before dispatch and checks SEQACK after it -- detector only, no
+; retry (dev/reliability_protocol_design.md). A mismatch means the SEQ
+; write, an ARG write or CMD_LO itself was not sampled by
+; reuUsingPolling(): the pre-existing bus-reliability defect CLAUDE.md
+; documents. Counted in missed, and NOT a verdict failure -- measuring its
+; rate per rung is half the point of this program.
+cmdSeq0
+	jsr nextSeq
+	jsr cmd0
+	jmp checkSeq
+
+cmdSeq1
+	jsr nextSeq
+	jsr cmd1
+	jmp checkSeq
+
+; Preserves A (the opcode); cycles SEQ over $01-$FE.
+nextSeq
+	pha
+	inc seqCounter
+	lda seqCounter
+	cmp #255
+	bne nsOk
+	lda #1
+	sta seqCounter
+nsOk
+	lda seqCounter
+	sta SEQ
+	pla
+	rts
+
+; Preserves A (the ERRCODE the caller is about to judge).
+checkSeq
+	pha
+	lda SEQACK
+	cmp seqCounter
+	beq csDone
+	inc missed
+	bne csDone
+	inc missed+1
+csDone
+	pla
+	rts
+
+; ----------------------------------------------------------------------
+; The verdict.
+;
+; MISSED is reported, never judged: the drop floor is pre-existing and a
+; nonzero count is a measurement, not a regression. What fails a run is a
+; trap, a setup command that did not answer OK, a NOP that was refused,
+; or a rung that never got a single dispatch accepted.
+; ----------------------------------------------------------------------
+
+verdict
+	lda trapKind
+	beq vNoTrap
+	jmp vFail
+vNoTrap
+
+	lda abortFlag
+	beq vNoAbort
+	lda #<txtAbort
+	ldy #>txtAbort
+	ldx #ROW_VERDICT
+	jmp printAt
+vNoAbort
+
+	ldx #0
+vSetupLoop
+	lda setupErr,x
+	bne vFail
+	inx
+	cpx #6
+	bne vSetupLoop
+
+	; NOP: every single one has to have been accepted. This is the rung
+	; with no legitimate reason to refuse, so ACC < ATT here is the
+	; interface failing rather than a scheduling answer.
+	lda attTbl+0
+	cmp accTbl+0
+	bne vFail
+	lda attTbl+1
+	cmp accTbl+1
+	bne vFail
+
+	; FLI0: same standard as NOP. An immediate flip cannot answer BUSY,
+	; so any refusal is the interface failing.
+	lda attTbl+2
+	cmp accTbl+2
+	bne vFail
+	lda attTbl+3
+	cmp accTbl+3
+	bne vFail
+
+	; FLIW: same standard again. It waits for the previous flip to finish
+	; before arming the next, so there is never a flip in flight to be
+	; refused -- and the timeout answers $FE through the same path.
+	lda attTbl+4
+	cmp accTbl+4
+	bne vFail
+	lda attTbl+5
+	cmp accTbl+5
+	bne vFail
+
+	; FLIS and FLIN: the STATUS gate means the arming flip is never sent
+	; into a busy interface and neither a NOP nor a store can be refused,
+	; so both are held to the same ACC == ATT standard as NOP and FLIW.
+	lda attTbl+6
+	cmp accTbl+6
+	bne vFail
+	lda attTbl+7
+	cmp accTbl+7
+	bne vFail
+	lda attTbl+8
+	cmp accTbl+8
+	bne vFail
+	lda attTbl+9
+	cmp accTbl+9
+	bne vFail
+
+	; FLIP and REND: BUSY is legal, so only "nothing was ever accepted"
+	; is a failure -- that is a rung that measured nothing.
+	lda accTbl+10
+	ora accTbl+11
+	beq vFail
+	lda accTbl+12
+	ora accTbl+13
+	beq vFail
+
+	lda #<txtPass
+	ldy #>txtPass
+	ldx #ROW_VERDICT
+	jmp printAt
+vFail
+	lda #<txtFail
+	ldy #>txtFail
+	ldx #ROW_VERDICT
+	jmp printAt
+
+; ----------------------------------------------------------------------
+; Screen output.
+; ----------------------------------------------------------------------
+
+showLabels
+	lda #<txtSetup
+	ldy #>txtSetup
+	ldx #ROW_SETUP
+	jsr printAt
+	lda #<txtHead
+	ldy #>txtHead
+	ldx #ROW_HEAD
+	jsr printAt
+	lda #<txtNop
+	ldy #>txtNop
+	ldx #ROW_NOP
+	jsr printAt
+	lda #<txtFli0
+	ldy #>txtFli0
+	ldx #ROW_FLI0
+	jsr printAt
+	lda #<txtFliw
+	ldy #>txtFliw
+	ldx #ROW_FLIW
+	jsr printAt
+	lda #<txtFlis
+	ldy #>txtFlis
+	ldx #ROW_FLIS
+	jsr printAt
+	lda #<txtFlin
+	ldy #>txtFlin
+	ldx #ROW_FLIN
+	jsr printAt
+	lda #<txtFlip
+	ldy #>txtFlip
+	ldx #ROW_FLIP
+	jsr printAt
+	lda #<txtRend
+	ldy #>txtRend
+	ldx #ROW_REND
+	jsr printAt
+	lda #<txtFirstErr
+	ldy #>txtFirstErr
+	ldx #ROW_FIRSTERR
+	jsr printAt
+	lda #<txtPhase
+	ldy #>txtPhase
+	ldx #ROW_PHASE
+	jsr printAt
+	lda #<txtAlive
+	ldy #>txtAlive
+	ldx #ROW_ALIVE
+	jsr printAt
+	lda #<txtHealth
+	ldy #>txtHealth
+	ldx #ROW_HEALTH
+	jsr printAt
+	lda #<txtGap
+	ldy #>txtGap
+	ldx #ROW_GAP
+	jsr printAt
+	lda #<txtBkt
+	ldy #>txtBkt
+	ldx #ROW_BKT
+	jmp printAt
+
+showSetup
+	lda #ROW_SETUP
+	jsr rowAddr
+	ldy #COL_VAL
+	ldx #0
+suLoop
+	lda setupErr,x
+	jsr putHex
+	iny
+	inx
+	cpx #6
+	bne suLoop
+	rts
+
+; The current phase's row, from the live counters.
+; DUR is recomputed here rather than read from what finishPhase left
+; behind. BENCH 2026-09-06: FLIN aborted mid-rung, never reached
+; finishPhase, and its row printed FLIW's 012C -- which read as a real
+; measurement and was not one. A rung that dies now reports the time it
+; actually ran.
+showPhaseRow
+	jsr readJiffy
+	sec
+	sbc durStart
+	sta dur
+	txa
+	sbc durStart+1
+	sta dur+1
+	clc
+	lda curPhase
+	adc #ROW_NOP
+	jsr rowAddr
+	ldy #COL_VAL
+	lda att+1
+	jsr putHex
+	lda att
+	jsr putHex
+	iny
+	lda acc+1
+	jsr putHex
+	lda acc
+	jsr putHex
+	iny
+	lda missed+1
+	jsr putHex
+	lda missed
+	jsr putHex
+	iny
+	lda dur+1
+	jsr putHex
+	lda dur
+	jsr putHex
+	rts
+
+showFirstErr
+	lda #ROW_FIRSTERR
+	jsr rowAddr
+	ldy #COL_LBL
+	lda firstErr
+	jsr putHex
+	iny
+	lda #$00			; '@' is screen code $00
+	sta (DST),y
+	iny
+	iny
+	lda firstErrPhase
+	jsr putHex
+	iny
+	lda firstErrAt+1
+	jsr putHex
+	lda firstErrAt
+	jsr putHex
+	rts
+
+; ----------------------------------------------------------------------
+; Screen output helpers. Identical to gpu64_loop_test.a's.
+; ----------------------------------------------------------------------
+
+clearScreen
+	ldx #0
+	lda #$20
+cls1
+	sta SCREEN,x
+	sta SCREEN+$100,x
+	sta SCREEN+$200,x
+	sta SCREEN+$300,x
+	inx
+	bne cls1
+	rts
+
+; A/Y = string pointer (zero-terminated PETSCII), X = row.
+printAt
+	sta SRC
+	sty SRC+1
+	txa
+	jsr rowAddr
+	ldy #0
+prLoop
+	lda (SRC),y
+	beq prDone
+	cmp #$41
+	bcc prPut
+	cmp #$5b
+	bcs prPut
+	sec
+	sbc #$40
+prPut
+	sta (DST),y
+	iny
+	bne prLoop
+prDone
+	rts
+
+; A = row; leaves the row's screen address in DST.
+rowAddr
+	sta rowTmp
+	lda #<SCREEN
+	sta DST
+	lda #>SCREEN
+	sta DST+1
+	ldx rowTmp
+	beq rowDone
+rowAdd
+	clc
+	lda DST
+	adc #40
+	sta DST
+	lda DST+1
+	adc #0
+	sta DST+1
+	dex
+	bne rowAdd
+rowDone
+	rts
+
+; ----------------------------------------------------------------------
+; The Pi's opinion of itself.
+;
+; GET_HEALTH is the only opcode that samples the throttle/temperature
+; state at all -- readHealth() in gpu64_api.cpp has exactly one call site,
+; despite its comment describing a once-a-second poll that does not
+; exist. So the red under-voltage border it can raise has never had a
+; chance to fire during a bench run, and "the supply sagged" has never
+; actually been tested. This row tests it.
+;
+; Bytes 12-19 of the blob were added 2026-09-06 and carry the flip
+; module's two "impossible" counters. Both are zero on a healthy run.
+;
+; Called after setup and after every rung -- never inside one, because a
+; property-mailbox round trip inside the dispatch hold is exactly the
+; kind of load the rungs are trying to hold constant.
+;
+;   HEALTH ee tt ss lo hi dd pp cc
+;          ee  the ERRCODE GET_HEALTH itself answered; 00 = the Pi
+;              answered at all, which after a FLIP rung is already news
+;          tt  throttled, right now (bit 0 = under-voltage)
+;          ss  throttled, sticky since boot >> 16 (bit 0 = it has sagged)
+;          lo  hi  SoC temperature in tenths of a degree, little-endian
+;          dd  flip drains that timed out inside the DMA hold
+;          pp  flip posts abandoned with MAILBOX1 still full
+;          cc  flips that fell back to Circle's blocking call
+;
+; Bytes 20-35 were added 2026-09-06 and are the hold-gap instrument
+; (Source/Firmware/gpu64_holdgap.h): how close in time two DMA holds get.
+; They print on two further rows, because this is the reading the run
+; exists to take and it has to survive being photographed.
+;
+;   GAP    mmmm dddd cccc llll
+;          mmmm  smallest release->assert gap seen, ARM cycles, any pair
+;          dddd  the same for the one pair that matters: a *dispatch*
+;                releasing the bus and then the loop-fired *commit*
+;                taking it straight back
+;          cccc  ARM cycles per C64 cycle, measured not assumed --
+;                expect ~04B0. Every other figure divides by this
+;          llll  dispatch->commit asserts closer than 4 C64 cycles
+;
+;   BKT    0000 1111 2222 aaaa
+;          0000  asserts whose gap was under 1 C64 cycle
+;          1111  under 2
+;          2222  under 4
+;          aaaa  every hold opened, the denominator
+;
+; FFFF in mmmm or dddd means saturated, i.e. no sample that close: 65535
+; ARM cycles is ~54 C64 cycles, so anything that saturates is by
+; definition not a collision. FFFF in dddd with a live llll is
+; impossible and would mean the instrument is wrong.
+; ----------------------------------------------------------------------
+
+doHealth
+	lda #0
+	sta ARG+0			; GPU64_SPACE_C64
+	lda #<healthBuf
+	sta ARG+1
+	lda #>healthBuf
+	sta ARG+2
+	lda #0
+	sta ARG+3
+	lda #36
+	sta ARG+4
+	lda #0
+	sta ARG+5
+	lda #OP_GET_HEALTH
+	jsr cmd0
+	sta healthErr
+
+showHealth
+	lda #ROW_HEALTH
+	jsr rowAddr
+	lda #COL_VAL
+	sta hCol
+	lda healthErr
+	jsr hPut
+	ldx #0
+hhLoop
+	ldy healthIdx,x
+	lda healthBuf,y
+	jsr hPut
+	inx
+	cpx #7
+	bne hhLoop
+
+showGap
+	lda #ROW_GAP
+	jsr rowAddr
+	lda #COL_VAL
+	sta hCol
+	ldx #0
+sgLoop
+	lda gapIdx,x
+	jsr hPut16
+	inx
+	cpx #4
+	bne sgLoop
+
+	lda #ROW_BKT
+	jsr rowAddr
+	lda #COL_VAL
+	sta hCol
+	ldx #0
+sbLoop
+	lda bktIdx,x
+	jsr hPut16
+	inx
+	cpx #4
+	bne sbLoop
+	rts
+
+; A = offset of a little-endian 16-bit field in healthBuf. Prints it
+; big-endian at hCol, then steps hCol on by five -- one wider than hPut,
+; because these are four digits and they need the gap to stay readable in
+; a photograph.
+hPut16
+	sta gapTmp
+	ldy gapTmp
+	iny
+	lda healthBuf,y		; high byte first, so it reads as a number
+	ldy hCol
+	jsr putHex
+	inc hCol
+	inc hCol
+	ldy gapTmp
+	lda healthBuf,y		; then the low byte
+	ldy hCol
+	jsr putHex
+	clc
+	lda hCol
+	adc #3
+	sta hCol
+	rts
+
+; A = byte; prints it at hCol on the row DST already points at, then
+; steps hCol on by three. putHex leaves Y wherever it finished, which is
+; why the column lives in a variable rather than in Y.
+hPut
+	ldy hCol
+	jsr putHex
+	clc
+	lda hCol
+	adc #3
+	sta hCol
+	rts
+
+; A = byte, Y = column offset within the row DST already points at.
+putHex
+	pha
+	lsr
+	lsr
+	lsr
+	lsr
+	jsr hexDigit
+	sta (DST),y
+	iny
+	pla
+	and #$0f
+	jsr hexDigit
+	sta (DST),y
+	iny
+	rts
+
+hexDigit
+	cmp #10
+	bcs hexAlpha
+	clc
+	adc #$30
+	rts
+hexAlpha
+	sec
+	sbc #9
+	rts
+
+; ----------------------------------------------------------------------
+; Data.
+; ----------------------------------------------------------------------
+
+txtTitle	.text "GPU64 PROBE LATCH"
+		.byte 0
+txtSetup	.text "SETUP"
+		.byte 0
+txtHead		.text "       ATT  ACC  MISS DUR"
+		.byte 0
+txtNop		.text "NOP"
+		.byte 0
+txtFli0		.text "FLI0"
+		.byte 0
+txtFliw		.text "FLIW"
+		.byte 0
+txtFlis		.text "FLIS"
+		.byte 0
+txtFlin		.text "FLIN"
+		.byte 0
+txtFlip		.text "FLIP"
+		.byte 0
+txtRend		.text "REND"
+		.byte 0
+txtFirstErr	.text "FIRST ERR"
+		.byte 0
+txtPhase	.text "PHASE"
+		.byte 0
+txtAlive	.text "ALIVE           STAGE"
+		.byte 0
+txtHealth	.text "HEALTH"
+		.byte 0
+txtGap		.text "GAP"
+		.byte 0
+txtBkt		.text "BKT"
+		.byte 0
+txtTrap		.text "TRAP"
+		.byte 0
+
+; -, N-shape, ], M-shape: four screen codes that read as a turning bar.
+spinTable	.byte $2d, $4e, $5d, $4d
+
+txtPass		.text "VERDICT PASS"
+		.byte 0
+txtFail		.text "VERDICT FAIL"
+		.byte 0
+txtAbort	.text "VERDICT ABORT (RUN/STOP)"
+		.byte 0
+
+; ----------------------------------------------------------------------
+; Variables.
+; ----------------------------------------------------------------------
+
+setupIdx	.byte 0
+setupErr	.fill 6, $ff
+
+curPhase	.byte 0
+budLo		.byte 0
+budHi		.byte 0
+allowBusy	.byte 0
+phaseDone	.byte 0
+abortFlag	.byte 0
+
+att		.word 0
+acc		.word 0
+missed		.word 0
+dur		.word 0
+durStart	.word 0
+
+attTbl		.fill 14, 0
+accTbl		.fill 14, 0
+
+seqCounter	.byte 1
+firstErr	.byte 0
+firstErrPhase	.byte 0
+firstErrAt	.word 0
+firstErrSet	.byte 0
+
+waitLo		.byte 0
+waitHi		.byte 0
+
+rowTmp		.byte 0
+entrySP		.byte 0
+phaseIdx	.byte 0
+spinIdx		.byte 0
+trapKind	.byte 0
+trapPC		.word 0
+
+healthIdx	.byte 0, 6, 8, 9, 12, 14, 16
+gapIdx		.byte 20, 22, 24, 32
+bktIdx		.byte 26, 28, 30, 34
+gapTmp		.byte 0
+hCol		.byte 0
+healthErr	.byte 0
+healthBuf	.fill 36, 0
+oldBrk		.word 0
+oldNmi		.word 0
+nmiZp		.fill 5, 0

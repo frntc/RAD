@@ -1,1 +1,0 @@
-This is project is not part of the GUP64 project. Quake folder is here to test drive and use the GPU64 API and prove the API is fully mature.

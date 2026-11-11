@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64: the hold gate -- proving the C64's *next* cycle is a read.
 
@@ -121,7 +122,7 @@
 
 // One 64-byte cache line, written only by core 0, read at dispatch time by
 // the log path. Deliberately no section() attribute -- see the milestone-14
-// linker-orphan regression in project/progress_tracker.md.
+// linker-orphan regression in dev/progress_tracker.md.
 typedef struct
 {
 	u32	armed;				// gates armed: accesses that wanted the bus

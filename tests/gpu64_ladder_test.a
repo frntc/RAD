@@ -1,0 +1,398 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 -- milestone 6 load-ladder test PRG.
+;
+;      This PRG is the *C64-side workload* for the multicore memory-traffic
+;      ladder (Source/Firmware/gpu64_ladder.h). It does not measure anything
+;      itself; the firmware does, on core 0, and prints the table at the end.
+;
+;      WHAT THE C64 SIDE IS FOR, AND WHY IT DOES ALMOST NOTHING
+;
+;      Almost nothing, on purpose, and every removal was paid for by a lost
+;      round.
+;
+;      Round 4: the program drew through the gpu64 command API every frame.
+;      One mis-sampled IO2 write turns a command into a command with a
+;      garbage argument, the C64 hangs, and RAD drops to its menu -- which is
+;      exactly what a bad ladder rung *causes*. The workload was arranged so
+;      that the first real finding would end the run that found it. Two rungs
+;      of nine survived. The drawing was removed.
+;
+;      Round 5: what was left was one verified REU round trip per frame. That
+;      is tolerant in principle -- a corrupted transfer gives a wrong byte,
+;      which the program counts and carries on -- but a mis-sampled *command
+;      register* write is not: it can launch a transfer of any length to any
+;      address. Eight rungs of fourteen survived. REU was cut back to a
+;      100-frame positive control inside the idle rung.
+;
+;      Round 7: even that is now gone. Its `idle` rung -- core 1 asleep,
+;      writing nothing, the configuration that had been flawless three rounds
+;      running -- came back with 30 missed bus cycles and a worst pass of
+;      3670 ARM cycles. The only thing happening in the machine during that
+;      rung was the REU positive control. An REU transfer is a DMA hold, the
+;      longest uninterruptible thing core 0 ever does, and the ladder discards
+;      exactly *one* pass after each one; if re-entry takes longer than that
+;      to settle, the instrument has been charging DMA re-entry to whichever
+;      rung it happened in.
+;
+;      So this program now touches no cartridge register at all inside the
+;      loop. It counts raster frames and nothing else. That makes the idle
+;      rung a measurement of core 0 entirely alone, with nothing left to
+;      confound it -- if it is still dirty, the instrument is at fault and
+;      that is worth knowing before another rung is read.
+;
+;      Two gpu64 commands remain, both outside the measured window: GET_INFO
+;      at the start (which is what arms the ladder, firmware-side, so rung
+;      boundaries line up with this program rather than with however long the
+;      user spent in the RAD menu) and LOG_ENABLE(1) at the end.
+;
+;      The REU path itself is not in doubt -- round 6 ran 200 verified round
+;      trips with zero errors. Row 3 and row 4 below will simply read 0000.
+;
+;      The firmware also dumps the table by itself the moment the ladder
+;      reaches its `done` rung, so the result survives even if this program
+;      never reaches its own LOG_ENABLE.
+;
+;      Thirteen 2-second rungs is 26 seconds; this runs 2500 frames, about
+;      50 seconds at 50Hz, so the whole ladder is covered with margin.
+;
+;      Results land on the C64's own screen (not the HDMI one). Rows 2-4 are
+;      updated *as the run goes*, every 16 frames, so a run that dies partway
+;      still shows how far it got:
+;
+;        row 0  "G64" magic from GET_INFO, then ERRCODE   (0 = OK)
+;        row 1  measured frame period, microseconds, hex, high byte first
+;               -- 0000 means the frame clock never calibrated, and the run
+;                  is void
+;        row 2  frames completed, hex, expect 09C4
+;        row 3  REU transfer pairs completed -- 0000, REU is not used
+;        row 4  REU verify errors -- 0000, nothing to verify
+;        row 5  ERRCODE at the end                        (0 = OK)
+;
+;      Then LOG_ENABLE(1) prints, on the HDMI log:
+;
+;        FLIP fast n=... / FLIP wait n=...   as in milestone 4b/4d
+;        LADDER c64=NNNN thr=NNNN            the calibration
+;        <rung> p=NNNNk L=NNNN m=NNNN x=NNNN one line per rung
+;        RATE a0/a1/...                      achieved MB/s per rung
+;
+;      The FLIP lines will read n=0 in this build: nothing flips a page any
+;      more. That is expected, and 4b/4d already have those numbers.
+;
+;      See dev/progress_tracker.md milestone 6a for how to read the table.
+;
+;      REU emulation must be selected in RAD's menu (T key -> REU), same as
+;      every other gpu64 test PRG.
+;
+;      Assemble with 64tass (no --nostart: the .prg needs its 2-byte load
+;      address header, see dev/progress_tracker.md milestone 2) --
+;      64tass gpu64_ladder_test.a -o gpu64_ladder_test.prg
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+CMD_HI   = $df50
+CMD_LO   = $df51
+STATUS   = $df52
+ERRCODE  = $df53
+ARG      = $df56		; ARG0..ARG15 = $df56..$df65
+
+OP_GET_INFO    = $06
+OP_LOG_ENABLE  = $07
+
+; REU registers (RAD's emulation, $df00-$df0a)
+REU_STATUS  = $df00
+REU_COMMAND = $df01
+REU_C64LO   = $df02
+REU_C64HI   = $df03
+REU_REULO   = $df04
+REU_REUHI   = $df05
+REU_BANK    = $df06
+REU_LENLO   = $df07
+REU_LENHI   = $df08
+REU_CTRL    = $df0a
+
+; execute + FF00-decode disabled + direction
+REU_TO_REU = $90
+REU_TO_C64 = $91
+
+VIC_CTRL1 = $d011		; bit 7 = raster line bit 8
+VIC_RASTER = $d012
+
+SCREEN   = $0400
+INFOBUF  = $c000
+SRCBUF   = $c200
+DSTBUF   = $c300
+
+FRAMES_HI = $09			; run 2500 frames = $09c4, ~50s at 50Hz
+FRAMES_LO = $c4
+
+	* = $0801
+
+	; minimal "10 SYS 2061" BASIC stub so RUN launches the code below
+	.word next_line
+	.word 10
+	.byte $9e			; SYS token
+	.text "2061"
+	.byte 0
+next_line
+	.word 0
+
+	* = $080d			; = 2061
+
+start
+	sei
+
+	lda #0
+	sta CMD_HI			; class 0 (sticky; this is the only time we set it)
+
+	; --- the REU test pattern ------------------------------------------
+	; SRCBUF gets a pattern that is not constant and not the low byte of
+	; its own address either, so a transfer that lands one byte off, or
+	; leaves the destination untouched, both show up as mismatches.
+	ldx #0
+fillLoop
+	txa
+	eor #$5a
+	sta SRCBUF,x
+	lda #$ff
+	sta DSTBUF,x
+	inx
+	bne fillLoop
+
+	; --- GET_INFO -> $c000 ---------------------------------------------
+	; Also the command that starts the ladder's clock, firmware-side, and
+	; one of only two gpu64 commands this program issues.
+	lda #0
+	sta ARG+0			; space = C64 RAM
+	lda #<INFOBUF
+	sta ARG+1
+	lda #>INFOBUF
+	sta ARG+2
+	lda #0
+	sta ARG+3			; addr = $00c000
+	lda #16
+	sta ARG+4
+	lda #0
+	sta ARG+5			; len = 16
+	lda #OP_GET_INFO
+	sta CMD_LO
+
+	ldx #0
+copyMagic
+	lda INFOBUF,x
+	and #$3f
+	sta SCREEN+0,x
+	inx
+	cpx #3
+	bne copyMagic
+
+	lda ERRCODE
+	and #$3f
+	sta SCREEN+3
+
+	; row 1: the measured frame period, high byte first. Not used for
+	; timing here -- the raster is -- but it is the one cheap check that
+	; the firmware's frame clock came up, and a void one is worth seeing.
+	ldx #40
+	lda INFOBUF+15
+	jsr prhex
+	lda INFOBUF+14
+	jsr prhex
+
+	lda #0
+	sta framec
+	sta framec+1
+	sta reuc
+	sta reuc+1
+	sta errc
+	sta errc+1
+
+; ===================== the run =======================================
+; One REU round trip per frame, paced off the raster. No gpu64 register is
+; touched in here at all.
+mainLoop
+	jsr waitFrame
+
+	; No cartridge access here at all -- see the header. The REU round-trip
+	; subroutine is left in the source below, unreferenced, because it is
+	; the thing to put back first once the idle rung is trusted again.
+
+	inc framec
+	bne noCarry1
+	inc framec+1
+noCarry1
+
+	; Live progress, every 16 frames. Cheap, and it is what turns a run
+	; that dies partway into a data point instead of a shrug.
+	lda framec
+	and #$0f
+	bne noReport
+	jsr report
+noReport
+
+	lda framec+1
+	cmp #FRAMES_HI
+	bne mainLoop
+	lda framec
+	cmp #FRAMES_LO
+	bne mainLoop
+
+	jsr report
+
+done
+	lda ERRCODE
+	and #$3f
+	sta SCREEN+200
+
+	; Put gpu64's log overlay back on -- LOG_ENABLE(1) is what makes the
+	; firmware print the FLIP lines and the ladder table. By now core 0 has
+	; very likely printed them already on its own (the ladder's `done`
+	; rung auto-dumps); this reprints them at the bottom of the log, which
+	; is the copy worth reading.
+	lda #1
+	sta ARG+0
+	lda #OP_LOG_ENABLE
+	sta CMD_LO
+
+	cli
+	rts
+
+; --- wait for one VIC frame -------------------------------------------
+; Line 250 happens exactly once per frame and is comfortably clear of the
+; badline region. VIC_CTRL1 bit 7 is raster bit 8, so it has to be low for
+; VIC_RASTER to mean what it says.
+waitFrame
+	lda VIC_CTRL1
+	bmi waitFrame
+	lda VIC_RASTER
+	cmp #250
+	bne waitFrame
+wfLeave
+	lda VIC_RASTER
+	cmp #250
+	beq wfLeave
+	rts
+
+; --- 256 bytes C64 -> REU -> C64, then compare ------------------------
+; Both halves set every register every time: a transfer auto-advances the
+; address registers, and reusing them would test a different thing each
+; frame.
+reuRoundTrip
+	lda #<SRCBUF
+	sta REU_C64LO
+	lda #>SRCBUF
+	sta REU_C64HI
+	lda #0
+	sta REU_REULO
+	sta REU_REUHI
+	sta REU_BANK
+	sta REU_CTRL			; increment both addresses
+	sta REU_LENLO
+	lda #1
+	sta REU_LENHI			; length = 256
+	lda #REU_TO_REU
+	sta REU_COMMAND
+
+	lda #<DSTBUF
+	sta REU_C64LO
+	lda #>DSTBUF
+	sta REU_C64HI
+	lda #0
+	sta REU_REULO
+	sta REU_REUHI
+	sta REU_BANK
+	sta REU_CTRL
+	sta REU_LENLO
+	lda #1
+	sta REU_LENHI
+	lda #REU_TO_C64
+	sta REU_COMMAND
+
+	ldx #0
+cmpLoop
+	lda SRCBUF,x
+	cmp DSTBUF,x
+	beq cmpNext
+	inc errc
+	bne cmpNext
+	inc errc+1
+cmpNext
+	; Poison the destination again, so a transfer that silently does
+	; nothing next frame cannot pass on the bytes this one left behind.
+	lda #$ff
+	sta DSTBUF,x
+	inx
+	bne cmpLoop
+
+	inc reuc
+	bne noCarry2
+	inc reuc+1
+noCarry2
+	rts
+
+; --- rows 2, 3, 4: frames / REU round trips / verify errors -----------
+report
+	ldx #80
+	lda framec+1
+	jsr prhex
+	lda framec
+	jsr prhex
+
+	ldx #120
+	lda reuc+1
+	jsr prhex
+	lda reuc
+	jsr prhex
+
+	ldx #160
+	lda errc+1
+	jsr prhex
+	lda errc
+	jsr prhex
+	rts
+
+; --- print A as two hex digits at SCREEN,x; x advances by 2 -----------
+prhex
+	pha
+	lsr
+	lsr
+	lsr
+	lsr
+	jsr nibble
+	sta SCREEN,x
+	inx
+	pla
+	and #$0f
+	jsr nibble
+	sta SCREEN,x
+	inx
+	rts
+
+; nibble in A -> C64 screen code. '0'-'9' are $30-$39, 'A'-'F' are $01-$06.
+nibble
+	cmp #10
+	bcs nibLetter
+	ora #$30
+	rts
+nibLetter
+	sec
+	sbc #9
+	rts
+
+framec	.word 0
+reuc	.word 0
+errc	.word 0

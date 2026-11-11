@@ -1,0 +1,811 @@
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 -- DRAW_SECTORS: a level with steps, a low corridor and a
+;      window, still with no projection on the 6502.
+;
+;      WHAT THIS DEMONSTRATES
+;
+;      gpu64_demo_walls draws a level whose floor and ceiling are the same
+;      everywhere and whose walls are all solid, because that is all
+;      DRAW_WALLS can express. This program draws the same kind of level
+;      with the two things that were missing:
+;
+;        * every open cell belongs to a SECTOR, which has its own floor
+;          height, its own ceiling height and its own two flat colours --
+;          so the level has a raised platform to step onto, a corridor you
+;          have to duck through, and a courtyard open to the sky
+;        * a wall between two different sectors is TWO-SIDED: it draws the
+;          band above the far ceiling and the band below the far floor and
+;          leaves the middle see-through, so you can look down the corridor
+;          from one room into the next
+;
+;      The 6502's contribution to a frame is still: two 16-bit adds, one
+;      map lookup, one more lookup for the eye height of the sector it is
+;      standing in, ten bytes of camera, two commands. There is no
+;      raycaster and no per-column anything in this program either.
+;
+;      THE PART THAT IS EASY TO MISS
+;
+;      A window means a column of the screen is no longer owned by one
+;      wall: the near wall owns the band above the window and the band
+;      below it, and something further away owns the middle. So DRAW_SECTORS
+;      depth-tests every PIXEL, not every column. That is what lets this
+;      program hand gpu64 its walls in map order -- Doom needed a BSP tree
+;      to produce the order this does not need.
+;
+;      WHAT IT COSTS
+;
+;      One SET_SECTORS at start-up (four sectors, 32 bytes), and per frame
+;      one SET_CAMERA and one DRAW_SECTORS. The level is fetched by gpu64
+;      over DMA, the same unchanged bytes every frame, with R2_BATCH_SUM
+;      set -- and since the bytes never change the checksum is computed
+;      once at start-up, so every byte is verified on arrival for free.
+;
+;      Run it: LOAD"GPU64-SECT",8,1 then RUN. RUN/STOP finishes.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+	.include "gpu64.inc"
+
+VIEW_H	= 160			; the 3D view; the status bar is below it
+TEXW	= 32
+TEXH	= 32			; a power of two: gpu64 masks v with h-1
+TEXLEN	= TEXW * TEXH
+
+TEX_BRICK = 1
+TEX_STONE = 2
+TEX_GUN	  = 3
+TEX_BARREL = 4
+
+CMAP_LEVELS = 16
+
+MAPW	= 16			; the level is 16x16 cells, 1 world unit each
+MAPH	= 16
+
+; The camera. For DRAW_SECTORS the eye height is an ABSOLUTE world height,
+; so it changes when the player steps up -- eyeTab below is that step. The
+; ceiling field is not read by DRAW_SECTORS at all, but SET_CAMERA still
+; validates it against the eye, so send the level's tallest ceiling.
+EYE_UP	= $0080			; the eye, above whatever floor he stands on
+CEIL_H	= $0300
+PROJ	= $a000
+SKY_COL	= 5*32+26		; what shows through a sector with SEC_SKY
+
+START_X	= $0380			; cell 3.5, 7.5 -- four units back, facing the corridor
+START_Y	= $0780
+
+; A barrel: three quarters of a unit across, seven eighths tall. The one
+; that walks paces between these two world y values, an eighth of a unit
+; a frame.
+BARREL_W = $00c0
+BARREL_H = $00a0
+WALK_LO	= $0480
+WALK_HI	= $0a80
+WALK_STEP = $20
+SPEED	= 0.05			; world units per frame
+
+; Zero page. $f7-$fe is the RS232 area every gpu64 program uses.
+posX	= $f7			; the player, 8.8 world units
+posY	= $f9
+sumPtr	= $fb			; only used at start-up, before the kit prints
+
+	#basicStub
+
+; ======================================================================
+; Start-up
+; ======================================================================
+start
+	jsr dmInit
+
+	#argb 0, BLACK
+	#cmd OP_SET_BORDER
+	#argb 0, BLACK
+	#cmd OP_CLEAR
+
+	; The palette: 8 hues x 32 brightnesses, so a colormap can darken by
+	; walking down a hue. PAL_LOAD's count is a byte, so 256 entries take
+	; two calls.
+	#argblob 0, SPACE_C64, palData, 128*3
+	#argb 6, 0
+	#argb 7, 128
+	#cmd OP_PAL_LOAD
+	#argblob 0, SPACE_C64, palData+128*3, 128*3
+	#argb 6, 128
+	#argb 7, 128
+	#cmd OP_PAL_LOAD
+
+	lda #2
+	sta CMD_HI
+	#cmd R2_RESET
+
+	#argw 0, 0
+	#argw 2, 0
+	#argw 4, FB_W
+	#argw 6, VIEW_H
+	#cmd R2_SET_VIEW
+
+	; Two wall textures and the weapon, column-major: texel(u,v) at
+	; u*h+v, which is the order a wall column reads them in.
+	#argblob 0, SPACE_C64, brickTex, TEXLEN
+	#argw 6, TEXW
+	#argw 8, TEXH
+	#argb 10, 0
+	lda #TEX_BRICK
+	sta ID_LO
+	lda #0
+	sta ID_HI
+	#cmd R2_UPLOAD_TEX
+
+	#argblob 0, SPACE_C64, stoneTex, TEXLEN
+	#argw 6, TEXW
+	#argw 8, TEXH
+	#argb 10, 0
+	lda #TEX_STONE
+	sta ID_LO
+	#cmd R2_UPLOAD_TEX
+
+	#argblob 0, SPACE_C64, gunTex, TEXLEN
+	#argw 6, TEXW
+	#argw 8, TEXH
+	#argb 10, 0
+	lda #TEX_GUN
+	sta ID_LO
+	#cmd R2_UPLOAD_TEX
+
+	#argblob 0, SPACE_C64, barrelTex, TEXLEN
+	#argw 6, TEXW
+	#argw 8, TEXH
+	#argb 10, 0
+	lda #TEX_BARREL
+	sta ID_LO
+	#cmd R2_UPLOAD_TEX
+
+	; 16 light levels. A record carries a base level and gpu64 adds half
+	; the distance to it, so a corridor darkens with no work here.
+	#argblob 0, SPACE_C64, cmapData, CMAP_LEVELS*256
+	#argb 6, CMAP_LEVELS
+	#cmd R2_SET_COLORMAP
+
+	; The level's vertical shape. Uploaded once -- it is as static as the
+	; walls are, and a wall record names a sector by one byte.
+	#r2sectors secTab, NSEC
+	#cmd2 R2_SET_SECTORS
+
+	jsr sumWalls
+
+	lda #<START_X
+	sta posX
+	lda #>START_X
+	sta posX+1
+	lda #<START_Y
+	sta posY
+	lda #>START_Y
+	sta posY+1
+	jsr eyeHeight
+
+; ======================================================================
+; A frame
+; ======================================================================
+frame
+	; 1. Where the player is. Seven bytes that change, three that never
+	;    do -- the two extra over gpu64_demo_walls are the eye height,
+	;    which now follows the floor he is standing on.
+	lda posX
+	sta ARG+0
+	lda posX+1
+	sta ARG+1
+	lda posY
+	sta ARG+2
+	lda posY+1
+	sta ARG+3
+	lda plAng
+	sta ARG+4
+	#argb 5, R2_CAM_PAINT
+	lda eyeH
+	sta ARG+6
+	lda eyeH+1
+	sta ARG+7
+	#argw 8, CEIL_H
+	#argw 10, PROJ
+	#argb 12, 0			; DRAW_SECTORS takes its flat colours
+	#argb 13, 0			; from the sector, not from here
+	#argb 14, 0			; horizon at the centre of the view
+	#cmd2 R2_SET_CAMERA
+
+	; 2. The sky. A sky ceiling is not a surface -- DRAW_SECTORS paints
+	;    no pixel and writes no depth for it -- so what shows through is
+	;    whatever this page held, and with two pages that is the frame
+	;    before last. One FILL_VIEW is the whole of the fix, and it is
+	;    also where a real sky texture would go.
+	#argb 0, SKY_COL
+	#cmd2 R2_FILL_VIEW
+
+	; 3. The level. The same bytes as last frame, checksummed once at
+	;    start-up, verified by gpu64 on every one.
+	#r2batch2 walls, NWALLS, R2_BATCH_SUM
+	#cmd2 R2_DRAW_SECTORS
+	lda ERRCODE
+	beq +
+	sta lastErr
+	inc errCnt
+	bne +
+	inc errCnt+1
++
+
+	; 4. What gpu64 made of the level, then the things standing in it. This batch goes AFTER the level and
+	;    not before: a thing depth-tests against the buffer DRAW_SECTORS
+	;    fills, which is what puts the corridor barrel behind the doorway
+	;    it is standing beyond instead of in front of it.
+	;
+	;    Unlike the walls these bytes change -- one barrel walks -- so
+	;    the checksum is recomputed every frame. Ninety-six bytes is
+	;    nothing on a 6502, and it is the pattern a real game wants:
+	;    monsters move, and the bus still drops a byte now and then.
+	#argblob 0, SPACE_C64, statBuf, 16
+	#cmd2 R2_STATS
+
+	jsr walkBarrel
+	jsr sumThings
+	#r2batch things, NTHINGS, R2_BATCH_SUM, 0
+	#cmd2 R2_DRAW_THINGS
+	lda ERRCODE
+	beq +
+	sta lastErr
+	inc errCnt
+	bne +
+	inc errCnt+1
++
+
+	; 5. RASTER_STATS reports the LAST batch, so the two reads bracket
+	;    the two batches -- the level's counters are read before the
+	;    things are sent, or the things would overwrite them.
+	#argblob 0, SPACE_C64, thgBuf, 16
+	#cmd2 R2_STATS
+
+	; 6. The weapon, index 0 keyed out, bobbing with the walk. This one
+	;    is still a DRAW_SPRITE: it is at a screen position, not a world
+	;    one, and nothing in the world may ever occlude it.
+	lda bob
+	lsr a
+	lsr a
+	and #$03
+	clc
+	adc #64
+	sta sprY
+	#argw 0, 112
+	lda sprY
+	sta ARG+2
+	lda #0
+	sta ARG+3
+	#argw 4, 96
+	#argw 6, 96
+	#argb 8, 1
+	#argb 9, 0
+	#argw 10, 0
+	#argw 12, VIEW_H-1
+	#argb 14, R2_SPR_MASKED
+	lda #TEX_GUN
+	sta ID_LO
+	lda #0
+	sta ID_HI
+	#cmd2 R2_DRAW_SPRITE
+
+	jsr statusBar
+
+	jsr dmFlip
+	jsr dmVbWait
+	jsr report
+	jsr movePlayer
+
+	jsr dmStop
+	beq frDone
+	jmp frame
+frDone
+	lda #0
+	sta CMD_HI
+	jsr dmHold
+	rts
+
+; ======================================================================
+; The player
+;
+; Walk forward along the current heading; if the cell ahead is solid, turn
+; right until it is not. Then look up which sector he is standing in and
+; put his eye half a unit above its floor -- that lookup is the whole of
+; what a level with steps costs the 6502.
+; ======================================================================
+
+movePlayer
+	inc bob
+
+	ldx plAng
+	clc
+	lda posX
+	adc stepXLo,x
+	sta tryX
+	lda posX+1
+	adc stepXHi,x
+	sta tryX+1
+	clc
+	lda posY
+	adc stepYLo,x
+	sta tryY
+	lda posY+1
+	adc stepYHi,x
+	sta tryY+1
+
+	jsr cellOf			; of tryX/tryY, into X
+	lda mapData,x
+	cmp #NO_SECTOR
+	beq mpBlocked
+
+	lda tryX
+	sta posX
+	lda tryX+1
+	sta posX+1
+	lda tryY
+	sta posY
+	lda tryY+1
+	sta posY+1
+	jsr eyeHeight
+
+	; A slow drift, so the walk is not a straight line down one corridor.
+	lda bob
+	and #$3f
+	bne mpDone
+	inc plAng
+	rts
+
+mpBlocked
+	clc
+	lda plAng
+	adc #4
+	sta plAng
+mpDone
+	rts
+
+; The cell index of tryX/tryY. The map is 16 wide, so this is the two high
+; bytes packed and no arithmetic past a shift.
+cellOf
+	lda tryY+1
+	and #$0f
+	asl a
+	asl a
+	asl a
+	asl a
+	sta tmp
+	lda tryX+1
+	and #$0f
+	ora tmp
+	tax
+	rts
+
+; The eye, from the sector the player now stands in.
+eyeHeight
+	lda posX
+	sta tryX
+	lda posX+1
+	sta tryX+1
+	lda posY
+	sta tryY
+	lda posY+1
+	sta tryY+1
+	jsr cellOf
+	lda mapData,x
+	cmp #NO_SECTOR
+	beq ehDone			; inside a wall: leave the eye alone
+	tax
+	lda eyeTabLo,x
+	sta eyeH
+	lda eyeTabHi,x
+	sta eyeH+1
+ehDone
+	rts
+
+; ======================================================================
+; The status bar and the numbers on it
+; ======================================================================
+
+statusBar
+	lda #0
+	sta CMD_HI
+	#argw 0, 0
+	#argw 2, VIEW_H
+	#argw 4, FB_W
+	#argw 6, FB_H-VIEW_H
+	#argb 8, 0*32+8
+	#cmd OP_RECT_FILL
+	rts
+
+report
+	lda #22
+	jsr dmRow
+	jsr dmText
+	.text "SECTORS  ACC "
+	.byte 0
+	lda statBuf+3
+	jsr dmHexA
+	lda statBuf+2
+	jsr dmHexA
+	jsr dmText
+	.text "  REJ "
+	.byte 0
+	lda statBuf+5
+	jsr dmHexA
+	lda statBuf+4
+	jsr dmHexA
+	jsr dmText
+	.text "  THG "
+	.byte 0
+	lda thgBuf+3
+	jsr dmHexA
+	lda thgBuf+2
+	jsr dmHexA
+
+	; ACC and REJ are one frame's snapshot and cannot be read off a
+	; moving screen; ERRS and LAST only ever go up.
+	lda #23
+	jsr dmRow
+	jsr dmText
+	.text "EYE "
+	.byte 0
+	lda eyeH+1
+	jsr dmHexA
+	lda eyeH
+	jsr dmHexA
+	jsr dmText
+	.text "   ERRS "
+	.byte 0
+	lda errCnt+1
+	jsr dmHexA
+	lda errCnt
+	jsr dmHexA
+	jsr dmText
+	.text " "
+	.byte 0
+	lda lastErr
+	jsr dmHexA
+
+	lda #24
+	jsr dmRow
+	jsr dmText
+	.text "RUN/STOP TO END   ERR "
+	.byte 0
+	jsr dmErr
+	rts
+
+; ======================================================================
+; The level's checksum, computed once because the level never changes.
+; ======================================================================
+
+sumWalls
+	lda #<walls
+	sta sumPtr
+	lda #>walls
+	sta sumPtr+1
+	lda #0
+	sta tmp
+	sta tmp+1
+	ldy #0
+	ldx #>(NWALLS*R2_WALL2)		; whole pages first
+	beq swTail
+swPage
+	clc
+	lda tmp
+	adc (sumPtr),y
+	sta tmp
+	bcc +
+	inc tmp+1
++
+	iny
+	bne swPage
+	inc sumPtr+1
+	dex
+	bne swPage
+swTail
+	cpy #<(NWALLS*R2_WALL2)
+	beq swDone
+	clc
+	lda tmp
+	adc (sumPtr),y
+	sta tmp
+	bcc +
+	inc tmp+1
++
+	iny
+	bne swTail
+swDone
+	lda tmp
+	sta walls+NWALLS*R2_WALL2
+	lda tmp+1
+	sta walls+NWALLS*R2_WALL2+1
+	rts
+
+; ======================================================================
+; The things. Static except for one, which walks up and down the courtyard
+; so the demo shows that a thing batch is a per-frame thing and not part of
+; the level upload.
+; ======================================================================
+
+; The walker's record is the second one, so its y field is at a fixed
+; offset -- no indexing, and the record layout stays visible in one place.
+WALKY	= things + R2_REC + 2
+
+walkBarrel
+	lda walkDir
+	bne wbBack
+	clc
+	lda walkPos
+	adc #WALK_STEP
+	sta walkPos
+	lda walkPos+1
+	adc #0
+	sta walkPos+1
+	; past the far end of its beat: turn round
+	lda walkPos+1
+	cmp #>WALK_HI
+	bcc wbStore
+	lda #1
+	sta walkDir
+	jmp wbStore
+wbBack
+	sec
+	lda walkPos
+	sbc #WALK_STEP
+	sta walkPos
+	lda walkPos+1
+	sbc #0
+	sta walkPos+1
+	lda walkPos+1
+	cmp #>WALK_LO
+	bcs wbStore
+	lda #0
+	sta walkDir
+wbStore
+	lda walkPos
+	sta WALKY
+	lda walkPos+1
+	sta WALKY+1
+	rts
+
+; The thing batch's checksum. Recomputed every frame because the batch
+; changes every frame -- and it is one page at most, so the loop needs no
+; page counter the way sumWalls does.
+sumThings
+	lda #0
+	sta tmp
+	sta tmp+1
+	ldy #0
+stLoop
+	clc
+	lda tmp
+	adc things,y
+	sta tmp
+	bcc +
+	inc tmp+1
++
+	iny
+	cpy #NTHINGS*R2_REC
+	bne stLoop
+	lda tmp
+	sta things+NTHINGS*R2_REC
+	lda tmp+1
+	sta things+NTHINGS*R2_REC+1
+	rts
+
+	.include "gpu64_rt.inc"
+
+; ======================================================================
+; Variables
+; ======================================================================
+plAng	.byte 0
+tryX	.word 0
+tryY	.word 0
+tmp	.word 0
+bob	.byte 0
+sprY	.byte 0
+eyeH	.word 0
+errCnt	.word 0
+lastErr	.byte 0
+statBuf	.fill 16, 0
+thgBuf	.fill 16, 0
+walkPos	.word WALK_LO
+walkDir	.byte 0
+
+; ======================================================================
+; Tables, all built by the assembler
+; ======================================================================
+
+; --- the sectors -------------------------------------------------------
+; floor, ceiling, floor colour, ceiling colour, light, flags. The palette
+; is 8 hues x 32 brightnesses, so a colour is hue*32 + shade.
+secTab
+	#r2secd $0000, $0200, 4*32+22, 5*32+18, 0		; 0 the main room
+	#r2secd $0080, $0200, 1*32+26, 5*32+18, 0		; 1 raised platform
+	#r2secd $0040, $0100, 2*32+20, 2*32+24, 3		; 2 low corridor
+	#r2secd $0000, $0300, 3*32+24, 0,       0, R2_SEC_SKY	; 3 courtyard
+NSEC	= 4
+
+; --- the things -------------------------------------------------------
+; A billboard at a world position. base is the ABSOLUTE height of the
+; bottom, so a thing standing on a floor carries that sector's floor
+; height -- the corridor's barrel is at $0040 because the corridor floor
+; is, and the platform's at $0080 for the same reason. Get that wrong and
+; the barrel is buried or floating, which is exactly the kind of mistake
+; the demo is here to make visible.
+;
+; index 0 is the texture's key, so MASKED makes the barrel a barrel shape
+; and not a square. Light 0 means gpu64 darkens each one by its own
+; distance, so they fade down the courtyard with nothing sent per frame.
+	;         x,      y,   base,        w,        h, tex, light, flags
+things
+	#r2thingd $0780, $0780, $0040, BARREL_W, BARREL_H, TEX_BARREL, 0, R2_THING_MASKED
+	#r2thingd $0b80, WALK_LO, $0000, BARREL_W, BARREL_H, TEX_BARREL, 0, R2_THING_MASKED
+	#r2thingd $0d80, $0580, $0000, BARREL_W, BARREL_H, TEX_BARREL, 0, R2_THING_MASKED
+	#r2thingd $0580, $0a80, $0000, BARREL_W, BARREL_H, TEX_BARREL, 0, R2_THING_MASKED
+	#r2thingd $0580, $0480, $0000, BARREL_W, BARREL_H, TEX_BARREL, 0, R2_THING_MASKED
+	#r2thingd $0480, $0580, $0080, BARREL_W, BARREL_H, TEX_BARREL, 0, R2_THING_MASKED
+NTHINGS	= 6
+	.word	0			; room for the batch checksum
+
+; The eye, half a unit above each sector's floor.
+eyeTabLo
+	.byte <($0000+EYE_UP), <($0080+EYE_UP), <($0040+EYE_UP), <($0000+EYE_UP)
+eyeTabHi
+	.byte >($0000+EYE_UP), >($0080+EYE_UP), >($0040+EYE_UP), >($0000+EYE_UP)
+
+; --- the level ---------------------------------------------------------
+; The map, as a picture: '#' is solid, a digit is an open cell and the
+; sector it belongs to. Everything below is derived from it, so changing
+; the level means changing these sixteen lines and nothing else.
+;
+; The left half is the main room (0) with a raised platform (1) in it; the
+; right half is a courtyard open to the sky (3); the single '2' cell is a
+; low corridor joining them, and it is the two-sided wall at each end of
+; that cell that this program exists to show.
+MAPT = [ "################",  "#000000#3333333#",  "#000000#3333333#",  "#001100#3333333#",  "#001100#3333333#",  "#001100#3333333#",  "#000000#3333333#",  "#00000023333333#",  "#000000#3333333#",  "#000000#3333333#",  "#000000#3333333#",  "#000000#3333333#",  "#000000#3333333#",  "#000000#3333333#",  "#000000#3333333#",  "################" ]
+
+NO_SECTOR = $ff			; the map byte for a solid cell
+
+; The sector of a cell, or NO_SECTOR. Not called "sec" -- that is an opcode,
+; and 64tass reports the clash as an undefined symbol at the call site. Written as one expression because a
+; 64tass function returns the value its .endf carries, and there is only
+; ever one of those. The bounds arm is not decoration: the perimeter cells
+; are solid and every generator below asks about their neighbours.
+cellSec	.function x, y
+	.endf (x < 0 || x >= MAPW || y < 0 || y >= MAPH) ? NO_SECTOR : (MAPT[y][x] == '#' ? NO_SECTOR : MAPT[y][x] - '0')
+
+; One byte per cell, for the collision test and the eye height.
+mapData
+	.for cy = 0, cy < MAPH, cy += 1
+	  .for cx = 0, cx < MAPW, cx += 1
+	  .byte cellSec(cx, cy)
+	  .next
+	.next
+
+; One 32-byte record per face of an open cell that has something on the
+; other side of it: a solid cell, or a cell in a DIFFERENT sector. Two
+; cells in the same sector have no wall between them at all.
+;
+; The winding is what tells gpu64 which side is the front, so each face is
+; wound as seen from the open cell it belongs to. A portal therefore gets
+; one record from each side, each naming its own side as the front -- which
+; is also why the far side's upper and lower bands are textured correctly
+; without this program knowing anything about them.
+;
+; u runs 0 to 32.0 across a cell, so one texture tiles per world unit and
+; no record ever needs a length or a square root.
+face	.macro	x1, y1, x2, y2, front, back, tex
+	#r2walld (\x1)*256, (\y1)*256, (\x2)*256, (\y2)*256, 0, $2000, \front, \back, 0, 0, \tex, TEX_STONE, TEX_BRICK
+
+	.endm
+
+; Emit the face between the open cell (cx,cy) and its neighbour (nx,ny),
+; if there is one to emit.
+edge	.macro	cx, cy, nx, ny, x1, y1, x2, y2
+	.if cellSec(\cx, \cy) != NO_SECTOR && cellSec(\nx, \ny) != cellSec(\cx, \cy)
+	  .if cellSec(\nx, \ny) == NO_SECTOR
+	  #face \x1, \y1, \x2, \y2, cellSec(\cx, \cy), R2_NO_SECTOR, TEX_BRICK + ((\cx + \cy) & 1)
+	  .else
+	  #face \x1, \y1, \x2, \y2, cellSec(\cx, \cy), cellSec(\nx, \ny), 0
+	  .endif
+	.endif
+	.endm
+
+walls
+	.for cy = 0, cy < MAPH, cy += 1
+	  .for cx = 0, cx < MAPW, cx += 1
+	  #edge cx, cy, cx-1, cy, cx,   cy,   cx,   cy+1	; west
+	  #edge cx, cy, cx+1, cy, cx+1, cy+1, cx+1, cy		; east
+	  #edge cx, cy, cx, cy-1, cx+1, cy,   cx,   cy		; north
+	  #edge cx, cy, cx, cy+1, cx,   cy+1, cx+1, cy+1	; south
+	  .next
+	.next
+wallsEnd
+	.word 0				; room for the batch checksum
+
+NWALLS	= (wallsEnd - walls) / R2_WALL2
+
+; --- the walk ----------------------------------------------------------
+; One step along each of the 256 headings, 8.8. Angle 0 looks along +x,
+; which is the convention SET_CAMERA uses.
+stepXLo
+	.for a = 0, a < 256, a += 1
+	.byte <round(cos(a * 2 * pi / 256) * SPEED * 256)
+	.next
+stepXHi
+	.for a = 0, a < 256, a += 1
+	.byte >round(cos(a * 2 * pi / 256) * SPEED * 256)
+	.next
+stepYLo
+	.for a = 0, a < 256, a += 1
+	.byte <round(sin(a * 2 * pi / 256) * SPEED * 256)
+	.next
+stepYHi
+	.for a = 0, a < 256, a += 1
+	.byte >round(sin(a * 2 * pi / 256) * SPEED * 256)
+	.next
+
+; --- the palette: 8 hues x 32 brightnesses -----------------------------
+palHues = [[80,60,50], [150,120,95], [110,110,120], [90,130,90],  [170,150,60], [70,90,150], [180,90,60], [200,200,200]]
+
+palData
+	.for h = 0, h < 8, h += 1
+	  .for s = 0, s < 32, s += 1
+	  .byte round(palHues[h][0] * s / 31.0), round(palHues[h][1] * s / 31.0), round(palHues[h][2] * s / 31.0)
+	  .next
+	.next
+
+; --- the colormap: 16 levels, each two shades darker than the last -----
+cmapData
+	.for l = 0, l < CMAP_LEVELS, l += 1
+	  .for c = 0, c < 256, c += 1
+	  .byte (c & $e0) | ((c & 31) - 2 * l < 0 ? 0 : (c & 31) - 2 * l)
+	  .next
+	.next
+
+; --- the textures, column-major: texel(u,v) at u * TEXH + v ------------
+brickTex
+	.for u = 0, u < TEXW, u += 1
+	  .for v = 0, v < TEXH, v += 1
+	  .byte ((v % 8) == 0) || (((u + ((v / 8) % 2) * 8) % 16) < 2) ? 0*32+20 : 1*32+18+((u*5+v*3) % 6)
+	  .next
+	.next
+
+stoneTex
+	.for u = 0, u < TEXW, u += 1
+	  .for v = 0, v < TEXH, v += 1
+	  .byte ((v % 16) < 1) || ((u % 16) < 1) ? 2*32+12 : 2*32+20+((u*3+v*7) % 5)
+	  .next
+	.next
+
+; A barrel: index 0 is the key, so the shape is what is not 0. It narrows
+; over the top four rows so the silhouette is not a rectangle -- a masked
+; sprite that fills its whole rectangle proves nothing about masking.
+barrelTex
+	.for u = 0, u < TEXW, u += 1
+	  .for v = 0, v < TEXH, v += 1
+	  .byte (v >= 4 && u >= 8 + (v < 8 ? 2 : 0) && u < 24 - (v < 8 ? 2 : 0)) ? ((v % 10) < 2 ? 6*32+12 : 6*32+20 + ((u * 3) % 5)) : 0
+	  .next
+	.next
+
+; The weapon: index 0 is the key, so the shape is what is not 0.
+gunTex
+	.for u = 0, u < TEXW, u += 1
+	  .for v = 0, v < TEXH, v += 1
+	  .byte (u >= 12 && u < 20 && v >= 8) ? (u < 14 || u >= 18 ? 7*32+14 : 7*32+24) :  ((u >= 10 && u < 22 && v >= 20) ? 7*32+8 : 0)
+	  .next
+	.next

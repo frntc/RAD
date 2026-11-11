@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 """
 hondani.py - the HONDANI logo, for both screens.
 
-quake/hondani.art is the C64 hires original (the Doom port's ilogo6.art):
+games/quake/hondani.art is the C64 hires original (the Doom port's ilogo6.art):
 two bytes of load address, 8000 bytes of bitmap, 1000 of screen. Every
 cell's high nibble colours its set bits and the low nibble its clear ones.
 The logo is red (2) on black, plus two brown (9) pixels that are red too.
@@ -25,7 +26,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ART = os.path.join(HERE, '..', 'quake', 'hondani.art')
+ART = os.path.join(HERE, '..', 'games', 'quake', 'hondani.art')
 
 CX0, CX1 = 2, 38            # cell columns, inclusive
 CY0, CY1 = 6, 17            # cell rows, inclusive

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 rastercheck -- runs the firmware's class 2 raster core natively so it
  can be diffed, pixel for pixel, against the reference model in

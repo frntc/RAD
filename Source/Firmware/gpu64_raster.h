@@ -1,8 +1,9 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64 milestone 8 -- the class 2 (raster) subsystem, public interface.
 
  Wire protocol: docs/api_design.md, "Class 2 opcodes". Rationale and as-built
- record: project/milestone8_raster_design.md.
+ record: dev/milestone8_raster_design.md.
 
  Class 2 is the column/span/sprite layer a Doom-shaped renderer needs: the
  C64 decides what to draw and emits batches of 16-byte records, gpu64 turns

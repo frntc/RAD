@@ -1,3 +1,4 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 ; sfxtest.a - every game sound effect in turn, for a listen on a PC.
 ;
 ; No gpu64 needed: this is the game's own player (gpu64_game_sfx.inc) on a

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 //
 // gpu64_sniff.cpp - the IO2 sniffer's state and its HDMI report
 //

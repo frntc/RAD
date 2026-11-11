@@ -1,0 +1,49 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
+;
+;      gpu64 starter program. Copy this folder, rename it, edit.
+;
+;      It does the four things every program does: initialise gpu64, draw
+;      into the hidden page, flip, and stop on RUN/STOP. A square moves
+;      across the HDMI screen; the C64's own screen stays free for you.
+;
+
+	.include "gpu64.inc"
+
+	#basicStub			; BASIC line "10 SYS 2064": RUN starts here
+
+start
+	jsr dmInit			; FULL_RESET + calibration. Always first:
+					; gpu64 keeps the last program's state.
+
+frame
+	#argb 0, 0			; colour (palette index)
+	#cmd OP_CLEAR			; clears the page nobody is looking at
+
+	#argwv 0, xpos			; x
+	#argw 2, 90			; y
+	#argw 4, 40			; w
+	#argw 6, 40			; h
+	#argb 8, 7			; colour
+	#cmd OP_RECT_FILL
+
+	jsr dmFlip			; show it, wait for a clean frame boundary
+
+	inc xpos			; the C64's whole job: move the number
+	bne +
+	inc xpos+1
++	lda xpos+1
+	beq +
+	lda xpos
+	cmp #<280
+	bcc +
+	lda #0
+	sta xpos
+	sta xpos+1
++
+	jsr dmStop			; Z set while RUN/STOP is held
+	bne frame
+	jmp dmHold			; clear the C64 screen and return
+
+xpos	.word 0
+
+	.include "gpu64_rt.inc"

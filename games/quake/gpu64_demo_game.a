@@ -1,0 +1,6115 @@
+; Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
+;
+;       {_______            {_          {______
+;             {__          {_ __               {__
+;             {__         {_  {__               {__
+;          {__           {__   {__               {__
+;      {______          {__     {__              {__
+;            {__       {__       {__            {__
+;              {_________         {______________		Expansion Unit
+;
+;      gpu64 -- E1M1 with the doors working. A Quake level you can open.
+;
+;      WHAT THIS PROGRAM IS EVIDENCE FOR
+;
+;      gpu64_demo_level.a proves the Pi can put a whole Quake level on the
+;      HDMI output and hold a player inside it. It is deliberately the
+;      smallest program that does: it walks, and nothing in the level ever
+;      changes. This one is the next question, and it is the one the API was
+;      frozen to answer -- can a C64 run the GAME?
+;
+;      A level's game is in its entity lump: E1M1 has 369 records naming
+;      fourteen doors, seven secret doors, two platforms, six buttons and the
+;      twenty-six trigger volumes that fire them. That lump is already in the
+;      Pi's memory, and it does not fit in a C64 -- so this program asks for
+;      it one record at a time with LEVEL_ENT ($16), keeps the 55 records it
+;      cares about, and from then on the whole of the door logic runs on the
+;      6502:
+;
+;        * a touch test against every mover's own box, expanded the way
+;          Quake expands it, and against every trigger volume
+;        * target / targetname matching, by the opaque 16-bit ids LEVEL_ENT
+;          hands back -- no strings and no strcmp on the C64 at all
+;        * an open / wait / close state machine per mover
+;        * and two things sent to gpu64 per moving door: SET_POSITION on its
+;          node run, and the same displacement in the next frame's CLIP_MOVE
+;          block, so the door you can see is the door you cannot walk through
+;
+;      The second half is the part that could not be faked. A door that moves
+;      on screen but not in the collision hull is a painting; CLIP_MOVE's
+;      mover list is what makes it a door. Stand in a closing doorway and it
+;      stops you.
+;
+;      WHAT IT IS NOT
+;
+;      Still not the whole of Quake: no monsters, no weapons, no items, no
+;      keys and no counters, so the three buttons of the big room open
+;      nothing (their trigger_counter is not implemented) and a locked door
+;      stays locked. func_door_secret moves in one stage here rather than
+;      Quake's two. Those are the next milestone; the protocol underneath
+;      them is what this program is for.
+;
+;      DRIVING IT
+;
+;        W / S   forward / back          A / D   turn left / right
+;        Q / E   strafe left / right     SHIFT   hold to run
+;        @ / ;   forward / back, too     SPACE   jump
+;        : / =   strafe left / right, too (fixed: the menu cannot move them)
+;        F1 / F3 look up / down          F7      level the view
+;        + / -   widen / narrow the field of view (30-110 degrees, 75 at start)
+;        C= or B fire                    1-4     pick a weapon
+;        <-      pause (RESUME / CONTROLS / MAIN MENU; <- again resumes)
+;        H       health cheat: +100, at most 250, for testing levels
+;        I       weapons cheat: every weapon, full shells and nails
+;
+;        Joystick 2: up / down walk, left / right turn, button fires.
+;        1351 mouse in port 1: sideways turns, forward / back looks up and
+;        down, the left button fires.
+;
+;        There is no way out: RUN/STOP is ignored, pressed or ghosted, and
+;        the machine is reset to leave. Only the PC simulator ends a run,
+;        through SIM_EXIT below.
+;
+;        If the C64 freezes, press RESTORE: row 0 then reads NMI, the
+;        address the 6502 was at, and a count of presses. A crash into a
+;        BRK prints BRK and its address there and stops, instead of dropping
+;        to READY.
+;
+;      Walk up to the first door of E1M1 and it opens, waits, and closes
+;      behind you.
+;
+;      BEFORE RUNNING IT
+;
+;      Select quake.reu (tools/pack_levels.py) as the REU image in the RAD
+;      menu, exactly as for the level demo.
+;
+;      READING THE SCREEN
+;
+;      Rows 2-13 are gpu64_demo_level.a's, unchanged, so a run of this
+;      program is comparable with a run of that one. The three new rows:
+;
+;        MOV      movers found / selected for this frame's CLIP_MOVE /
+;                 currently animating / trigger volumes found. D is what one
+;                 telemetry redraw costs, in ms.
+;        OPEN     how many times a mover has started opening, the last
+;                 target id fired, the last node id a SET_POSITION was sent
+;                 to, and the error byte from those sends.
+;        ENT      entities scanned, LEVEL_ENT answers that failed their own
+;                 checksum, and records that did not fit the tables.
+;
+;      SEL is the number that matters for the protocol: CLIP_MOVE takes at
+;      most 16 movers and E1M1 has 29, so this program sends the nearest
+;      ones -- which is what Quake's own SV_AreaEdicts does, for the same
+;      reason.
+;
+;        VIEW     the field of view in degrees and the pitch the F keys set,
+;                 NODES the length of the level's node run as the refresh
+;                 ring found it, FIX how many level nodes it had to repair.
+;        RING     errors from the refresh rings; PAL how many times the
+;                 palette was found damaged and put back (hex), LAST how
+;                 many entries that took; CAM how many times the camera had
+;                 stopped being a camera and was made one again.
+;
+;      KEEPING THE LEVEL INTACT
+;
+;      Bench run 38 walked E1M1 cleanly for a few seconds, then the view
+;      jumped and later the colours went. Both are one lost bus bit away:
+;      a flipped CMD_HI makes SET_POSITION a class 0 PAL_SET, and a flipped
+;      CMD_LO makes it CREATE_OBJECT, which replaces whatever node it hits
+;      -- the camera included. Retained state stays broken until something
+;      writes it again, so two refresh rings run one step a frame each: the
+;      scene-wide state (view, light, active camera, palette, readback
+;      fence), and one level node through LEVEL_NODE ($1C). The palette and
+;      the level's nodes live in the level file, not here, which is why
+;      those two need the Pi's help -- see docs/state-refresh.md.
+;
+;      Copyright (c) 2026 Honza Slesinger
+;
+;      This program is free software: you can redistribute it and/or modify
+;      it under the terms of the GNU General Public License as published by
+;      the Free Software Foundation, either version 3 of the License, or
+;      (at your option) any later version.
+;
+
+	.include "gpu64.inc"
+	.include "gpu64_quake_actors.inc"
+
+; --- class 1 opcodes this program uses ---------------------------------
+OP_SCENE_RESET       = $00
+OP_SET_VIEWPORT      = $01
+OP_SET_PERSPECTIVE   = $02
+OP_SET_LIGHT3D       = $03
+OP_SET_BACKGROUND    = $05
+OP_LOOP_START        = $06
+OP_LOOP_STOP         = $07
+OP_SCENE_COMMIT      = $08
+OP_LOAD_LEVEL        = $13
+OP_LEVEL_STEP        = $14
+OP_CLIP_MOVE         = $15
+OP_LEVEL_ENT         = $16
+OP_LEVEL_PALETTE     = $17
+OP_LEVEL_NODE        = $1C
+OP_CREATE_OBJECT     = $20
+OP_CREATE_CAMERA     = $21
+OP_SET_ACTIVE_CAMERA = $23
+OP_SET_VISIBLE       = $24
+OP_CREATE_SPRITE     = $25
+OP_CREATE_LIGHT      = $26
+OP_SET_SPRITE        = $27
+OP_SET_POINT_LIGHT   = $28
+OP_SET_POSITION      = $30
+OP_SET_ORIENTATION   = $31
+OP_SET_SCALE         = $35
+OP_GET_TRANSFORM     = $36
+OP_WORLD_TICK        = $6C
+
+KEY_DESTRUCTIVE = $a5
+KEY_CHECKED	= $d0		; | n, see stage2
+CHK_TRIES	= 4
+
+SEQ      = $df67
+SEQACK   = $df68
+
+ST_FRAME_READY = $10
+LEVEL_DONE = $ff
+
+MESH_BASE = 1000
+NODE_BASE = 100
+CAM_ID    = 1
+
+VP_W  = 320
+VP_H  = 200
+NEARZ = 26
+FARZ  = 32767
+READY_WAIT = 20000
+
+CIA2_TALO = $dd04
+CIA2_TAHI = $dd05
+CIA2_TBLO = $dd06
+CIA2_TBHI = $dd07
+CIA2_CRA  = $dd0e
+CIA2_CRB  = $dd0f
+CLK_PERIOD = 985
+
+; Slots in msCur/msMax. MS_GAME is this program's own addition: the door
+; logic is the only part of a frame gpu64 cannot account for, so it gets a
+; phase of its own and row 10 says what it costs.
+MS_PER  = 0
+MS_CAM  = 1
+MS_WAIT = 2
+MS_CMT  = 3
+MS_DISP = 4
+MS_HB   = 5
+MS_GAME = 6
+MS_SLOTS = 7
+
+DISP_EVERY = 2
+
+; 26 was right at a 90 degree lens. At 75 the picture is magnified by
+; tan(45)/tan(37.5) = 1.30, and the same step read as a much slower walk on
+; the bench, so the step is scaled by the same factor. Run 40 still called
+; 34 slow at the bench's ~32 frames a second, so the walk is now twice that
+; and the run (left SHIFT) twice the walk -- which keeps the run at the 136
+; the examples.sh route was flooded with.
+WALK  = 68
+TURN  = 512
+
+; Motion is per REAL time, not per frame. Every step above (and GRAV,
+; DOOR_STEP, PITCH_STEP, the monsters' GR_STEP/DOG_STEP/LEAP_STEP) is what
+; one DT_REF-millisecond frame moves, and dtFrame scales it by the measured
+; period of the frame before, so a heavy frame covers more ground instead
+; of slowing the game down. The constants were all tuned at the bench's
+; ~32 frames a second, which is why DT_REF is 32: at that rate the scale is
+; exactly 1 and nothing moves differently from before.
+;
+; DT_MAX bounds it: the run step is a byte, and 136 * 60 / 32 is 255. A
+; frame longer than 60ms (a level load, a restart, a pause) moves as one of
+; 60ms, so below ~17 frames a second the game does slow down again -- that
+; is also the most a single trace should be asked to cover. DT_MIN keeps a
+; frame with no measured time (one that did not commit) from standing still.
+; Timers -- think cadence, attack cooldowns, door waits -- count game ticks,
+; one per DT_REF ms of real time (tickFrame), not frames.
+DT_REF = 32
+DT_MIN = 8
+DT_MAX = 60
+
+; Looking up and down. camPitch is signed, in 1/256 of a turn, positive UP;
+; the wire's pitch is the other way round (a positive pitch looks down), so
+; sendCamera sends its negation. 48 is 67 degrees, quake3d's limit. The
+; step is twice quake3d's because E1M1 renders at a third of its rate.
+PITCH_STEP = 4
+PITCH_LIM  = 48
+
+; The field of view, horizontal, in whole degrees: 30..110 in fives, + and -
+; move along the table. Bench run 38 had 90 fixed and the world seemed to
+; collapse towards the edges while turning; the projection assumes square
+; pixels and a TV that stretches 384x272 to 16:9 widens them by 1.26, which
+; makes a wide lens look wider still. 75 is the default, confirmed on the
+; bench.
+FOV_DEG0 = 30
+FOV_STEP = 5
+FOV_N    = 17
+FOV_IX0  = ( 75 - FOV_DEG0 ) / FOV_STEP
+
+CIA_PRA = $dc00
+CIA_PRB = $dc01
+COL_A   = %11111110
+COL_B   = %11111101
+COL_C   = %11111011
+COL_D   = %01111111
+COL_E   = %11011111		; PA5: the + and - keys
+KA_F7   = $08
+KA_F1   = $10
+KA_F3   = $20
+KA_F5   = $40		; telemetry on / off
+KE_PLUS = $01
+KE_MINUS = $08
+KB_W    = $02
+KB_A    = $04
+KB_S    = $20
+KB_E    = $40
+KB_LSH  = $80		; left SHIFT: run
+KC_D    = $04
+KD_Q    = $40
+KD_SPC  = $10
+KD_1    = $01		; weapons: 1 axe, 2 shotgun (column 7) ...
+KD_2    = $08
+KB_3    = $01		; ... 3 super shotgun, 4 nailgun (column 1)
+KB_4    = $08
+KD_CBM  = $20		; C= fires, as do B, joystick 2's button and the mouse's
+KF_B    = $10		; column 3's B; it is also the row joystick 1's fire pulls
+COL_F   = %11110111	; PA3: B
+COL_G   = %11101111	; PA4 and PA6: only for keys the controls menu
+COL_H   = %10111111	; may bind (gpu64_game_controls.inc)
+KD_LARR = $02		; <- : the pause menu (gpu64_game_pause.inc)
+KF_H    = $20		; H: the health cheat
+KG_I    = $02		; I: the weapons cheat
+
+; The mouse: a 1351 in port 1. PA7:6 = 01 connects port 1's pots to the
+; SID, which finishes a measurement every 512 cycles; a reading is good only
+; two measurements after port 1 was last disconnected. One count of POT X
+; turns 64/65536 of a turn; POT Y is halved into camPitch's 1/256 turns.
+;
+; The pots are sampled by mouseIrq on every IRQ, MOUSE_SUBS a jiffy, not
+; once a frame: a 1351 reports its position modulo 64 counts, so a sample
+; that moves 32 or more reads as a move the other way, and the shorter
+; the interval, the faster a flick fits in it. The movement accumulates
+; in accX/accY and mouseLook takes it once a frame.
+;
+; Nothing may disconnect port 1 within a reading's settling time. While
+; sfxIrq is installed the KERNAL's keyboard scan does not run at all (the
+; game never reads the KERNAL's keyboard), so the only disconnect is
+; readKeys' own column scan, and readKeys waits for the IRQ rather than
+; scan inside the settling time before it. If a scan still ends too
+; close -- the IRQ was held off -- the next sample is skipped (potSkip);
+; that loses nothing, the next delta covers both intervals.
+;
+; A wrap that still happens is the worst thing the mouse can do: a fast
+; turn read as an equally fast turn the other way, then tripled by the
+; acceleration. mouseGuard drops a sample that reverses a fast move
+; outright and repeats the previous one instead (see there).
+POT_X      = $d419
+POT_Y      = $d41a
+COL_POT1   = %01111111
+MOUSE_PROBE = 64		; frames between pot reads with no mouse seen
+MOUSE_SENS  = 4			; the controls menu's MOUSE SPEED 5, msYaw's x64
+CIA1_TAHI  = $dc05		; timer A, high byte: the IRQ's countdown
+MOUSE_SETTLE = 5		; x256 cycles: a deselect this close to the IRQ
+MOUSE_RKWAIT = MOUSE_SETTLE + 2	; readKeys waits for the IRQ inside this
+MOUSE_REV    = 12		; mouseGuard: |counts| of a suspect reversal
+; The mouse is sampled MOUSE_SUBS times a jiffy: sfxInit runs timer A that
+; much faster and sfxIrq plays the effects on every MOUSE_SUBS-th IRQ
+; only, so they keep 60 Hz. Four samples a jiffy is four times the speed
+; the 1351 can be moved at before a sample wraps; readKeys' wait is what
+; keeps the period from going much shorter (it must stay well over
+; MOUSE_RKWAIT pages).
+MOUSE_SUBS   = 4
+TIMER_PAL    = $4025		; the KERNAL's own jiffy, PAL ...
+TIMER_NTSC   = $4295		; ... and NTSC
+; Turning acceleration. A sample (one jiffy) of up to MOUSE_ACC_T counts
+; turns 1:1, so slow aiming keeps its 0.35 degree step; every count past
+; it turns three. The 1351 still cannot tell more than 31 counts a sample
+; from a wrap, so this is what makes a fast turn possible at all: the
+; same flick needs a third of the mouse speed.
+MOUSE_ACC_T  = 4
+; Caps, so a flick too fast to read turns as far as it can, the right
+; way, instead of somewhere random. MOUSE_YCAP: accelerated counts a frame
+; -- times msYaw's 160 at the top speed it must stay under half a turn, or
+; the turn aliases. MOUSE_PCAP: pitch a frame, in 1/256 turn -- one flick
+; can no longer pin the view to PITCH_LIM, where turning looks like nothing.
+; MOUSE_HOLD: samples mouseGuard holds the previous counts through a
+; reversal -- the length of a flick past the 1351's 31 counts a sample.
+MOUSE_YCAP   = 200
+MOUSE_PCAP   = 6
+MOUSE_HOLD   = 32
+	.cerror MOUSE_YCAP * 160 >= $8000, "the yaw cap aliases at speed 9"
+
+; RUN/STOP is ignored -- on the bench phantom RUN/STOPs, from ghosting
+; and from single bad samples, ended the game with nobody asking. Only
+; tools/prgsim/runsim.py can end a run: while its --stop-after schedule
+; holds RUN/STOP down it also writes SIM_EXIT_ON here, a byte nothing on a
+; real C64 writes after the program clears it.
+SIM_EXIT    = $02a7
+SIM_EXIT_ON = $a7
+; And the same for runsim.py --notarget: the monsters never wake, so a
+; route check is not also a fight (gpu64_game_ai.inc).
+SIM_NOTARGET    = $02a8
+SIM_NOTARGET_ON = $a8
+; And runsim.py --warp: a start position (eye, 16.16 x y z, then a 16-bit
+; yaw) at SIM_WARP_POS, armed by SIM_WARP_ON. The game restarts there, once,
+; so a check can begin beside the monsters it is about (tools/check_ai.py).
+SIM_WARP     = $02a9
+SIM_WARP_ON  = $a9
+SIM_HOP_ON   = $ab			; --hop: the eye moves, nothing restarts
+SIM_WARP_POS = $02b0
+; And runsim.py --hurt: 20 damage to the player, once per arming -- what
+; the <- key did before it became the pause menu (tools/check_combat.py
+; dies by it).
+SIM_HURT     = $02ad
+SIM_HURT_ON  = $ad
+SIM_HURT_DMG = 20
+; And telemetry: the C64 screen's rows are off by default (they cost ~2000
+; cycles a frame), F5 turns them on. runsim.py writes SIM_TELE_ON here
+; unless --telemetry-off, because every check reads its verdict off them.
+SIM_TELE     = $02aa
+SIM_TELE_ON  = $aa
+TELE_HOLD    = 4		; frames F5 is held before it toggles
+
+; Frames a key must be held before it acts (see readKeys). The simulator's
+; exit waits longest; + and - then repeat every FOV_REPEAT.
+STOP_HOLD  = 4
+FOV_HOLD   = 3
+FOV_REPEAT = 8
+
+CAM_X = 0
+CAM_Y = 4
+CAM_Z = 8
+CAM_BUF_LEN = 18
+
+; ----------------------------------------------------------------------
+; CLIP_MOVE's block. The first 56 bytes are gpu64_demo_level.a's; what is
+; new is the mover array that follows it, one 16-byte record per brush model
+; this frame wants traced along with the world.
+;
+; A mover record is a REQUEST, not state: the Pi keeps no list of open doors
+; and never has to be told one closed. Every call re-states the whole set,
+; which is docs/state-refresh.md's rule applied to collision -- a corrupted
+; record costs one frame of one door's hull and nothing more.
+; ----------------------------------------------------------------------
+CLIP_IN_LEN  = 32
+CLIP_HULL    = 24
+CLIP_MODE    = 25
+CLIP_MODEL   = 26
+CLIP_MAGIC   = 27
+CLIP_CHECK   = 28
+CLIP_MOVERS  = 29
+CLIP_OUT     = 32
+CLIP_OFLAGS  = 44
+CLIP_OCONT   = 45
+CLIP_OFRAC   = 46
+CLIP_OBUMPS  = 47
+CLIP_OMAGIC  = 48
+CLIP_OCHECK  = 49
+CLIP_OWL     = 50		; Quake's waterlevel, outside the checksum
+CLIP_OWLC    = 51		; and its complement: 0/0 is old firmware
+CLIP_MVOFF   = 56
+CLIP_MVREC   = 16
+CLIP_IN_M    = $c5
+CLIP_OUT_M   = $5c
+
+; How many movers one call may carry. The firmware's ceiling is 16
+; (GPU64_3D_CLIPMOVE_MAX_MOVERS) and this program uses all of it; the
+; selection below is what decides WHICH 16.
+SEL_MAX = 16
+CLIP_LEN = CLIP_MVOFF + SEL_MAX * CLIP_MVREC
+
+CLIP_MODE_WALK = $01 | $02 | $04 | $08
+CLIP_HULL_PLAYER = 1
+
+; How far past the step it asked for an answer is still allowed to land, in
+; 1/256ths of a world unit (1 Quake unit = 8). Run 38's bound was two WHOLE
+; units -- 64 Quake units, a player's height -- and compared integer halves
+; only, so a corrupted answer that got past the checksum could still move the
+; player a body length in a frame. That is the "avatar moves on its own" of
+; run 39, and one of those moves through a floor is a player outside the map.
+;   x, z  a slide never lengthens an axis; 4 Quake units is the epsilon and
+;         the truncation with room to spare.
+;   y     the trace adds a step-up (18) or a floor settle (18) on its own;
+;         37 Quake units covers either on top of the asked-for fall.
+POS_SLOP_XZ = $0020
+POS_SLOP_Y  = $0128
+
+; How many times to ask again before giving the frame up. The Pi never writes
+; the input half, so a retry is the descriptor's six register writes and the
+; dispatch -- cheap next to a frame of standing still. Run 40 failed 1.2
+; attempts a frame (N 088C M 0917 in 0E41 frames); at that rate four tries
+; still gave up about one frame in eight, which reads as a sticky, slow
+; walk. Eight gives up about one in sixty.
+CLIP_TRIES = 8
+
+FALL = 64
+FALL_16 = FALL * 256
+
+; The jump, in the 16.16 world units mov carries (1 Quake unit = $0800).
+; Quake's is 270 up against 800 gravity, a 45-unit apex. The first cut was
+; 7 Quake units up and 0.54 off each frame after -- 26 frames in the air,
+; which at the bench's ~32 frames a second run 41 called "about two times
+; longer" than it should be. Twice the speed against four times the
+; gravity keeps the 45-unit apex (v^2 / 2g) and halves the time: 14 up,
+; 2.16 off, about 13 frames. FALL_16 is both the terminal speed and the
+; probe a standing player sends every frame, so a walk-off and a landing
+; behave exactly as they did before there was a jump.
+JUMP_V  = $7000
+GRAV    = $1140
+VEL_MIN = $10000 - FALL_16	; -FALL_16 as a 16-bit signed velocity
+JUMP_HOLD = 2			; frames SPACE must read down: a phantom
+				; keyboard sample is one frame (run 38c)
+
+; How many frames off the ground before the player is declared lost and put
+; back where they last stood. The longest real drop in E1M1 is a few hundred
+; Quake units, about 40 frames at terminal speed; the void is forever.
+VOID_FRAMES = 120
+
+; Climbing out of a mover that shut through the player: CLIMB is 16 Quake
+; units a frame (fixed in cmTake), and CLIMB_MAX frames -- 24 world units,
+; higher than anything in E1M1 moves -- before starting over from lastGood.
+CLIMB_MAX = 48
+
+CLIP_MODE_AIR = CLIP_MODE_WALK & ~($02 | $04)	; no step, no floor settle
+CLIP_MODE_SWIM = CLIP_MODE_WALK & ~$04	; no floor settle: water holds you up
+CLIP_ONGROUND = $01
+CLIP_WALL     = $02
+CLIP_CEILING  = $04
+CLIP_SOLID    = $10 | $20			; STARTSOLID | ALLSOLID
+
+; ----------------------------------------------------------------------
+; LEVEL_ENT's block: 96 bytes, input in 0..3, the Pi writes 16..95. The
+; offsets are absolute within the block, which is why they start at 16 --
+; Source/Firmware/gpu64_3d.h tabulates the same numbers.
+; ----------------------------------------------------------------------
+ENT_LEN    = 96
+ENT_IDX    = 0
+ENT_MAGIC  = 2
+ENT_CHECK  = 3
+ENT_OUT    = 16
+ENT_ORIGIN = 16
+ENT_MINS   = 28
+ENT_MAXS   = 40
+ENT_TRAVEL = 52
+ENT_YAW    = 64
+ENT_SPAWN  = 66
+ENT_P0     = 68
+ENT_P1     = 70
+ENT_TARGET = 72
+ENT_TNAME  = 74
+ENT_NODEF  = 76
+ENT_ECOUNT = 78
+ENT_NODEC  = 80
+ENT_KIND   = 81
+ENT_MODEL  = 82
+ENT_OMAGIC = 84
+ENT_OCHECK = 85
+ENT_IN_M   = $c6
+ENT_OUT_M  = $6c
+
+; The kinds this program acts on. gpu64_level.h owns the full table; these
+; are the two ranges a door game needs, and they are ranges rather than
+; classnames precisely so that a level with a class this program has never
+; heard of still lands in the right half.
+K_DOOR    = 11			; func_door
+K_SECRET  = 12			; func_door_secret
+K_PLAT    = 13			; func_plat
+K_BUTTON  = 14			; func_button
+K_MOVER_1 = 11			; movers are 11..16
+K_MOVER_2 = 16
+K_TRIG_1  = 21			; trigger volumes are 21..28
+K_TRIG_2  = 28
+K_TRIG_ONCE   = 21
+K_TRIG_MULTI  = 22
+K_TRIG_SECRET = 23
+K_TRIG_TELE   = 24		; trigger_teleport
+
+; How many of each this program can hold. The shareware episode's worst
+; cases are E1M6's 58 movers and E1M4's 45 triggers (E1M1 needs 29 and 26,
+; E1M2 32 and 25); anything past these is counted in DROP on row 16 rather
+; than silently ignored, because "the level had more doors than the program"
+; is a fact a reader of the screen needs and not an error.
+MAX_MOV = 60
+MAX_TRG = 48
+MAX_TEL = 8			; working teleports in one level
+FIRE_Q  = 8			; targetnames queued in one frame
+
+; Mover states.
+MV_CLOSED  = 0
+MV_OPENING = 1
+MV_OPEN    = 2
+MV_CLOSING = 3
+
+; The animation. frac is 0..255 of the travel, DOOR_STEP per frame, so a
+; door takes eight frames to open -- about a second at the frame rate E1M1
+; actually renders at. OPEN_WAIT is how many frames it stays open.
+DOOR_STEP = 32
+OPEN_WAIT = 30
+
+; The touch tests, in FINE units: 1/256 of a world unit, which is 1/8 of a
+; Quake unit. Fine units are what this program compares positions in --
+; they are the middle two bytes of a 16.16 coordinate, so converting is
+; taking two bytes and no arithmetic at all, and the whole of E1M1 fits in
+; a signed 16-bit fine value (-19 .. +96 world units).
+;
+; TOUCH_XZ is Quake's own 60 units of slack around a door (SV_TouchLinks
+; sees the door's trigger field, which spawn_door builds from the panel box
+; grown by 60 on both horizontal axes); TOUCH_Y is 64 Quake units, which is
+; generous on purpose -- the position this program holds is the EYE, and a
+; door panel's box is measured from the floor.
+TOUCH_XZ = 480			; 60 QU
+TOUCH_Y  = 512			; 64 QU
+; A trigger volume is the brush itself, so it gets the player's half-width
+; horizontally and, vertically, the span from the feet to the top of the
+; head measured from the eye.
+TRIG_XZ  = 128			; 16 QU
+TRIG_YLO = 448			; 56 QU below the eye
+TRIG_YHI = 192			; 24 QU above it
+
+; How near a mover has to be to be worth tracing against, in whole world
+; units. It is not a gameplay number and must not be tuned like one: one
+; frame's step is under a world unit and the player hull is under two, so
+; 24 is a factor of ten of margin, and its only job is to keep the far side
+; of the map out of the per-frame cost.
+;
+; The measured effect on E1M1 is the point of it: nine movers within range
+; at the worst place on the map, against twenty-nine in the level and a
+; sixteen-mover ceiling in CLIP_MOVE. Without it every frame sorts
+; twenty-nine boxes into a full list and hands the trace sixteen doors on
+; the other side of the building.
+NEAR_WU = 24
+TOUCH_FAR = 4			; wu: past every expansion (TOUCH_XZ, TRIG_XZ) plus one
+
+FENCE_ECHO = (<healthBuf) ^ (>healthBuf) ^ (<DMA_LEN) ^ (>DMA_LEN) ^ $a5
+
+HB_LEN   = 132
+HB_MAGIC = 128
+HB_PWR   = 4
+HB_TEMP  = 8
+HB_DTO   = 12
+HB_SLOW  = 16
+HB_FLIPS = 18
+
+; One window over every buffer the Pi writes into, so the five must stay
+; adjacent and in this order.
+DMA_LEN = HB_LEN + CAM_BUF_LEN + CLIP_LEN + ENT_LEN + WT_LEN
+
+HB_EVERY = 64
+
+	#basicStub
+
+	jsr dmInit
+	jsr trapInit
+	lda #0
+	sta SIM_EXIT
+	sta SIM_NOTARGET
+	sta SIM_WARP
+	sta SIM_TELE
+	sta SIM_HURT
+
+	; The HONDANI logo, the Quake title and the skill menu
+	; (gpu64_game_title.inc). It leaves BASIC banked out for good: the
+	; tunes live under it.
+	jsr title			; also picks lvSlot, the start level
+	jsr sfxInit			; the KERNAL's 60 Hz IRQ is back
+
+; The level change comes back here from the intermission (gpu64_game_exit.inc)
+; with lvSlot set to the next level: everything from SCENE_RESET on is per level, and running
+; all of it again is what guarantees nothing of E1M1 leaks into E1M2.
+levelSetup
+	lda #0
+	jsr dmRow
+	jsr dmText
+	.text "GPU64 "
+	.byte 0
+	jsr lvName
+	jsr dmText
+	.text " - QUAKE ON A C64"
+	.byte 0
+
+; ======================================================================
+; The view, then the level. Identical to gpu64_demo_level.a: the viewport
+; belongs to the caller and has to exist before LOAD_LEVEL, and SCENE_RESET
+; has to come before the viewport because it restores the state defaults.
+; ======================================================================
+	lda #1
+	sta CMD_HI
+
+	lda #KEY_DESTRUCTIVE
+	sta ARG+15
+	lda #OP_SCENE_RESET
+	jsr cmd1
+	sta resErr
+
+	#argw 0, 0
+	#argw 2, 0
+	#argw 4, VP_W
+	#argw 6, VP_H
+	lda #OP_SET_VIEWPORT
+	jsr cmd1
+	sta vpErr
+
+	lda #FOV_IX0
+	sta fovIx
+	lda #0
+	sta camPitch
+	jsr readKeys
+	jsr mouseReset
+	jsr rgPersp
+	sta perErr
+
+	jsr rgBackground
+
+	; The light the level is drawn with. It is the state default, and is
+	; sent anyway: a value this program set is a value the refresh ring can
+	; put back, where a default nobody wrote has no writer at all.
+	jsr rgLight
+
+	lda #2
+	jsr dmRow
+	jsr dmText
+	.text "LOAD    "
+	.byte 0
+
+loadLevel
+	#argw 0, MESH_BASE
+	#argw 2, NODE_BASE
+	#argw 4, CAM_ID
+	; ARG6 is the level slot: slot n-1 of the REU level pack for E1Mn.
+	; ARG7 = ARG6 ^ $5A or the Pi takes slot 0.
+	lda lvSlot
+	sta ARG+6
+	eor #$5a
+	sta ARG+7
+	lda #KEY_DESTRUCTIVE
+	sta ARG+15
+	lda #OP_LOAD_LEVEL
+	jsr cmd1
+	sta loadErr
+	beq loadArmed
+	; A slot the Pi has no level for answers BAD_ARGS (a smaller pack in
+	; the REU): play E1M1 rather than end the game.
+	ldx lvSlot
+	beq +
+	cmp #ERR_BAD_ARGS
+	bne +
+	lda #0
+	sta lvSlot
+	lda #0
+	jsr dmRow
+	jsr dmText
+	.text "GPU64 E1M1 - THAT LEVEL IS NOT LOADED "
+	.byte 0
+	jmp loadLevel
++	jsr showLoadErr
+	jmp finish
+
+loadArmed
+	lda #0
+	sta stepCt
+	sta stepCt+1
+
+stepLoop
+	; Checked, with no arguments: a LEVEL_STEP that arrives with any byte
+	; flipped -- CMD_HI into a class that does not exist was the one that
+	; ended runsim --bus-fault=data:97 at step $1D -- is refused before it
+	; runs and sent again by stage2, where it used to end the program.
+	lda #0
+	sta stId
+	sta stId+1
+	lda #OP_LEVEL_STEP
+	ldx #$ff
+	jsr stage2
+	sta stepErr
+	bne stepFailed
+
+	inc stepCt
+	bne +
+	inc stepCt+1
++
+	; Believed only when two reads agree. A read the loop misses returns the
+	; last bus value, very often $FF -- which is LEVEL_DONE, and runsim
+	; --bus-fault=both:97 duly ended the load after two steps of 29.
+	ldx #8
+-	lda RESULT
+	cmp RESULT
+	beq +
+	dex
+	bne -
++	sta stepPct
+	cmp #LEVEL_DONE
+	beq stepDone
+
+	lda #2
+	jsr dmRow
+	jsr dmText
+	.text "LOAD    "
+	.byte 0
+	lda stepPct
+	jsr dmHexA
+	jmp stepLoop
+
+stepFailed
+	jsr showLoadErr
+	jmp finish
+
+stepDone
+	lda #2
+	jsr dmRow
+	jsr dmText
+	.text "LOAD    DONE IN "
+	.byte 0
+	lda stepCt+1
+	jsr dmHexA
+	lda stepCt
+	jsr dmHexA
+	jsr dmText
+	.text " STEPS"
+	.byte 0
+
+	#id16 CAM_ID
+	lda #OP_SET_ACTIVE_CAMERA
+	jsr cmd1
+	sta camErr
+
+	jsr seedCamera
+
+	; The gun and the status bar take the first actor slots, so entScan's
+	; items and monsters are appended after them.
+	jsr actInit
+
+	; The entity lump, one record at a time. This is the part that makes
+	; the program a game rather than a walk, and it happens exactly once:
+	; after it, nothing in the frame loop reads the level file again.
+	jsr entScan
+	jsr pjInit			; the missiles' slots, after the level's
+	jsr combatInit
+	jsr combatCount
+	jsr aiInit
+
+	; And every level node's position, read back once so the ring below
+	; has something to put back -- see nodeScan.
+	jsr nodeMark
+
+	; Every actor's node, then three blocks to pose them all (a block
+	; carries thirty dirty records; the frame loop would get there too).
+	jsr actCreate
+	jsr worldTick
+	jsr worldTick
+	jsr worldTick
+	jsr mfInit			; the muzzle flash's light node
+
+	lda #0
+	sta ARG+0
+	lda #OP_LOOP_START
+	jsr cmd1
+	sta loopErr
+
+	lda #3
+	jsr dmRow
+	jsr dmText
+	.text "SETUP   "
+	.byte 0
+	lda vpErr
+	ora perErr
+	ora resErr
+	ora camErr
+	ora getErr
+	beq setupOk
+	jsr dmText
+	.text "VP "
+	.byte 0
+	lda vpErr
+	jsr dmHexA
+	jsr dmText
+	.text " PER "
+	.byte 0
+	lda perErr
+	jsr dmHexA
+	jsr dmText
+	.text " RST "
+	.byte 0
+	lda resErr
+	jsr dmHexA
+	jsr dmText
+	.text " CAM "
+	.byte 0
+	lda camErr
+	jsr dmHexA
+	jsr dmText
+	.text " GET "
+	.byte 0
+	lda getErr
+	jsr dmHexA
+	jmp setupShown
+setupOk
+	jsr dmText
+	.text "OK  LOOP "
+	.byte 0
+	lda loopErr
+	jsr dmHexA
+setupShown
+
+	lda #0
+	sta frames
+	sta frames+1
+	sta okFrames
+	sta okFrames+1
+	sta e06
+	sta e06+1
+	sta e07
+	sta e07+1
+	sta eXX
+	sta eXX+1
+	sta xxCode
+	sta missed
+	sta missed+1
+	sta stalls
+	sta dispCt
+	sta dispCt+1
+	sta dispCt+2
+	sta stalls+1
+	ldx #MS_SLOTS-1
+-	sta msCur,x
+	sta msMax,x
+	dex
+	bpl -
+	lda #$ff
+	sta msPerMin
+	lda #1
+	sta dispWait
+	sta hbWait
+	lda #0
+	sta hbBad
+
+	jsr exReset
+	jsr clkInit
+	jsr teleShown
+
+; ======================================================================
+; A frame.
+;
+; The order is not arbitrary. Selection reads the camera BEFORE the move,
+; because the movers whose hulls this frame is traced against have to be in
+; the block the move is asked with. The touch tests run AFTER it, from where
+; the player actually ended up -- standing in a doorway is a fact about the
+; new position, not the old one. Animation is last, so the displacement a
+; door's hull is traced with next frame is the one its node is drawn at this
+; frame, and the two can never disagree by more than the frame they were
+; sent in.
+; ======================================================================
+frame
+	jsr clkPace
+	jsr clkFrame
+	jsr exFrame			; the play time, the message row
+	jsr simWarp
+	jsr moveCamera			; keys -> mov, the requested step
+	jsr gameSelect			; the nearest movers, for the trace
+	jsr clipMove			; the step, collided; updates cam
+	jsr gameTouch			; what the new position opens
+	jsr combatTouch			; what it picks up
+	jsr envFrame			; what it is standing in
+	lda tick			; the rest of the logic runs on ticks
+	beq frNoTick1			; (tickFrame)
+	jsr tickLogic
+	jsr gameAnimate			; state machines, and the new ofs
+frNoTick1
+	ldx #MS_GAME
+	jsr clkLap
+	jsr sendMovers			; SET_POSITION for what moved
+	lda tick
+	beq frNoTick2
+	jsr combatFrame			; weapons, a shot's traces, the HUD
+	jsr aiFrame			; monsters think; their traces and moves
+	jsr actFrame			; animate, repair one, WORLD_TICK
+	jsr combatResolve		; the shot, from the traces' answers
+	jsr aiResolve			; the monsters', from theirs
+frNoTick2
+	jsr sendCamera
+	jsr sendView			; SET_PERSPECTIVE, if + or - moved it
+	jsr doRefresh			; one piece of retained state, re-sent
+	jsr mfFrame			; the muzzle flash
+	ldx #MS_CAM
+	jsr clkLap
+	jsr waitReady
+	ldx #MS_WAIT
+	jsr clkLap
+
+	; Checked like everything stage2 sends; with no ID and no arguments the
+	; check is a constant. A commit whose CMD_LO arrives as some other
+	; opcode is then refused instead of obeyed, and the next frame commits.
+	lda #0
+	sta ID_LO
+	sta ID_HI
+	lda #KEY_CHECKED ^ 1 ^ OP_SCENE_COMMIT
+	sta ARG+14
+	lda #KEY_CHECKED
+	sta ARG+15
+	lda #OP_SCENE_COMMIT
+	jsr cmdSeq1
+	ldx #MS_CMT
+	jsr clkLap
+	lda seqErr
+	beq frOk
+
+	cmp #ERR_BUSY
+	bne frNot07
+	inc e07
+	bne frCount
+	inc e07+1
+	jmp frCount
+frNot07
+	cmp #ERR_UNSUPPORTED
+	bne frNotXX
+	inc e06
+	bne frCount
+	inc e06+1
+	jmp frCount
+frNotXX
+	sta xxCode
+	inc eXX
+	bne frCount
+	inc eXX+1
+	jmp frCount
+frOk
+	inc okFrames
+	bne frCount
+	inc okFrames+1
+frCount
+	inc frames
+	bne +
+	inc frames+1
++
+	dec hbWait
+	bne frNoHealth
+	jsr doHealth
+	ldx #MS_HB
+	jsr clkLap
+frNoHealth
+
+	lda SIM_TELE
+	cmp #SIM_TELE_ON
+	bne +
+	sta teleOn			; (non-zero)
++	lda teleOn
+	beq frNoShow
+	jsr showSlice
+	ldx #MS_DISP
+	jsr clkLap
+frNoShow
+
+	lda exitHit
+	beq +
+	jsr intermission		; the exit: stats, then the level again
++	jsr pauseCheck			; <-: the pause menu
+	lda SIM_EXIT
+	cmp #SIM_EXIT_ON
+	beq frStopKey
+	lda #0
+	sta stopHold
+	jmp frame
+frStopKey
+	inc stopHold
+	lda stopHold
+	cmp #STOP_HOLD
+	bcs frDone
+	jmp frame
+frDone
+	jmp finish
+
+; ======================================================================
+; Shutting down. LOOP_STOP is what hands the framebuffer back.
+; ======================================================================
+finish
+	jsr sfxOff
+	lda #1
+	sta CMD_HI
+	ldx #8
+fnStop
+	lda #KEY_DESTRUCTIVE
+	sta ARG+15
+	lda #OP_LOOP_STOP
+	jsr cmdSeq1
+	lda seqMiss
+	beq fnStopped
+	dex
+	bne fnStop
+fnStopped
+	stx stopTry
+
+	lda #0
+	sta CMD_HI
+
+	jsr showFrame
+
+	lda #1
+	jsr dmRow
+	jsr dmText
+	.text "STOPPED"
+	.byte 0
+
+	; The simulator's release, then its second press: runsim counts the
+	; column-7 reads readKeys makes, so the schedule advances here too.
+	; Not after the intermission: its matrix scans have run the whole
+	; schedule through already, and the key reads down for good.
+	lda fnQuick
+	bne fnOut
+-	jsr readKeys
+	lda SIM_EXIT
+	cmp #SIM_EXIT_ON
+	beq -
+-	jsr readKeys
+	lda SIM_EXIT
+	cmp #SIM_EXIT_ON
+	bne -
+fnOut
+	jsr $e544
+	lda #$37			; BASIC back: title banked it out
+	sta $01
+	rts
+
+; ======================================================================
+; The camera. THE C64 OWNS IT -- see gpu64_demo_level.a for why every send
+; is absolute and never a delta. Nothing here is different in this program;
+; what is different is that the world it walks through now moves.
+; ======================================================================
+
+seedCamera
+	jsr setDmaWin
+
+	ldx #4
+scGet
+	stx getTry
+
+	lda #$a5
+	ldy #CAM_BUF_LEN-1
+-	sta camBuf,y
+	dey
+	bpl -
+
+	#id16 CAM_ID
+	#argblob 0, SPACE_C64, camBuf, CAM_BUF_LEN
+	lda #OP_GET_TRANSFORM
+	jsr cmd1
+	sta getErr
+	bne scRetry
+
+	lda camBuf+14
+	ora camBuf+15
+	ora camBuf+16
+	ora camBuf+17
+	beq scGot
+	lda #$ff
+	sta getErr
+scRetry
+	ldx getTry
+	dex
+	bne scGet
+	rts
+
+scGot
+	ldx #11
+-	lda camBuf,x
+	sta cam,x
+	sta lastGood,x
+	dex
+	bpl -
+	lda camBuf+12
+	sta camYaw
+	lda camBuf+13
+	sta camYaw+1
+	rts
+
+; The readback fence, with its echo checked and three tries. Also a refresh
+; ring entry: a phantom SET_DMA_WINDOW would aim the next health block at
+; this program's code, and nothing else would ever move the window back.
+; Returns with CMD_HI = 0; every caller's next command is a cmd1, which sets
+; it again.
+setDmaWin
+	ldx #3
+scFence
+	stx fenceTry
+	#argw 0, healthBuf
+	#argw 2, DMA_LEN
+	lda #OP_SET_DMA_WINDOW
+	jsr cmdClass0
+	sta fenceErr
+	lda RESULT
+	sta fenceEcho
+	cmp #FENCE_ECHO
+	beq scFenced
+	ldx fenceTry
+	dex
+	bne scFence
+scFenced
+	rts
+
+moveCamera
+	jsr readKeys
+	jsr deadKeys
+	jsr viewKeys
+	jsr mouseLook
+
+	lda #0
+	ldx #11
+-	sta mov,x
+	dex
+	bpl -
+
+	lda walkStep
+	sta stepLo
+	lda keyB
+	and #KB_LSH
+	bne mcStepSet
+	lda runStep
+	sta stepLo
+mcStepSet
+	jsr swimCheck			; waist deep: a slower step, no gravity
+
+	; SPACE jumps, once per press and only from the ground. It must read
+	; down JUMP_HOLD frames in a row first: column 7 is sampled once a
+	; frame, and a single phantom sample is exactly what ended run 38.
+	lda keyD
+	and #KD_SPC
+	beq mcSpcDown
+	lda #0
+	sta spcHold
+	beq mcJumpDone
+mcSpcDown
+	lda swimming
+	bne mcJumpDone			; in the water SPACE swims up
+	lda spcHold
+	cmp #JUMP_HOLD
+	bcs mcJumpDone			; held: one jump per press
+	inc spcHold
+	lda spcHold
+	cmp #JUMP_HOLD
+	bne mcJumpDone
+	lda onGround
+	beq mcJumpDone
+	lda #<JUMP_V
+	sta velY
+	lda #>JUMP_V
+	sta velY+1
+	lda #0
+	sta onGround
+	lda #1
+	sta jumping
+	lda #SFX_JUMP
+	jsr sfxPlay
+	inc jumps
+mcJumpDone
+
+	lda keyB
+	and #KB_A
+	bne mcNotLeft
+	sec
+	lda camYaw
+	sbc turnD
+	sta camYaw
+	lda camYaw+1
+	sbc turnD+1
+	sta camYaw+1
+mcNotLeft
+	lda keyC
+	and #KC_D
+	bne mcNotRight
+	clc
+	lda camYaw
+	adc turnD
+	sta camYaw
+	lda camYaw+1
+	adc turnD+1
+	sta camYaw+1
+mcNotRight
+
+	lda keyB
+	and #KB_W
+	bne mcNotFwd
+	lda #0
+	sta dirNeg
+	jsr mcWalk
+mcNotFwd
+	lda keyB
+	and #KB_S
+	bne mcNotBack
+	lda #1
+	sta dirNeg
+	jsr mcWalk
+mcNotBack
+	lda keyD
+	and #KD_Q
+	bne mcNotStrafeL
+	lda #1
+	sta dirNeg
+	jsr mcStrafe
+mcNotStrafeL
+	lda keyB
+	and #KB_E
+	bne mcNotStrafeR
+	lda #0
+	sta dirNeg
+	jsr mcStrafe
+mcNotStrafeR
+
+	; The vertical step is the velocity, scaled by the frame time and
+	; sign-extended into the 16.16 delta. Standing, velY is VEL_MIN -- the
+	; same FALL_16 probe every frame that there always was, which is what
+	; makes the floor settle find the floor -- so nothing about walking
+	; changed when the jump arrived.
+	lda velY
+	sta mA
+	lda velY+1
+	sta mA+1
+	jsr dtMulS
+	; Added, not stored: a swimmer's walk has already put the pitch's
+	; share of the step into mov's y.
+	ldx #0
+	lda dtR+2
+	bpl +
+	dex
++	clc
+	lda dtR
+	adc mov+CAM_Y+0
+	sta mov+CAM_Y+0
+	lda dtR+1
+	adc mov+CAM_Y+1
+	sta mov+CAM_Y+1
+	lda dtR+2
+	adc mov+CAM_Y+2
+	sta mov+CAM_Y+2
+	txa
+	adc mov+CAM_Y+3
+	sta mov+CAM_Y+3
+
+	lda swimming
+	beq +
+	rts				; swimCheck has set velY already
++
+
+	; Gravity, down to terminal speed. Signed 16-bit: subtract, then clamp
+	; anything below VEL_MIN (or wrapped past it) back to VEL_MIN.
+	sec
+	lda velY
+	sbc gravD
+	sta velY
+	lda velY+1
+	sbc gravD+1
+	sta velY+1
+	bvs mcClamp			; wrapped past -32768
+	bpl mcGravDone			; still rising, or zero-ish
+	cmp #>VEL_MIN
+	bcc mcClamp
+	bne mcGravDone
+	lda velY
+	cmp #<VEL_MIN
+	bcs mcGravDone
+mcClamp
+	lda #<VEL_MIN
+	sta velY
+	lda #>VEL_MIN
+	sta velY+1
+mcGravDone
+	rts
+
+; ======================================================================
+; CLIP_MOVE, with movers.
+;
+; The block is the level demo's, plus selCnt 16-byte records at CLIP_MVOFF
+; and a checksum that now covers them: the count byte, bytes 0..27, and
+; every mover byte. A door whose record is lost is a door you walk through
+; -- which is exactly why the checksum was widened rather than left over
+; the fixed half.
+;
+; A rejected answer is retried up to CLIP_TRIES times and only then allowed
+; to do nothing. The Pi never writes the input half, so a retry is the six
+; register writes of the descriptor plus the dispatch; run 37 rejected 61% of
+; this program's answers, three times the level demo's rate, which is a lot
+; of frames to stand still for when the retry is that cheap.
+; ======================================================================
+clipMove
+	ldx #11
+-	lda cam,x
+	sta clipBlk,x
+	lda mov,x
+	sta clipBlk+12,x
+	dex
+	bpl -
+
+	lda #CLIP_HULL_PLAYER
+	sta clipBlk+CLIP_HULL
+	; A jump flies until it lands: no step-up (which would climb a ledge
+	; the jump did not reach) and no floor settle (which traces down 18
+	; units and would snap a rising player straight back onto the floor).
+	lda #CLIP_MODE_WALK
+	ldx jumping
+	beq +
+	lda #CLIP_MODE_AIR
++	ldx swimming
+	beq +
+	lda #CLIP_MODE_SWIM
++	sta clipBlk+CLIP_MODE
+	lda #0
+	sta clipBlk+CLIP_MODEL		; the world, plus the movers below
+	sta clipBlk+CLIP_MVOFF-2	; the two reserved bytes, which the
+	sta clipBlk+CLIP_MVOFF-1	; Pi neither reads nor sums
+	lda #CLIP_IN_M
+	sta clipBlk+CLIP_MAGIC
+
+	jsr buildMovers
+
+	lda clipBlk+CLIP_MOVERS
+	ldx #0
+-	eor clipBlk,x
+	inx
+	cpx #CLIP_CHECK
+	bne -
+	eor bmChk			; the mover bytes: buildMovers XORed
+	sta clipChk			; them as it copied (the zeroes add
+	sta clipBlk+CLIP_CHECK		; nothing)
+
+	ldx #CLIP_TRIES
+	stx cmTry
+cmSend
+	lda #$a5
+	ldx #CLIP_OUT
+-	sta clipBlk,x
+	inx
+	cpx #CLIP_MVOFF
+	bne -
+
+	#argblob 0, SPACE_C64, clipBlk, CLIP_LEN
+	lda #OP_CLIP_MOVE
+	jsr cmd1
+	sta clipErr
+
+	; ERRCODE is a diagnostic here and never a verdict. It is one register
+	; read, and a register read that fails hands back whatever was last on
+	; the bus rather than an error (gpu64-errcode-ff-is-the-bus), so
+	; treating a garbled read as a refusal throws away good answers --
+	; which is how run 27 died. When the command really WAS refused the Pi
+	; wrote nothing, the poison is still in place, and the magic test below
+	; catches it anyway. docs/class1-3d-mesh-reference.md says exactly
+	; this: check the block, not ERRCODE.
+	cmp #0
+	beq cmErrOK
+	inc clipN
+	bne cmErrOK
+	inc clipN+1
+cmErrOK
+	lda clipBlk+CLIP_OMAGIC
+	cmp #CLIP_OUT_M
+	beq cmMagOK
+	inc clipM
+	bne cmAgain
+	inc clipM+1
+	jmp cmAgain
+cmMagOK
+	lda #0
+	ldx #CLIP_OUT
+-	eor clipBlk,x
+	inx
+	cpx #CLIP_OCHECK
+	bne -
+	cmp clipBlk+CLIP_OCHECK
+	beq cmSumOK
+	inc clipS
+	bne cmAgain
+	inc clipS+1
+	jmp cmAgain
+cmSumOK
+
+	lda clipBlk+CLIP_OFLAGS
+	sta clipFlags
+	lda clipBlk+CLIP_OCONT
+	sta clipCont
+	lda clipBlk+CLIP_OFRAC
+	sta clipFrac
+	lda clipBlk+CLIP_OBUMPS
+	sta clipBumps
+	; The water level rides outside the checksum (it came later), so it
+	; carries its own complement; a pair that fails keeps last frame's.
+	lda clipBlk+CLIP_OWL
+	cmp #4
+	bcs +
+	eor #$ff
+	cmp clipBlk+CLIP_OWLC
+	bne +
+	eor #$ff
+	jsr setWater
++	jmp cmTake
+
+	; The Pi never touches the input half, so another try is the six
+	; register writes of the descriptor plus the dispatch -- far cheaper
+	; than a frame of standing still, and at run 37's fault rate the
+	; second try is usually the one that lands. Only the poison has to be
+	; laid down again, which is why cmSend is where it is.
+cmAgain
+	dec cmTry
+	beq cmDry
+	jmp cmSend
+cmWild
+	lda clipWild
+	cmp #$ff
+	beq cmDry
+	inc clipWild
+	; A frame with no answer taken is a frame the player could not move.
+	; DRY on row 19 is how many of those in a row, and its worst: run 40
+	; lost movement for good after a minute, and a photo of two running
+	; totals could not say whether CLIP_MOVE had stopped answering or the
+	; player was standing somewhere nothing could leave.
+cmDry
+	inc clipDry
+	bne +
+	dec clipDry			; saturates at 255
++	lda clipDry
+	cmp clipDryMax
+	bcc +
+	sta clipDryMax
++	rts
+
+cmTake
+	; Inside solid is not a move to refuse, it is a place to leave. Run 38
+	; skipped a STARTSOLID answer and took an ALLSOLID one, and either way
+	; the eye stayed where it was -- forever, because the next question
+	; starts from the same place. Quake's SV_CheckStuck puts the player
+	; back where they last stood, and so does this.
+	;
+	; Once is a bad answer and lastGood fixes it. Again straight after is
+	; a place that has itself become solid, and the route found the case:
+	; door 29 is a lift that lowers, the player rides it down, and when it
+	; shuts it rises straight through them. Quake's mover would carry the
+	; player up; the Pi's does not push, so the client climbs: every
+	; further stuck frame puts the eye CLIMB higher above lastGood, until
+	; an answer comes back clear and the floor settle stands them on top.
+	lda clipFlags
+	and #CLIP_SOLID
+	beq cmNotSolid
+	inc clipStuck
+	bne +
+	dec clipStuck			; saturate at $ff
++	lda stuckRun
+	cmp #CLIMB_MAX
+	bcc +
+	lda #0				; nothing above either: start over
+	sta stuckRun
++	inc stuckRun
+	jsr restoreGood
+	; cam.y += (stuckRun - 1) * CLIMB, CLIMB = $80 in byte 1
+	ldx stuckRun
+	dex
+	txa
+	lsr a
+	sta cbD1			; high: n >> 1
+	lda #0
+	ror a				; low: (n & 1) << 7
+	clc
+	adc cam+CAM_Y+1
+	sta cam+CAM_Y+1
+	lda cbD1
+	adc cam+CAM_Y+2
+	sta cam+CAM_Y+2
+	lda #0
+	adc cam+CAM_Y+3
+	sta cam+CAM_Y+3
+	rts
+cmNotSolid
+	lda #0
+	sta stuckRun
+
+	jsr cmBound
+	bcs cmWild
+	lda #0
+	sta clipDry
+
+	; The answer is taken, so the question's start was not in solid: if
+	; the player was standing there, it is a place to come back to.
+	lda onGround
+	beq cmNoSave
+	ldx #11
+-	lda cam,x
+	sta lastGood,x
+	dex
+	bpl -
+cmNoSave
+
+	ldx #11
+-	lda clipBlk+CLIP_OUT,x
+	sta cam,x
+	dex
+	bpl -
+
+	; Landing. ONGROUND only counts on the way down: a rising jump that
+	; grazes a step edge is still a jump.
+	lda clipFlags
+	and #CLIP_ONGROUND
+	beq cmAir
+	lda velY+1
+	bpl cmAir
+	lda swimming
+	bne cmSwimFloor
+	lda #1
+	sta onGround
+	lda #0
+	sta jumping
+	sta airFrames
+	lda #<VEL_MIN
+	sta velY
+	lda #>VEL_MIN
+	sta velY+1
+	rts
+	; A swimmer on the bottom just stops sinking. The walker's landing
+	; would set the fall probe, and swimCheck's average would never climb
+	; back out of it: SPACE could not lift a swimmer off the floor.
+cmSwimFloor
+	lda #0
+	sta velY
+	sta velY+1
+	sta airFrames
+	rts
+cmAir
+	lda #0
+	sta onGround
+	; A head hit ends the rise; the fall that follows is ordinary.
+	lda clipFlags
+	and #CLIP_CEILING
+	beq +
+	lda velY+1
+	bmi +
+	lda #0
+	sta velY
+	sta velY+1
++
+	; Swimming is not falling: the void count is for a player with nothing
+	; under them, and a swimmer may never touch the bottom at all.
+	lda swimming
+	beq +
+	lda #0
+	sta airFrames
+	rts
++
+	; The void. Outside the map's hull nothing is solid and nothing is a
+	; floor, so the player falls at terminal speed for the rest of the
+	; session -- run 39's black HDMI screen with the C64 still counting,
+	; at Y -205. No real drop in E1M1 takes VOID_FRAMES. Counted in
+	; ticks, so the limit is the same time at any frame rate.
+	lda tick
+	beq cmDone
+	inc airFrames
+	lda airFrames
+	cmp #VOID_FRAMES
+	bcc cmDone
+	inc clipVoid
+	bne restoreGood
+	dec clipVoid
+	jmp restoreGood
+cmDone
+	rts
+
+; Back to the last place the player stood, standing still. Also what a
+; bad start does to anything in flight.
+restoreGood
+	ldx #11
+-	lda lastGood,x
+	sta cam,x
+	dex
+	bpl -
+	lda #<VEL_MIN
+	sta velY
+	lda #>VEL_MIN
+	sta velY+1
+	lda #0
+	sta jumping
+	sta airFrames
+	sta onGround
+	rts
+
+
+; ======================================================================
+; Bound the answer by the question.
+;
+; An answer that passes its checksum and is still wrong is not a one-frame
+; glitch. cam is authoritative, nothing in this program ever contradicts it,
+; and a corrupted coordinate is therefore the rest of the session. That is
+; what run 36 looked like: the eye 222 world units outside E1M1, y and z
+; still exactly at the spawn, x $000F arriving as $FF0F -- one byte -- and
+; the picture a level seen from the outside, with the player never having
+; touched a key.
+;
+; An 8-bit XOR over seventeen bytes cannot prevent that on its own. It
+; passes about one corrupted block in 256, and that run had the checksum
+; reject 67 blocks in 345 frames, so one silent acceptance in a session is
+; the expected outcome rather than bad luck. A wider checksum would only
+; move the exponent.
+;
+; So this is a different KIND of check, not a stronger hash: a move cannot
+; end further from where it started than the step that was asked for, plus
+; the step-up the trace is allowed to add on its own. The question bounds
+; the answer, and the bound is exact rather than probabilistic.
+;
+; Run 38's version compared whole units with two of slop, which let a bad
+; answer move the player 64 Quake units a frame and still be taken -- run
+; 39's player drifting on its own, and at least once through a floor. This
+; one works in 1/256ths of a unit (bytes 1..3 of the 16.16 values, so the
+; lowest byte is the only thing ignored) with POS_SLOP_XZ / POS_SLOP_Y.
+;
+; Carry clear = plausible, and cam may take it.
+; ======================================================================
+cmBound
+	ldx #0
+cbAxis
+	; d = |end - start| over bytes 1..3; anything that does not fit in
+	; 16 bits of 1/256ths (256 units) fails outright
+	sec
+	lda clipBlk+CLIP_OUT+1,x
+	sbc cam+1,x
+	sta cbD0
+	lda clipBlk+CLIP_OUT+2,x
+	sbc cam+2,x
+	sta cbD1
+	lda clipBlk+CLIP_OUT+3,x
+	sbc cam+3,x
+	bpl cbDPos
+	; negate the 24-bit value; its top byte must become 0
+	eor #$ff
+	sta cbD2
+	lda cbD0
+	eor #$ff
+	clc
+	adc #1
+	sta cbD0
+	lda cbD1
+	eor #$ff
+	adc #0
+	sta cbD1
+	lda cbD2
+	adc #0
+cbDPos
+	bne cbFail
+
+	; m = |delta| + slop, the same bytes. A step is well under a unit, so
+	; the delta's top byte is sign only.
+	lda mov+1,x
+	sta cbM0
+	lda mov+2,x
+	sta cbM1
+	lda mov+3,x
+	bpl cbMPos
+	sec
+	lda #0
+	sbc cbM0
+	sta cbM0
+	lda #0
+	sbc cbM1
+	sta cbM1
+cbMPos
+	clc
+	lda cbM0
+	adc cbSlopLo,x
+	sta cbM0
+	lda cbM1
+	adc cbSlopHi,x
+	sta cbM1
+
+	; Reject when m < d.
+	lda cbM0
+	cmp cbD0
+	lda cbM1
+	sbc cbD1
+	bcc cbFail
+
+	inx
+	inx
+	inx
+	inx
+	cpx #12
+	beq +
+	jmp cbAxis
++	clc
+	rts
+cbFail
+	sec
+	rts
+
+; Indexed by the axis offset 0/4/8: x, y, z.
+cbSlopLo	.byte <POS_SLOP_XZ, 0, 0, 0, <POS_SLOP_Y, 0, 0, 0, <POS_SLOP_XZ
+cbSlopHi	.byte >POS_SLOP_XZ, 0, 0, 0, >POS_SLOP_Y, 0, 0, 0, >POS_SLOP_XZ
+
+; The mover records themselves. X walks the block byte by byte and Y the
+; mover table, so the record layout below reads in the order
+; docs/class1-3d-mesh-reference.md tabulates it.
+;
+; Only when they changed: gameSelect chose again or a mover moved
+; (mulOfs). The Pi writes no further into the block than CLIP_MVOFF, and
+; gameSelect's every-other-frame rebuild bounds what a stray write could
+; spoil to one frame, which the block's check refuses anyway.
+buildMovers
+	lda bmStale
+	bne +
+	rts
++	lda #0
+	sta bmStale
+	lda selCnt
+	sta clipBlk+CLIP_MOVERS
+	lda #0
+	sta bmChk			; the XOR of every byte copied below
+	ldx #0				; byte offset into the array
+	ldy #0				; which selected mover
+bmLoop
+	cpy selCnt
+	bne +
+	rts
++
+	sty bldIx
+	lda selIdx,y
+	tay				; Y is now the mover table index
+
+	lda mvModel,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+	lda #0
+	sta clipBlk+CLIP_MVOFF,x	; flags, reserved
+	inx
+	sta clipBlk+CLIP_MVOFF,x
+	inx
+	sta clipBlk+CLIP_MVOFF,x
+	inx
+
+	lda mvOX0,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+	lda mvOX1,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+	lda mvOX2,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+	lda mvOX3,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+
+	lda mvOY0,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+	lda mvOY1,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+	lda mvOY2,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+	lda mvOY3,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+
+	lda mvOZ0,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+	lda mvOZ1,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+	lda mvOZ2,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+	lda mvOZ3,y
+	sta clipBlk+CLIP_MVOFF,x
+	eor bmChk
+	sta bmChk
+	inx
+
+	ldy bldIx
+	iny
+	jmp bmLoop
+
+; Bench run 38b: one bad sample of a key ended the game with nobody
+; touching the keyboard -- the frozen HDMI "hang" -- and bad samples of
+; MINUS narrowed the FOV twice. So each column is read twice and a key
+; (a 0 bit) is down only if BOTH reads say so; the keys whose effect
+; lasts are also held for several frames first (viewKeys, combatFrame).
+;
+; Both control ports share the matrix. Port 1 (the mouse) drives the ROW
+; lines, so whatever it pulls low reads as held in every column: those
+; rows are masked out of every column below. Port 2 (the joystick) drives
+; the COLUMN lines, so a direction held with a key in its column ghosts
+; that key into every scan: while the stick is off centre the keyboard is
+; ignored and the stick alone steers.
+readKeys
+	; Not within MOUSE_RKWAIT pages of a mouse sample: wait the IRQ out
+	; instead, so the scan below cannot make it skip. Timer A reloads at
+	; the IRQ either way, so this ends even with interrupts off.
+-	lda CIA1_TAHI
+	cmp #MOUSE_RKWAIT
+	bcc -
+	sei
+	lda #$ff
+	sta $dc02
+	lda #$00
+	sta $dc03
+
+	; Timer A before the scan, for the guard at the end.
+	lda CIA1_TAHI
+	sta rkTimer
+
+	; Is there a mouse? Only every MOUSE_PROBE frames until there is: with
+	; nothing in port 1 both pots read $ff, and a 1351 never reads that.
+	; After that mouseIrq does all the reading, and
+	; potSync makes its first reading the reference, so being found does
+	; not turn the view.
+	lda mouseSeen
+	bne rkNoPots
+	dec mouseProbe
+	bpl rkNoPots
+	lda #MOUSE_PROBE - 1
+	sta mouseProbe
+	lda POT_X
+	and POT_Y
+	cmp #$ff
+	beq rkNoPots
+	inc mouseSeen
+	lda #1
+	sta potSync
+rkNoPots
+
+	; Port 1 with no column selected.
+	lda #$ff
+	sta CIA_PRA
+	lda CIA_PRB
+	sta port1
+	eor #$ff
+	sta p1Mask
+
+	lda #COL_B
+	sta CIA_PRA
+	lda CIA_PRB
+	ora CIA_PRB
+	ora p1Mask
+	sta keyB
+	lda #COL_C
+	sta CIA_PRA
+	lda CIA_PRB
+	ora CIA_PRB
+	ora p1Mask
+	sta keyC
+	lda #COL_D
+	sta CIA_PRA
+	lda CIA_PRB		; once: one column-7 read a frame is what
+	ora p1Mask		; runsim's --stop-after and check_game.py
+	sta keyD		; count by
+	lda #COL_A
+	sta CIA_PRA
+	lda CIA_PRB
+	ora CIA_PRB
+	ora p1Mask
+	sta keyA
+	lda #COL_E
+	sta CIA_PRA
+	lda CIA_PRB
+	ora CIA_PRB
+	ora p1Mask
+	sta keyE
+	lda #COL_F
+	sta CIA_PRA
+	lda CIA_PRB
+	ora CIA_PRB
+	ora p1Mask
+	sta keyF
+	lda #COL_G
+	sta CIA_PRA
+	lda CIA_PRB
+	ora CIA_PRB
+	ora p1Mask
+	sta keyG
+	lda #COL_H
+	sta CIA_PRA
+	lda CIA_PRB
+	ora CIA_PRB
+	ora p1Mask
+	sta keyH
+
+	lda #$ff
+	sta CIA_PRA
+	lda CIA_PRA		; joystick 2, with no column selected
+	sta joy2
+	lda #COL_POT1		; port 1's pots measure until the next frame
+	sta CIA_PRA
+	; The scan disconnected port 1 (COL_H). If the next IRQ's sample would
+	; fall inside the settling time, or that IRQ is already pending -- the
+	; timer reloaded during the scan, so it reads higher than before --
+	; it skips.
+	lda CIA1_TAHI
+	cmp #MOUSE_SETTLE
+	bcc rkSkip
+	lda rkTimer
+	cmp CIA1_TAHI
+	bcs rkCli
+rkSkip
+	lda #1
+	sta potSkip
+rkCli
+	cli
+
+	; The controls menu's bindings, onto the default keys' bits -- so
+	; everything below and after reads W/S/A/D/Q/E/SHIFT/SPACE as before.
+	; Before the stick, which replaces the keyboard with those same bits.
+	jsr kbRemap
+
+	; The stick: off centre, it replaces the keyboard.
+	lda joy2
+	and #$0f
+	cmp #$0f
+	beq rkNoStick
+	lda #$ff
+	sta keyA
+	sta keyB
+	sta keyC
+	sta keyE
+	sta keyF
+	sta keyD
+	lda joy2
+	lsr a
+	bcs +
+	lda keyB
+	and #$ff ^ KB_W
+	sta keyB
++	lda joy2
+	and #$02
+	bne +
+	lda keyB
+	and #$ff ^ KB_S
+	sta keyB
++	lda joy2
+	and #$04
+	bne +
+	lda keyB
+	and #$ff ^ KB_A
+	sta keyB
++	lda joy2
+	and #$08
+	bne rkNoStick
+	lda keyC
+	and #$ff ^ KC_D
+	sta keyC
+rkNoStick
+
+	; Fire: the mouse's button, the stick's, B or C=. A key in a matrix
+	; can be a ghost -- three held keys on three corners of a rectangle
+	; make the fourth read as held -- so B and C= count only if they are
+	; alone in their column or alone in their row.
+	lda #0
+	sta fireDown
+	lda port1
+	and #$10
+	bne +
+	inc fireDown
++	lda joy2
+	and #$10
+	bne +
+	inc fireDown
++
+	lda keyF
+	and #KF_B
+	bne rkNoB
+	lda keyF
+	ora #KF_B
+	cmp #$ff
+	beq rkB
+	lda keyA
+	and keyB
+	and keyC
+	and keyD
+	and keyE
+	and #KF_B
+	beq rkNoB
+rkB	inc fireDown
+rkNoB
+	lda keyD
+	and #KD_CBM
+	bne rkNoCbm
+	lda keyD
+	ora #KD_CBM
+	cmp #$ff
+	beq rkCbm
+	lda keyA
+	and keyB
+	and keyC
+	and keyE
+	and keyF
+	and #KD_CBM
+	beq rkNoCbm
+rkCbm	inc fireDown
+rkNoCbm
+	rts
+
+; The mouse: turn by POT X, look up and down by POT Y, from what mouseIrq
+; has gathered since the last frame, both scaled by the controls menu's
+; MOUSE SPEED. Taken while dead too, and dropped, like the keys
+; (deadKeys). An odd POT Y count stays behind for the next frame, so slow
+; movement is halved evenly in both directions.
+mouseLook
+	php
+	sei
+	lda accX
+	sta mdLo
+	lda accX+1
+	sta mdHi
+	lda accY
+	sta mdY
+	and #1
+	sta accY
+	lda #0
+	sta accX
+	sta accX+1
+	plp
+	lda plDead
+	bne mlDone
+
+	lda mdHi			; |counts| <= MOUSE_YCAP
+	beq mlPos
+	cmp #$ff
+	bne mlSat
+	lda mdLo
+	cmp #256-MOUSE_YCAP
+	bcs mlYaw
+	bcc mlSat
+mlPos
+	lda mdLo
+	cmp #MOUSE_YCAP+1
+	bcc mlYaw
+mlSat
+	lda mdHi
+	bmi +
+	lda #MOUSE_YCAP
+	ldx #0
+	beq ++
++	lda #256-MOUSE_YCAP
+	ldx #$ff
++	sta mdLo
+	stx mdHi
+mlYaw
+	ldx mouseSens			; yaw += counts * msYaw, modulo a turn
+	lda msYaw,x
+	jsr msMul16
+	clc
+	lda camYaw
+	adc msRLo
+	sta camYaw
+	lda camYaw+1
+	adc msRHi
+	sta camYaw+1
+
+	jsr msPitch			; mdY, scaled: the change in pitch
+	clc
+	adc camPitch			; 63 + PITCH_LIM < 128: no overflow
+	bmi mlNeg
+	cmp #PITCH_LIM+1
+	bcc mlSet
+	lda #PITCH_LIM
+	bne mlSet
+mlNeg
+	cmp #256-PITCH_LIM
+	bcs mlSet
+	lda #256-PITCH_LIM
+mlSet
+	sta camPitch
+mlDone
+	rts
+	.cerror PITCH_LIM > 64, "mouseLook's pitch sum can overflow"
+
+
+; One sample, from sfxIrq on every IRQ. Runs with the IRQ's registers
+; saved; uses A, X, Y.
+mouseIrq
+	ldy potSkip			; readKeys' verdict on this sample
+	lda #0
+	sta potSkip
+	lda mouseSeen
+	beq miDone
+	tya
+	bne miDone
+	lda POT_X
+	sta potX
+	lda POT_Y
+	sta potY
+	and potX
+	cmp #$ff
+	beq miDone			; port 1 off, or no mouse: both read $ff
+	lda potSync
+	beq miDelta
+	lda #0
+	sta potSync
+	lda potX
+	sta potOld
+	lda potY
+	sta potOld+1
+miDone
+	rts
+miDelta
+	ldx #0
+	lda potX
+	jsr mouseDelta
+	jsr mouseGuard
+	jsr mouseAccel
+	ldy #0
+	cmp #$80
+	bcc +
+	dey
++	clc
+	adc accX
+	sta accX
+	tya
+	adc accX+1
+	sta accX+1
+	ldx #1
+	lda potY
+	jsr mouseDelta
+	clc
+	adc accY
+	bvc +				; saturates: a pitch past the limit anyway
+	lda #$7f
+	bit accY
+	bpl +
+	lda #$80
++	sta accY
+	rts
+
+; A = signed X counts of one sample, -32..31. Returns them accelerated,
+; -88..88, in A with the flags of A.
+mouseAccel
+	sta maSign
+	bpl +
+	eor #$ff
+	clc
+	adc #1
++	cmp #MOUSE_ACC_T+1
+	bcc maSigned
+	sta maTmp			; |d| + 2(|d| - T) = 3|d| - 2T
+	asl a
+	adc maTmp			; |d| <= 32: the asl left C clear
+	sec
+	sbc #2*MOUSE_ACC_T
+maSigned
+	bit maSign
+	bpl +
+	eor #$ff
+	clc
+	adc #1
++	ora #0
+	rts
+
+; A = signed X counts of one sample. A sample that reverses the previous
+; one outright, both at least about MOUSE_REV counts, is taken for a wrap:
+; a hand cannot turn a fast move round within one sample, but a move
+; just past 31 counts reads as exactly that. The previous counts stand in
+; for it, at most MOUSE_HOLD times running: a flick past the limit keeps
+; turning the way it went, and a real reversal is late by that many
+; samples (133 ms) at worst and never refused -- one that slows down on
+; the way, as a hand does, is not late at all.
+mouseGuard
+	sta mgCur
+	eor mgPrev
+	bpl mgTake			; the same way
+	lda mgCur
+	bpl +
+	eor #$ff			; |counts| - 1
++	cmp #MOUSE_REV
+	bcc mgTake
+	lda mgPrev
+	bpl +
+	eor #$ff
++	cmp #MOUSE_REV
+	bcc mgTake
+	lda mgRun
+	cmp #MOUSE_HOLD
+	bcs mgTake
+	inc mgRun
+	lda mgPrev
+	rts
+mgTake
+	lda #0
+	sta mgRun
+	lda mgCur
+	sta mgPrev
+	rts
+
+; Whatever moved before now is forgotten, and the next sample is only the
+; reference. sfxInit calls it: while the IRQ was out, nothing was sampled.
+mouseReset
+	php
+	sei
+	lda #1
+	sta potSync
+	lda #0
+	sta potSkip
+	sta mgPrev
+	sta mgRun
+	sta accX
+	sta accX+1
+	sta accY
+	plp
+	rts
+
+; The 1351's own recipe. A = the new pot reading, X = 0 (X) or 1 (Y).
+; Bits 6-1 carry the position modulo 64 and bit 0 is noise, so the
+; difference is taken in seven bits, and its top bit is the sign. Returns
+; the signed movement in A; a reading that moved nothing is not kept, so
+; the noise bit cannot creep.
+mouseDelta
+	sta potNew
+	sec
+	sbc potOld,x
+	and #%01111111
+	cmp #%01000000
+	bcs mdNeg
+	lsr a
+	beq mdNone
+	bne mdKeep
+mdNeg
+	ora #%11000000
+	cmp #$ff
+	beq mdNone
+	sec
+	ror a
+mdKeep
+	tay
+	lda potNew
+	sta potOld,x
+	tya
+	rts
+mdNone
+	lda #0
+	rts
+
+; Freeze diagnostics. A BRK -- which is what a derailed 6502 usually runs
+; into, and what used to drop this program to READY -- prints BRK and its
+; address on row 0 and stops there. RESTORE prints NMI, the address the
+; 6502 was interrupted at and a count of presses, then carries on: pressed
+; a few times on a frozen screen, it says which loop the program is stuck
+; in. No answer to RESTORE at all means the 6502 is not running.
+trapInit
+	lda #<brkTrap
+	sta $0316
+	lda #>brkTrap
+	sta $0317
+	lda #<nmiTrap
+	sta $0318
+	lda #>nmiTrap
+	sta $0319
+	rts
+
+; Reached through the KERNAL's IRQ entry, which has pushed A, X and Y on
+; top of BRK's P and return address; the return address is the BRK + 2.
+brkTrap
+	tsx
+	sec
+	lda $0105,x
+	sbc #2
+	sta trapPc
+	lda $0106,x
+	sbc #0
+	sta trapPc+1
+	ldy #0
+	jsr trapShow
+-	jmp -
+
+; The KERNAL's NMI entry is SEI; JMP ($0318), nothing pushed, so after
+; the three pushes here the return address sits where brkTrap finds it.
+nmiTrap
+	pha
+	txa
+	pha
+	tya
+	pha
+	tsx
+	lda $0105,x
+	sta trapPc
+	lda $0106,x
+	sta trapPc+1
+	inc trapN
+	ldy #3
+	jsr trapShow
+	pla
+	tay
+	pla
+	tax
+	pla
+	rti
+
+trapShow
+	ldx #0
+-	lda trapTag,y
+	sta $0400,x
+	lda #1
+	sta $d800,x
+	iny
+	inx
+	cpx #3
+	bne -
+	lda #$20
+	sta $0403
+	sta $0408
+	ldx #4
+	lda trapPc+1
+	jsr trapHex
+	lda trapPc
+	jsr trapHex
+	ldx #9
+	lda trapN
+trapHex
+	pha
+	lsr a
+	lsr a
+	lsr a
+	lsr a
+	jsr trapNyb
+	pla
+	and #$0f
+trapNyb
+	cmp #10
+	bcc +
+	sbc #9				; carry set: 10-15 -> screen codes A-F
+	bne ++
++	ora #$30
++	sta $0400,x
+	lda #1
+	sta $d800,x
+	inx
+	rts
+
+trapTag		.byte 2, 18, 11, 14, 13, 9	; BRK, NMI in screen codes
+trapPc		.word 0
+trapN		.byte 0
+
+mcWalk
+	lda swimming
+	beq +
+	lda camPitch			; a swimmer goes where they look
+	ldx #CAM_Y
+	jsr camAdd
++	lda camYaw+1
+	ldx #CAM_X
+	jsr camAdd
+	lda camYaw+1
+	clc
+	adc #64
+	ldx #CAM_Z
+	jmp camAdd
+
+mcStrafe
+	lda camYaw+1
+	clc
+	adc #64
+	ldx #CAM_X
+	jsr camAdd
+	lda dirNeg
+	eor #1
+	sta dirNeg
+	lda camYaw+1
+	ldx #CAM_Z
+	jmp camAdd
+
+camAdd
+	stx camOff
+	tax
+	lda sinLo,x
+	sta mLo
+	lda sinHi,x
+	sta mHi
+
+	ldy #0
+	lda mHi
+	bpl caPos
+	iny
+	lda #0
+	sec
+	sbc mLo
+	sta mLo
+	lda #0
+	sbc mHi
+	sta mHi
+caPos
+	tya
+	eor dirNeg
+	sta caNeg
+
+	lda #0
+	sta prod0
+	sta prod1
+	sta prod2
+	lda stepLo
+	sta mult
+	ldx #8
+caMul
+	lsr mult
+	bcc caNoAdd
+	clc
+	lda prod1
+	adc mLo
+	sta prod1
+	lda prod2
+	adc mHi
+	sta prod2
+caNoAdd
+	ror prod2
+	ror prod1
+	ror prod0
+	dex
+	bne caMul
+
+	ldx camOff
+	lda caNeg
+	bne caSub
+	clc
+	lda mov+0,x
+	adc prod0
+	sta mov+0,x
+	lda mov+1,x
+	adc prod1
+	sta mov+1,x
+	lda mov+2,x
+	adc prod2
+	sta mov+2,x
+	lda mov+3,x
+	adc #0
+	sta mov+3,x
+	rts
+caSub
+	sec
+	lda mov+0,x
+	sbc prod0
+	sta mov+0,x
+	lda mov+1,x
+	sbc prod1
+	sta mov+1,x
+	lda mov+2,x
+	sbc prod2
+	sta mov+2,x
+	lda mov+3,x
+	sbc #0
+	sta mov+3,x
+	rts
+
+sendCamera
+	lda #<CAM_ID
+	sta stId
+	lda #>CAM_ID
+	sta stId+1
+
+	ldx #11
+-	lda cam,x
+	sta stBuf,x
+	dex
+	bpl -
+	jsr camDrop
+	lda #OP_SET_POSITION
+	ldx #11
+	jsr stage2
+	sta posErr
+
+	lda camYaw
+	sta stBuf+0
+	lda camYaw+1
+	sta stBuf+1
+	lda #0				; pitch: the wire's is negated, see
+	sta stBuf+2			;   PITCH_LIM
+	sta stBuf+4
+	sta stBuf+5
+	sec
+	sbc camPitch
+	sta stBuf+3
+	lda #OP_SET_ORIENTATION
+	ldx #5
+	jsr stage2
+	ora posErr
+	sta posErr
+	rts
+
+; F1 / F3 look up / down and F7 levels the view; + / - widen / narrow the
+; field of view. Both repeat while held, one step a frame. Pitch goes out
+; with the camera every frame anyway; the FOV is sent by sendView, once per
+; change, and after that by the refresh ring like everything else.
+viewKeys
+	lda keyA
+	and #KA_F7
+	bne vkNoLevel
+	lda #0
+	sta camPitch
+vkNoLevel
+	lda keyA
+	and #KA_F1
+	bne vkNoUp
+	lda camPitch
+	clc
+	adc pitchStep
+	bmi +				; still below level
+	cmp #PITCH_LIM+1
+	bcc +
+	lda #PITCH_LIM
++	sta camPitch
+vkNoUp
+	lda keyA
+	and #KA_F3
+	bne vkNoDown
+	lda camPitch
+	sec
+	sbc pitchStep
+	bpl +				; still above level
+	cmp #256-PITCH_LIM
+	bcs +
+	lda #256-PITCH_LIM
++	sta camPitch
+vkNoDown
+	; F5: telemetry, once per press, after TELE_HOLD frames of it.
+	lda keyA
+	and #KA_F5
+	beq +
+	lda #0
+	sta teleHold
+	beq vkTeleDone
++	lda teleHold
+	cmp #TELE_HOLD
+	beq vkTeleDone			; acted; wait for the release
+	inc teleHold
+	lda teleHold
+	cmp #TELE_HOLD
+	bne vkTeleDone
+	lda teleOn
+	eor #1
+	sta teleOn
+	jsr teleShown
+vkTeleDone
+	lda keyE
+	and #KE_PLUS | KE_MINUS
+	cmp #KE_PLUS | KE_MINUS
+	bne +
+	lda #0				; neither held
+	sta fovHold
+	rts
++	inc fovHold
+	lda fovHold
+	cmp #FOV_HOLD
+	beq +
+	rts
++	lda #( FOV_HOLD - FOV_REPEAT ) & $ff	; the next step FOV_REPEAT frames on
+	sta fovHold
+	lda keyE
+	and #KE_PLUS
+	bne vkNoWider
+	ldx fovIx
+	cpx #FOV_N-1
+	bcs vkNoWider
+	inc fovIx
+	lda #1
+	sta fovDirty
+vkNoWider
+	lda keyE
+	and #KE_MINUS
+	bne vkNoNarrower
+	lda fovIx
+	beq vkNoNarrower
+	dec fovIx
+	lda #1
+	sta fovDirty
+vkNoNarrower
+	rts
+
+sendView
+	lda fovDirty
+	beq +
+	lda #0
+	sta fovDirty
+	jsr rgPersp
+	sta fovErr
++	rts
+
+; The firmware raises FRAME_READY in two places only: in the flip's own
+; hold at the vsync, and at the top of every dispatch. A frame that core 1
+; finishes after its flip has gone out is therefore invisible to a program
+; that only reads STATUS -- the 2026-09-08 fix covers the other case. Once
+; the second speed pass made the C64 arrive here before a heavy view had
+; finished, that cost a whole READY_WAIT (~0.7 s) per stall, looking down
+; the first corridor. So while waiting, send one command every WR_PUMP_MS:
+; SET_BACKGROUND 0, which the loop does not drain for, changes nothing,
+; and carries the check like everything else stage2 sends.
+WR_PUMP_MS = 2
+
+waitReady
+	lda #<READY_WAIT
+	sta waitCt
+	lda #>READY_WAIT
+	sta waitCt+1
+	lda CIA2_TBLO
+	sta wrMs
+wrPoll
+	lda STATUS
+	and #( ST_FRAME_READY | ST_BUSY )
+	cmp #ST_FRAME_READY
+	beq wrDone
+	lda wrMs			; the clock counts down
+	sec
+	sbc CIA2_TBLO
+	cmp #WR_PUMP_MS
+	bcc wrNoPump
+	jsr rgBackground
+	inc wrPumps
+	bne wrPumped
+	inc wrPumps+1
+wrPumped
+	lda CIA2_TBLO
+	sta wrMs
+wrNoPump
+	lda waitCt
+	bne +
+	dec waitCt+1
++	dec waitCt
+	lda waitCt
+	ora waitCt+1
+	bne wrPoll
+
+	inc stalls
+	bne +
+	inc stalls+1
++
+	lda stalls
+	cmp #1
+	bne wrDone
+	lda stalls+1
+	bne wrDone
+	lda frames
+	sta stallAt
+	lda frames+1
+	sta stallAt+1
+wrDone
+	rts
+
+; ======================================================================
+; The state refresh ring.
+;
+; The first bench run of this program walked E1M1 perfectly for a few
+; seconds, then the view jumped and the field of view went wrong; later the
+; palette went, and the level turned to flat blue-grey. None of that was the
+; program's own doing. It was bus damage to state this program set ONCE, at
+; start-up, and then never mentioned again:
+;
+;   * A command byte that arrives with one bit flipped is a different
+;     command. CMD_HI 1 -> 0 makes class 1's SET_POSITION ($30) class 0's
+;     PAL_SET, and SET_ORIENTATION ($31) class 0's PAL_LOAD: the camera's
+;     own bytes, written into the palette. tools/prgsim reproduces it with
+;     --bus-fault=data:N.
+;   * A flipped CMD_LO turns one class-1 opcode into another, and the
+;     arguments still staged from the last command are very often valid
+;     for it -- which is how a field of view changes by itself.
+;   * A flipped ID byte sends the camera's position, or a door's, to a
+;     chunk of the level.
+;
+; Each is permanent on a retained scene, because nothing this program does
+; per frame would ever contradict it. So the defence is expiry, exactly as in
+; gpu64_demo_quake3d.a and docs/state-refresh.md: every piece of state is
+; re-sent on a rotation whether or not anything looks wrong. Two rings run
+; side by side, one step of each a frame:
+;
+;   rgTab     the scene-wide state, one entry a frame -- the view, the
+;             light, the active camera, the palette, the readback fence
+;   nodeRefresh  one LEVEL node a frame, all four of its fields
+;
+; The palette is the one that needed firmware: its truth lives in the REU
+; level pack, not in C64 RAM, so LEVEL_PALETTE ($17) asks the Pi to compare
+; its live palette against the level's and put back whatever differs.
+; ======================================================================
+doRefresh
+	ldx rgIx
+	lda rgTab,x
+	sta rgCall+1
+	lda rgTab+1,x
+	sta rgCall+2
+	inx
+	inx
+	cpx #RG_N*2
+	bcc +
+	ldx #0
++	stx rgIx
+rgCall	jsr $ffff			; patched above
+	beq +
+	inc rgErrs
+	bne +
+	dec rgErrs			; saturates at 255
++	jmp nodeRefresh
+
+rgTab
+	.word rgViewport
+	.word rgPalette
+	.word rgPersp
+	.word rgActiveCam
+	.word rgBackground
+	.word rgPalette			; twice a cycle: it is what a phantom
+	.word rgLight			;   hits most often, and the most visible
+	.word rgDmaWin
+RG_N = ( * - rgTab ) / 2
+
+; Every entry returns the ERRCODE, flags set, and stages all of its own
+; arguments: ARG is not cleared between commands, and a leftover byte is
+; exactly the kind of state this ring exists to distrust. Every class 1
+; entry goes through stage2 and so carries the check: at one flipped byte in
+; 61, runsim showed the ring's own SET_ACTIVE_CAMERA arriving as
+; CREATE_CAMERA and putting the eye at the origin for a frame -- the ring
+; that repairs damage was itself the commonest source of it.
+stb	.macro	off, val
+	lda #\val
+	sta stBuf+\off
+	.endm
+stw	.macro	off, val
+	lda #<(\val)
+	sta stBuf+\off
+	lda #>(\val)
+	sta stBuf+\off+1
+	.endm
+
+rgViewport
+	#stw 0, 0
+	#stw 2, 0
+	#stw 4, VP_W
+	#stw 6, VP_H
+	lda #OP_SET_VIEWPORT
+	ldx #7
+	jmp stage2
+
+rgPersp
+	lda fovIx
+	asl a
+	tax
+	lda fovTab,x
+	sta stBuf+0
+	lda fovTab+1,x
+	sta stBuf+1
+	#stw 2, NEARZ
+	#stw 4, FARZ
+	lda #OP_SET_PERSPECTIVE
+	ldx #5
+	jmp stage2
+
+rgBackground
+	#stb 0, 0
+	lda #OP_SET_BACKGROUND
+	ldx #0
+	jmp stage2
+
+; BAD_ID means CAM_ID is no longer a camera -- a phantom CREATE_OBJECT or
+; DESTROY_NODE got it, and the loop has been rendering NO_CAMERA or a stale
+; view since. Make it a camera again and put it where the player is before
+; this frame is committed; any other error is left to the next time round.
+rgActiveCam
+	jsr stCamId
+	lda #OP_SET_ACTIVE_CAMERA
+	ldx #$ff
+	jsr stage2
+	cmp #ERR_BAD_ID
+	beq +
+	cmp #0
+	rts
++	jsr stCamId
+	lda #OP_CREATE_CAMERA
+	ldx #$ff
+	jsr stage2
+	jsr stCamId
+	lda #OP_SET_ACTIVE_CAMERA
+	ldx #$ff
+	jsr stage2
+	inc camFix
+	bne +
+	dec camFix
++	jsr sendCamera
+	lda #ERR_BAD_ID			; still counted as the ring's error
+	rts
+
+; The state default, towards the viewer, with gpu64's default ambient.
+rgLight
+	#stw 0, 0
+	#stw 2, 0
+	#stw 4, -32767
+	#stb 6, 4
+	lda #OP_SET_LIGHT3D
+	ldx #6
+	jmp stage2
+
+stCamId
+	lda #<CAM_ID
+	sta stId
+	lda #>CAM_ID
+	sta stId+1
+	rts
+
+; RESULT is how many entries the Pi had to put back. A read of it that fails
+; returns the last bus value, so it is believed only when two reads agree.
+rgPalette
+	lda #OP_LEVEL_PALETTE
+	ldx #$ff
+	jsr stage2
+	sta palErr
+	bne rpDone
+	lda RESULT
+	cmp RESULT
+	bne rpDone
+	cmp #0
+	beq rpDone
+	sta palLast
+	inc palFixes
+	bne rpDone
+	inc palFixes+1
+rpDone
+	lda palErr
+	rts
+
+rgDmaWin
+	jsr setDmaWin
+	lda fenceEcho
+	cmp #FENCE_ECHO
+	beq +
+	lda #$ff
+	rts
++	lda #0
+	rts
+
+; ----------------------------------------------------------------------
+; The level's nodes.
+;
+; LOAD_LEVEL builds every chunk of E1M1 as a node, NODE_BASE upwards, with a
+; mesh and a position out of the level file -- so this program never knew
+; either and cannot re-send them. It does not need to: LEVEL_NODE ($1C) asks
+; the Pi to put one node back the way the file says. What the ring is
+; defending against is a phantom CREATE_*: one flipped CMD_LO bit makes a
+; SET_POSITION a CREATE_OBJECT, and CREATE_* replaces a live id by design,
+; so a flipped ID byte as well leaves a wall that is a camera, a sprite, or
+; an instance of a mesh nobody uploaded -- until something puts it back.
+;
+; Movers' nodes are marked and their positions left to sendMovers, whose own
+; ring re-sends them from where the door actually is -- the file's value is
+; the CLOSED position and would fight an open door. Nothing else is known
+; up front: the ring finds the end of the node run by the BAD_ID it gets
+; for the first id past it.
+; ----------------------------------------------------------------------
+LN_MOVER  = $01
+
+nodeMark
+	lda #0
+	sta lnCount
+	tax
+-	sta lnFlag,x
+	inx
+	bne -
+
+	ldy #0
+nmLoop
+	cpy nMov
+	bcs nmDone
+	lda mvNodeC,y
+	beq nmNext
+	sta lnK
+	sec
+	lda mvNodeL,y
+	sbc #<NODE_BASE
+	tax
+	lda mvNodeH,y
+	sbc #>NODE_BASE
+	bne nmNext			; below NODE_BASE, or past a byte
+nmNode
+	lda #LN_MOVER
+	sta lnFlag,x
+	inx
+	beq nmNext
+	dec lnK
+	bne nmNode
+nmNext
+	iny
+	jmp nmLoop
+nmDone
+	rts
+
+; One level node a frame. ARG0 bit 0 asks for the file's position too,
+; which a mover must not get. RESULT says what was wrong -- bit 0 the node
+; itself, bit 1 its position -- and is believed when two reads agree.
+nodeRefresh
+	ldx lnIx
+	lda lnFlag,x
+	eor #LN_MOVER			; 1 for a static node, 0 for a mover
+	and #LN_MOVER
+	sta stBuf+0
+	clc
+	txa
+	adc #<NODE_BASE
+	sta stId
+	lda #>NODE_BASE
+	adc #0
+	sta stId+1
+	lda #OP_LEVEL_NODE
+	ldx #0
+	jsr stage2
+	beq nrOk
+	cmp #ERR_BAD_ID
+	bne nrErr
+	; Past the last node: that is where the run ends. An id that was
+	; itself mis-sampled can end a sweep early, which costs nothing but
+	; a shorter sweep, so the count only ever grows.
+	lda lnIx
+	cmp lnCount
+	bcc +
+	sta lnCount
++	lda #0
+	sta lnIx
+	rts
+nrErr
+	inc rgErrs
+	bne nrNext
+	dec rgErrs
+	jmp nrNext
+nrOk
+	lda RESULT
+	cmp RESULT
+	bne nrNext
+	cmp #0
+	beq nrNext
+	sta lnLast
+	inc lnFix
+	bne nrNext
+	dec lnFix			; saturates at 255
+nrNext
+	inc lnIx
+	rts
+
+; The field of view as a binary angle, FOV_DEG0 upwards in FOV_STEP degrees.
+fovTab
+	.for i = 0, i < FOV_N, i += 1
+	.word round( ( FOV_DEG0 + i * FOV_STEP ) * 65536.0 / 360.0 )
+	.next
+
+; ======================================================================
+; THE GAME. Everything below this line runs on the 6502 and sends gpu64
+; nothing it could not have sent in milestone 15.
+;
+; The whole of it is built on two facts about LEVEL_ENT's answer. First,
+; target and targetname arrive as opaque 16-bit ids out of a deduplicated
+; string pool, so "does this button open this door" is a 16-bit compare and
+; there is not one byte of string handling here. Second, a brush model's
+; nodes are a contiguous RUN of scene ids starting at nodeFirst, and the
+; node is placed at the entity's own origin -- so a door is animated by
+; sending origin + travel * frac to nodeFirst..nodeFirst+nodeCount-1 and
+; nothing ever has to be looked up or read back.
+; ======================================================================
+
+; ----------------------------------------------------------------------
+; The scan. One LEVEL_ENT per entity, three tries each, and the level's own
+; entity count comes back in every answer -- which is why the loop can start
+; without knowing how long it is.
+; ----------------------------------------------------------------------
+entScan
+	jsr mtClear
+	lda #0
+	sta nMov
+	sta nTrg
+	sta nTel
+	sta nCnt
+	sta secTotal
+	sta entBad
+	sta entDrop
+	sta entIdx
+	sta entIdx+1
+	sta entTot+1
+	lda #1				; one, until the first answer says
+	sta entTot
+
+esLoop
+	lda entIdx
+	and #$1f
+	bne esNoShow
+	lda #3
+	jsr dmRow
+	jsr dmText
+	.text "ENTS    "
+	.byte 0
+	lda entIdx+1
+	jsr dmHexA
+	lda entIdx
+	jsr dmHexA
+esNoShow
+
+	jsr entRead
+	bne esBad
+	jsr entTake
+	jmp esNext
+esBad
+	lda entBad
+	cmp #255
+	beq esNext
+	inc entBad
+esNext
+	inc entIdx
+	bne +
+	inc entIdx+1
++
+	lda entIdx+1
+	cmp entTot+1
+	bcc esLoop
+	bne esDone
+	lda entIdx
+	cmp entTot
+	bcc esLoop
+esDone
+	rts
+
+; entBlk holds a verified record, and A = 0, or the record was unreadable
+; three times running and A = $FF. The magic AND the checksum, as every
+; block readback in this program does -- a checksum alone accepts an
+; all-zero block, which is exactly what an answer that never arrived looks
+; like once the poison is gone.
+entRead
+	ldx #3
+erTry
+	stx erCount
+
+	lda entIdx
+	sta entBlk+ENT_IDX
+	lda entIdx+1
+	sta entBlk+ENT_IDX+1
+	lda #ENT_IN_M
+	sta entBlk+ENT_MAGIC
+	lda entBlk+ENT_IDX
+	eor entBlk+ENT_IDX+1
+	eor entBlk+ENT_MAGIC
+	sta entBlk+ENT_CHECK
+
+	lda #$a5
+	ldx #ENT_OUT
+-	sta entBlk,x
+	inx
+	cpx #ENT_LEN
+	bne -
+
+	#argblob 0, SPACE_C64, entBlk, ENT_LEN
+	lda #OP_LEVEL_ENT
+	jsr cmd1
+	bne erRetry
+
+	lda entBlk+ENT_OMAGIC
+	cmp #ENT_OUT_M
+	bne erRetry
+	lda #0
+	ldx #ENT_OUT
+-	eor entBlk,x
+	inx
+	cpx #ENT_OCHECK
+	bne -
+	cmp entBlk+ENT_OCHECK
+	bne erRetry
+
+	lda entBlk+ENT_ECOUNT
+	sta entTot
+	lda entBlk+ENT_ECOUNT+1
+	sta entTot+1
+	lda #0
+	rts
+erRetry
+	ldx erCount
+	dex
+	bne erTry
+	lda #$ff
+	rts
+
+; Sort the record into one of the two tables, or drop it. The test is on
+; the KIND RANGES and not on particular kinds: a level with a class this
+; program has never heard of still lands in the right half, which is the
+; whole reason gpu64_level.h digests classnames into ranges.
+entTake
+	lda entBlk+ENT_KIND
+	cmp #K_BANK
+	bne +
+	jmp mtBank			; a level's monster frames
++	cmp #K_MOVER_1
+	bcc etNo
+	cmp #K_MOVER_2+1
+	bcs +
+	jmp etMover
++	cmp #K_TRIG_1
+	bcc etNo
+	cmp #K_TRIG_2+1
+	bcs +
+	jmp etTrig
++	jmp actTake			; items and monsters
+etNo
+	rts
+
+; A mover is a brush model with somewhere to go. func_wall is in the same
+; kind range and has a travel of zero, so this is also what keeps the
+; furniture out of the table.
+etMover
+	lda entBlk+ENT_MODEL
+	bne +
+	jmp etNo
++	lda #0
+	ldx #ENT_TRAVEL
+-	ora entBlk,x
+	inx
+	cpx #ENT_TRAVEL+12
+	bne -
+	cmp #0				; the flags above belong to cpx, not to A
+	bne +
+	jmp etNo
++
+	ldx nMov
+	cpx #MAX_MOV
+	bcc +
+	jmp etDrop
++
+
+	lda entBlk+ENT_MODEL
+	sta mvModel,x
+	lda entBlk+ENT_NODEF
+	sta mvNodeL,x
+	lda entBlk+ENT_NODEF+1
+	sta mvNodeH,x
+	lda entBlk+ENT_NODEC
+	sta mvNodeC,x
+	lda entBlk+ENT_KIND
+	sta mvKind,x
+	lda entBlk+ENT_TNAME
+	sta mvTnL,x
+	lda entBlk+ENT_TNAME+1
+	sta mvTnH,x
+	lda entBlk+ENT_TARGET
+	sta mvTgL,x
+	lda entBlk+ENT_TARGET+1
+	sta mvTgH,x
+	lda #MV_CLOSED
+	sta mvState,x
+	lda #0
+	sta mvFrac,x
+	sta mvWait,x
+	sta mvDirty,x
+	jsr exStayTake			; wait -1: stays open
+
+	lda entBlk+ENT_ORIGIN+0
+	sta mvBX0,x
+	lda entBlk+ENT_ORIGIN+1
+	sta mvBX1,x
+	lda entBlk+ENT_ORIGIN+2
+	sta mvBX2,x
+	lda entBlk+ENT_ORIGIN+3
+	sta mvBX3,x
+	lda entBlk+ENT_ORIGIN+4
+	sta mvBY0,x
+	lda entBlk+ENT_ORIGIN+5
+	sta mvBY1,x
+	lda entBlk+ENT_ORIGIN+6
+	sta mvBY2,x
+	lda entBlk+ENT_ORIGIN+7
+	sta mvBY3,x
+	lda entBlk+ENT_ORIGIN+8
+	sta mvBZ0,x
+	lda entBlk+ENT_ORIGIN+9
+	sta mvBZ1,x
+	lda entBlk+ENT_ORIGIN+10
+	sta mvBZ2,x
+	lda entBlk+ENT_ORIGIN+11
+	sta mvBZ3,x
+
+	lda entBlk+ENT_TRAVEL+0
+	sta mvTX0,x
+	lda entBlk+ENT_TRAVEL+1
+	sta mvTX1,x
+	lda entBlk+ENT_TRAVEL+2
+	sta mvTX2,x
+	lda entBlk+ENT_TRAVEL+3
+	sta mvTX3,x
+	lda entBlk+ENT_TRAVEL+4
+	sta mvTY0,x
+	lda entBlk+ENT_TRAVEL+5
+	sta mvTY1,x
+	lda entBlk+ENT_TRAVEL+6
+	sta mvTY2,x
+	lda entBlk+ENT_TRAVEL+7
+	sta mvTY3,x
+	lda entBlk+ENT_TRAVEL+8
+	sta mvTZ0,x
+	lda entBlk+ENT_TRAVEL+9
+	sta mvTZ1,x
+	lda entBlk+ENT_TRAVEL+10
+	sta mvTZ2,x
+	lda entBlk+ENT_TRAVEL+11
+	sta mvTZ3,x
+
+	jsr mulOfs			; frac 0: none, or a START_OPEN door's all
+
+	; The box, in fine units: the two middle bytes of each 16.16 value and
+	; no arithmetic at all. This is the CLOSED box, and it stays the closed
+	; box while the door moves -- which is right, because Quake's own door
+	; trigger field is built once from the closed panel and does not travel
+	; with it either.
+	lda entBlk+ENT_MINS+1
+	sta mvMnXl,x
+	lda entBlk+ENT_MINS+2
+	sta mvMnXh,x
+	lda entBlk+ENT_MINS+5
+	sta mvMnYl,x
+	lda entBlk+ENT_MINS+6
+	sta mvMnYh,x
+	lda entBlk+ENT_MINS+9
+	sta mvMnZl,x
+	lda entBlk+ENT_MINS+10
+	sta mvMnZh,x
+	lda entBlk+ENT_MAXS+1
+	sta mvMxXl,x
+	lda entBlk+ENT_MAXS+2
+	sta mvMxXh,x
+	lda entBlk+ENT_MAXS+5
+	sta mvMxYl,x
+	lda entBlk+ENT_MAXS+6
+	sta mvMxYh,x
+	lda entBlk+ENT_MAXS+9
+	sta mvMxZl,x
+	lda entBlk+ENT_MAXS+10
+	sta mvMxZh,x
+
+	inc nMov
+	rts
+
+etDrop
+	lda entDrop
+	cmp #255
+	beq +
+	inc entDrop
++	rts
+
+; A trigger volume is its box and its target, and nothing else. Half of
+; E1M1's brush models are these, and the converter draws nothing for them
+; -- nodeCount is 0 and that is not an error.
+etTrig
+	lda entBlk+ENT_KIND
+	cmp #K_TRIG_COUNTER
+	bne +
+	jmp cntTake			; a counter is not a volume at all
++	lda entBlk+ENT_MODEL
+	bne +
+	jmp etNo
++	ldx nTrg
+	cpx #MAX_TRG
+	bcc +
+	jmp etDrop
++
+
+	lda entBlk+ENT_P1		; trigger_changelevel's slot + 1
+	sta trDest,x
+	jsr tpTake			; ... or a teleport's
+	lda entBlk+ENT_KIND
+	sta trKind,x
+	cmp #K_TRIG_SECRET
+	bne +
+	inc secTotal
++	lda entBlk+ENT_TARGET
+	sta trTgL,x
+	lda entBlk+ENT_TARGET+1
+	sta trTgH,x
+	lda #0
+	sta trFired,x
+
+	lda entBlk+ENT_MINS+1
+	sta trMnXl,x
+	lda entBlk+ENT_MINS+2
+	sta trMnXh,x
+	lda entBlk+ENT_MINS+5
+	sta trMnYl,x
+	lda entBlk+ENT_MINS+6
+	sta trMnYh,x
+	lda entBlk+ENT_MINS+9
+	sta trMnZl,x
+	lda entBlk+ENT_MINS+10
+	sta trMnZh,x
+	lda entBlk+ENT_MAXS+1
+	sta trMxXl,x
+	lda entBlk+ENT_MAXS+2
+	sta trMxXh,x
+	lda entBlk+ENT_MAXS+5
+	sta trMxYl,x
+	lda entBlk+ENT_MAXS+6
+	sta trMxYh,x
+	lda entBlk+ENT_MAXS+9
+	sta trMxZl,x
+	lda entBlk+ENT_MAXS+10
+	sta trMxZh,x
+
+	inc nTrg
+	rts
+
+; ----------------------------------------------------------------------
+; Where the player is, in fine units. The middle two bytes of a 16.16
+; coordinate ARE the position in 1/256 world units, signed, and the whole
+; of E1M1 fits in sixteen bits of them.
+; ----------------------------------------------------------------------
+pfCalc
+	lda cam+CAM_X+1
+	sta pfX
+	lda cam+CAM_X+2
+	sta pfX+1
+	lda cam+CAM_Y+1
+	sta pfY
+	lda cam+CAM_Y+2
+	sta pfY+1
+	lda cam+CAM_Z+1
+	sta pfZ
+	lda cam+CAM_Z+2
+	sta pfZ+1
+	eor #$80
+	sta pfZb
+	lda pfX+1
+	eor #$80
+	sta pfXb
+	rts
+
+; X = mover index. C set if its box is at least fxR whole units clear of the
+; player on x or z, read off the high bytes alone -- the prefilter in front
+; of the full box work. Signed bytes are compared biased by $80. Preserves X.
+mvFar
+	lda mvMnXh,x		; box min - player
+	eor #$80
+	sec
+	sbc pfXb
+	bcc +
+	cmp fxR
+	bcs mvfYes
++	lda mvMxXh,x		; player - box max
+	eor #$80
+	sta fxT
+	lda pfXb
+	sec
+	sbc fxT
+	bcc +
+	cmp fxR
+	bcs mvfYes
++
+	lda mvMnZh,x		; box min - player
+	eor #$80
+	sec
+	sbc pfZb
+	bcc +
+	cmp fxR
+	bcs mvfYes
++	lda mvMxZh,x		; player - box max
+	eor #$80
+	sta fxT
+	lda pfZb
+	sec
+	sbc fxT
+	bcc +
+	cmp fxR
+	bcs mvfYes
++
+	clc
+	rts
+mvfYes
+	sec
+	rts
+
+; X = trigger index. C set if its box is at least fxR whole units clear of the
+; player on x or z, read off the high bytes alone -- the prefilter in front
+; of the full box work. Signed bytes are compared biased by $80. Preserves X.
+trFar
+	lda trMnXh,x		; box min - player
+	eor #$80
+	sec
+	sbc pfXb
+	bcc +
+	cmp fxR
+	bcs trfYes
++	lda trMxXh,x		; player - box max
+	eor #$80
+	sta fxT
+	lda pfXb
+	sec
+	sbc fxT
+	bcc +
+	cmp fxR
+	bcs trfYes
++
+	lda trMnZh,x		; box min - player
+	eor #$80
+	sec
+	sbc pfZb
+	bcc +
+	cmp fxR
+	bcs trfYes
++	lda trMxZh,x		; player - box max
+	eor #$80
+	sta fxT
+	lda pfZb
+	sec
+	sbc fxT
+	bcc +
+	cmp fxR
+	bcs trfYes
++
+	clc
+	rts
+trfYes
+	sec
+	rts
+
+; X = mover / trigger index; loads its box into the six scratch pairs the
+; two box tests read. Two loaders and one test, rather than a test that
+; knows about both tables.
+mvLoadBox
+	lda mvMnXl,x
+	sta bxMnX
+	lda mvMnXh,x
+	sta bxMnX+1
+	lda mvMnYl,x
+	sta bxMnY
+	lda mvMnYh,x
+	sta bxMnY+1
+	lda mvMnZl,x
+	sta bxMnZ
+	lda mvMnZh,x
+	sta bxMnZ+1
+	lda mvMxXl,x
+	sta bxMxX
+	lda mvMxXh,x
+	sta bxMxX+1
+	lda mvMxYl,x
+	sta bxMxY
+	lda mvMxYh,x
+	sta bxMxY+1
+	lda mvMxZl,x
+	sta bxMxZ
+	lda mvMxZh,x
+	sta bxMxZ+1
+	rts
+
+trLoadBox
+	lda trMnXl,x
+	sta bxMnX
+	lda trMnXh,x
+	sta bxMnX+1
+	lda trMnYl,x
+	sta bxMnY
+	lda trMnYh,x
+	sta bxMnY+1
+	lda trMnZl,x
+	sta bxMnZ
+	lda trMnZh,x
+	sta bxMnZ+1
+	lda trMxXl,x
+	sta bxMxX
+	lda trMxXh,x
+	sta bxMxX+1
+	lda trMxYl,x
+	sta bxMxY
+	lda trMxYh,x
+	sta bxMxY+1
+	lda trMxZl,x
+	sta bxMxZ
+	lda trMxZh,x
+	sta bxMxZ+1
+	rts
+
+; A = how far the player is from the box, in WHOLE world units, clamped to
+; 255 and 0 when inside. Only the high byte of each axis gap is used: this
+; is a ranking key for "which sixteen movers", not a distance, and a door
+; that rounds down half a unit is still the same door.
+;
+; The subtractions are plain 16-bit and the sign bit of the result is read
+; directly, with no overflow handling: every fine coordinate in a level this
+; format can express is inside +-32767, and so is every difference of two of
+; them that matters here.
+boxScore
+	lda #0
+	sta bsSum
+	sta bsSum+1
+
+	sec
+	lda bxMnX
+	sbc pfX
+	lda bxMnX+1
+	sbc pfX+1
+	bpl +
+	sec
+	lda pfX
+	sbc bxMxX
+	lda pfX+1
+	sbc bxMxX+1
+	bpl +
+	lda #0
++
+	clc
+	adc bsSum
+	sta bsSum
+	bcc +
+	inc bsSum+1
++
+
+	sec
+	lda bxMnY
+	sbc pfY
+	lda bxMnY+1
+	sbc pfY+1
+	bpl +
+	sec
+	lda pfY
+	sbc bxMxY
+	lda pfY+1
+	sbc bxMxY+1
+	bpl +
+	lda #0
++
+	clc
+	adc bsSum
+	sta bsSum
+	bcc +
+	inc bsSum+1
++
+
+	sec
+	lda bxMnZ
+	sbc pfZ
+	lda bxMnZ+1
+	sbc pfZ+1
+	bpl +
+	sec
+	lda pfZ
+	sbc bxMxZ
+	lda pfZ+1
+	sbc bxMxZ+1
+	bpl +
+	lda #0
++
+	clc
+	adc bsSum
+	sta bsSum
+	bcc +
+	inc bsSum+1
++
+	lda bsSum+1
+	beq +
+	lda #255
+	rts
++	lda bsSum
+	rts
+
+; The two expansions. A door's is Quake's own trigger field; a trigger
+; volume's is the player's own size, because the volume is already the
+; shape the mapper drew.
+expDoor
+	lda #<TOUCH_XZ
+	sta exH
+	lda #>TOUCH_XZ
+	sta exH+1
+	lda #<TOUCH_Y
+	sta exYlo
+	sta exYhi
+	lda #>TOUCH_Y
+	sta exYlo+1
+	sta exYhi+1
+	rts
+
+expTrig
+	lda #<TRIG_XZ
+	sta exH
+	lda #>TRIG_XZ
+	sta exH+1
+	lda #<TRIG_YLO
+	sta exYlo
+	lda #>TRIG_YLO
+	sta exYlo+1
+	lda #<TRIG_YHI
+	sta exYhi
+	lda #>TRIG_YHI
+	sta exYhi+1
+	rts
+
+; A = 0 (Z set) if the player is inside the loaded box grown by the loaded
+; expansion. Six 16-bit compares and an early exit on the first miss, which
+; for a level's worth of boxes is nearly always the first one.
+boxInside
+	sec
+	lda bxMnX
+	sbc exH
+	sta biLo
+	lda bxMnX+1
+	sbc exH+1
+	sta biHi
+	sec
+	lda pfX
+	sbc biLo
+	lda pfX+1
+	sbc biHi
+	bpl +
+	jmp biOut
++
+	clc
+	lda bxMxX
+	adc exH
+	sta biLo
+	lda bxMxX+1
+	adc exH+1
+	sta biHi
+	sec
+	lda biLo
+	sbc pfX
+	lda biHi
+	sbc pfX+1
+	bpl +
+	jmp biOut
++
+
+	sec
+	lda bxMnY
+	sbc exYlo
+	sta biLo
+	lda bxMnY+1
+	sbc exYlo+1
+	sta biHi
+	sec
+	lda pfY
+	sbc biLo
+	lda pfY+1
+	sbc biHi
+	bpl +
+	jmp biOut
++
+	clc
+	lda bxMxY
+	adc exYhi
+	sta biLo
+	lda bxMxY+1
+	adc exYhi+1
+	sta biHi
+	sec
+	lda biLo
+	sbc pfY
+	lda biHi
+	sbc pfY+1
+	bpl +
+	jmp biOut
++
+
+	sec
+	lda bxMnZ
+	sbc exH
+	sta biLo
+	lda bxMnZ+1
+	sbc exH+1
+	sta biHi
+	sec
+	lda pfZ
+	sbc biLo
+	lda pfZ+1
+	sbc biHi
+	bpl +
+	jmp biOut
++
+	clc
+	lda bxMxZ
+	adc exH
+	sta biLo
+	lda bxMxZ+1
+	adc exH+1
+	sta biHi
+	sec
+	lda biLo
+	sbc pfZ
+	lda biHi
+	sbc pfZ+1
+	bpl +
+	jmp biOut
++
+
+	lda #0
+	rts
+biOut
+	lda #$ff
+	rts
+
+; ----------------------------------------------------------------------
+; Which movers the trace is given. CLIP_MOVE takes at most sixteen and
+; E1M1 has twenty-nine, so the choice is made per frame and it is made by
+; distance: the sixteen nearest boxes, kept in a sorted list.
+;
+; The bound is not a corner cut. A door is only worth tracing against while
+; the player can reach it inside one frame's step, and the measured worst
+; case on E1M1 is nine movers within sixteen world units of anywhere a
+; player can stand. Sorting rather than taking the first sixteen is what
+; makes that true of a level nobody has measured.
+; ----------------------------------------------------------------------
+gameSelect
+	lda wtFrame			; every other frame: the list reaches
+	and #1				; NEAR_WU out and a frame's step is
+	beq +				; under one unit
+	rts
++	lda #1
+	sta bmStale
+	jsr pfCalc
+	lda #NEAR_WU+1			; a high-byte gap this big scores >= NEAR_WU
+	sta fxR
+	lda #0
+	sta selCnt
+	sta gsI
+gsLoop
+	lda gsI
+	cmp nMov
+	bcs gsDone
+	tax
+	jsr mvFar
+	bcs gsNext
+	jsr mvLoadBox
+	jsr boxScore
+	cmp #NEAR_WU
+	bcs gsNext
+	sta gsScore
+
+	ldy selCnt
+	cpy #SEL_MAX
+	bcc gsRoom
+	cmp selScore+SEL_MAX-1		; the list is full: is it worth a slot?
+	bcs gsNext
+	ldy #SEL_MAX-1
+	jmp gsHole
+gsRoom
+	inc selCnt
+gsHole
+	sty gsHoleIx
+gsShift
+	ldy gsHoleIx
+	beq gsPlace
+	dey
+	lda selScore,y
+	cmp gsScore
+	bcc gsPlace			; the one above is nearer: stop here
+	ldx gsHoleIx
+	sta selScore,x
+	lda selIdx,y
+	sta selIdx,x
+	dec gsHoleIx
+	jmp gsShift
+gsPlace
+	ldx gsHoleIx
+	lda gsScore
+	sta selScore,x
+	lda gsI
+	sta selIdx,x
+gsNext
+	inc gsI
+	jmp gsLoop
+gsDone
+	rts
+
+; ----------------------------------------------------------------------
+; What the player is standing in. Two passes: the trigger volumes, which
+; fire their target; and the movers that nothing targets, which open on
+; being walked into -- that second rule is Quake's, and it is why an
+; ordinary door needs no trigger entity at all.
+;
+; Every other frame, the ones gameSelect skips: a trigger is grown by the
+; player's 16 QU half-width on each side, and two frames of running cover
+; 21 QU, so not even a trigger of no thickness can be stepped over. Queued
+; fires are still drained every frame.
+; ----------------------------------------------------------------------
+gameTouch
+	lda wtFrame
+	and #1
+	bne +
+	jmp fireDrain
++	jsr pfCalc
+	lda #TOUCH_FAR
+	sta fxR
+
+	jsr expDoor
+	lda #0
+	sta gtI
+gtMov
+	lda gtI
+	cmp nMov
+	bcs gtMovDone
+	tax
+	lda mvTnL,x
+	ora mvTnH,x
+	bne gtMovNext			; targeted: it waits to be told
+	jsr mvFar
+	bcs gtMovNext
+	jsr mvLoadBox
+	jsr boxInside
+	bne gtMovNext
+	ldx gtI
+	jsr openMover
+gtMovNext
+	inc gtI
+	jmp gtMov
+gtMovDone
+
+	jsr expTrig
+	lda #0
+	sta gtI
+gtTrg
+	lda gtI
+	cmp nTrg
+	bcs gtTrgDone
+	tax
+	lda trFired,x
+	bne gtTrgNext
+	jsr trFar
+	bcs gtTrgNext
+	jsr trLoadBox
+	jsr boxInside
+	bne gtTrgNext
+	ldx gtI
+	lda trKind,x
+	jsr exTrig			; secrets, the exit; A = the kind
+	cmp #K_TRIG_MULTI
+	beq +
+	lda #1				; once and secret: never again
+	sta trFired,x
++
+	ldx gtI
+	lda trTgL,x
+	ldy trTgH,x
+	jsr firePush
+gtTrgNext
+	inc gtI
+	jmp gtTrg
+gtTrgDone
+	jmp fireDrain
+
+; A = the clip's water level. A splash when the feet go in or come out.
+; X and Y survive.
+setWater
+	sta swNew
+	lda plWater
+	beq swDry
+	lda swNew
+	bne swSet			; still wet
+	beq swSplash
+swDry
+	lda swNew
+	beq swSet			; still dry
+swSplash
+	lda #SFX_SPLASH
+	jsr sfxPlay
+swSet
+	lda swNew
+	sta plWater
+	rts
+swNew		.byte 0
+
+; X = mover. Start it opening, and fire whatever IT targets -- a button's
+; target is its door, and a door's target is the next door in a chain.
+;
+; The four states are not four cases here. An already-open mover gets its
+; wait restarted, which is what keeps a door open while somebody stands in
+; the doorway; one already opening is left alone; and one part-way through
+; CLOSING starts opening again from wherever it has got to, which is both
+; Quake's behaviour and the only way a door cannot shut on the player.
+openMover
+	lda mvState,x
+	cmp #MV_OPENING
+	beq omNo
+	cmp #MV_OPEN
+	beq omRearm
+	lda #MV_OPENING
+	sta mvState,x
+	lda #SFX_DOOR
+	ldy mvKind,x
+	cpy #K_BUTTON
+	bne +
+	lda #SFX_BUTTON
++	jsr sfxPlay
+	inc openCt
+	bne +
+	inc openCt+1
++
+	lda mvTgL,x
+	ldy mvTgH,x
+	jmp firePush
+omRearm
+	lda #OPEN_WAIT
+	sta mvWait,x
+omNo
+	rts
+
+; A=lo, Y=hi: queue a targetname to fire. Id 0 means "targets nothing" and
+; is the common case, so it is the first test.
+;
+; The queue is what keeps this out of recursion. A door that targets a door
+; that targets the first would recurse forever through openMover; pushing
+; instead means a chain of any shape costs one pass each, and a cycle stops
+; when the queue fills.
+firePush
+	sta fpLo
+	sty fpHi
+	ora fpHi
+	beq fpNo
+	ldx fireN
+	cpx #FIRE_Q
+	bcs fpNo
+	lda fpLo
+	sta fireQL,x
+	lda fpHi
+	sta fireQH,x
+	inc fireN
+fpNo
+	rts
+
+fireDrain
+	lda #0
+	sta fireRd
+fdLoop
+	lda fireRd
+	cmp fireN
+	bcs fdDone
+	tax
+	lda fireQL,x
+	sta fireTL
+	sta lastFireL
+	lda fireQH,x
+	sta fireTH
+	sta lastFireH
+	inc fireRd
+	jsr fireTarget
+	jmp fdLoop
+fdDone
+	lda #0
+	sta fireN
+	rts
+
+; Open every mover whose targetname is the fired id. Two 8-bit compares per
+; mover and no string anywhere: the pool ids did that work once, on the Pi,
+; when the level was built.
+fireTarget
+	lda #0
+	sta ftI
+ftLoop
+	lda ftI
+	cmp nMov
+	bcs ftDone
+	tax
+	lda mvTnL,x
+	cmp fireTL
+	bne ftNext
+	lda mvTnH,x
+	cmp fireTH
+	bne ftNext
+	jsr openMover
+ftNext
+	inc ftI
+	jmp ftLoop
+ftDone
+	jmp cntFire			; and every counter listening for it
+
+; ----------------------------------------------------------------------
+; The state machines. CLOSED -> OPENING -> OPEN (wait) -> CLOSING ->
+; CLOSED, one DOOR_STEP of the fraction per frame, and a new ofs computed
+; only for the movers that actually moved this frame.
+; ----------------------------------------------------------------------
+gameAnimate
+	lda #0
+	sta aniCt
+	sta gaI
+gaLoop
+	lda gaI
+	cmp nMov
+	bcs gaDone
+	tax
+	lda mvState,x
+	beq gaNext			; CLOSED and staying that way
+	cmp #MV_OPENING
+	beq gaOpening
+	cmp #MV_OPEN
+	beq gaOpen
+
+	lda mvFrac,x			; CLOSING
+	sec
+	sbc doorStep
+	bcs +
+	lda #0
++	sta mvFrac,x
+	bne gaMoved
+	lda #MV_CLOSED
+	sta mvState,x
+	jmp gaMoved
+
+gaOpening
+	lda mvFrac,x
+	clc
+	adc doorStep
+	bcs gaFull
+	cmp #255
+	bcc gaOpSet
+gaFull
+	lda #255
+	sta mvFrac,x
+	lda #MV_OPEN
+	sta mvState,x
+	lda #OPEN_WAIT
+	sta mvWait,x
+	jmp gaMoved
+gaOpSet
+	sta mvFrac,x
+	jmp gaMoved
+
+gaOpen
+	lda mvStay,x
+	lsr a
+	bcs gaNext			; wait -1: open for good
+	dec mvWait,x
+	bne gaNext
+	lda #MV_CLOSING
+	sta mvState,x
+	jmp gaNext
+
+gaMoved
+	inc aniCt
+	ldx gaI
+	jsr mulOfs
+	ldx gaI
+	lda #1
+	sta mvDirty,x
+gaNext
+	inc gaI
+	jmp gaLoop
+gaDone
+	rts
+
+; X = mover: ofs = travel * frac / 256, per component, signed.
+;
+; The fraction is a byte and travel is 16.16, so this is a 32x8 shift-add
+; whose 40-bit product is taken from bit 8 up -- which is the same thing as
+; dividing by 256 and costs nothing. frac 255 lands one 1/256th short of
+; the full travel, and a door that stops 1/256 of a world unit from its
+; destination is a door that reached it.
+mulOfs
+	lda #1
+	sta bmStale			; the block's copy is out of date
+	stx moI
+	lda mvFrac,x
+	ldy mvStay,x
+	bpl +
+	eor #$ff			; START_OPEN: closed is all the way out
++	sta moFrac
+
+	lda mvTX0,x
+	sta t0
+	lda mvTX1,x
+	sta t1
+	lda mvTX2,x
+	sta t2
+	lda mvTX3,x
+	sta t3
+	jsr mulComp
+	ldx moI
+	lda p1
+	sta mvOX0,x
+	lda p2
+	sta mvOX1,x
+	lda p3
+	sta mvOX2,x
+	lda p4
+	sta mvOX3,x
+
+	lda mvTY0,x
+	sta t0
+	lda mvTY1,x
+	sta t1
+	lda mvTY2,x
+	sta t2
+	lda mvTY3,x
+	sta t3
+	jsr mulComp
+	ldx moI
+	lda p1
+	sta mvOY0,x
+	lda p2
+	sta mvOY1,x
+	lda p3
+	sta mvOY2,x
+	lda p4
+	sta mvOY3,x
+
+	lda mvTZ0,x
+	sta t0
+	lda mvTZ1,x
+	sta t1
+	lda mvTZ2,x
+	sta t2
+	lda mvTZ3,x
+	sta t3
+	jsr mulComp
+	ldx moI
+	lda p1
+	sta mvOZ0,x
+	lda p2
+	sta mvOZ1,x
+	lda p3
+	sta mvOZ2,x
+	lda p4
+	sta mvOZ3,x
+	rts
+
+; t0..t3 (signed 32) * moFrac -> p1..p4, i.e. the product shifted down 8.
+; The sign is taken off the front and put back on the answer, because a
+; shift-add of a negative multiplicand adds a sign-extension error at every
+; step that no amount of later correction removes.
+mulComp
+	lda #0
+	sta moNeg
+	sta p0
+	sta p1
+	sta p2
+	sta p3
+	sta p4
+	lda t3
+	bpl +
+	inc moNeg
+	sec
+	lda #0
+	sbc t0
+	sta t0
+	lda #0
+	sbc t1
+	sta t1
+	lda #0
+	sbc t2
+	sta t2
+	lda #0
+	sbc t3
+	sta t3
++
+	lda moFrac
+	sta moMul
+	ldx #8
+mcLoop
+	lsr moMul
+	bcc mcSkip
+	clc
+	lda p1
+	adc t0
+	sta p1
+	lda p2
+	adc t1
+	sta p2
+	lda p3
+	adc t2
+	sta p3
+	lda p4
+	adc t3
+	sta p4
+	jmp mcShift			; the carry out of p4 is the bit in
+mcSkip
+	clc
+mcShift
+	ror p4
+	ror p3
+	ror p2
+	ror p1
+	ror p0
+	dex
+	bne mcLoop
+
+	lda moNeg
+	beq +
+	sec
+	lda #0
+	sbc p1
+	sta p1
+	lda #0
+	sbc p2
+	sta p2
+	lda #0
+	sbc p3
+	sta p3
+	lda #0
+	sbc p4
+	sta p4
++	rts
+
+; ----------------------------------------------------------------------
+; Put the moved doors where the player will see them. SET_POSITION over
+; nodeFirst..nodeFirst+nodeCount-1, and the same ofs went into this frame's
+; mover records -- so the door you can see and the door you cannot walk
+; through are the same door, to within one frame.
+;
+; Plus one mover re-sent per frame regardless: a SET_POSITION whose ARG
+; bytes were mis-sampled leaves a door stuck at the wrong place forever,
+; and the refresh ring is how retained state is repaired in this API.
+; ----------------------------------------------------------------------
+sendMovers
+	lda #0
+	sta movErr
+	sta smI
+smLoop
+	lda smI
+	cmp nMov
+	bcs smRefresh
+	tax
+	lda mvDirty,x
+	beq smNext
+	lda #0
+	sta mvDirty,x
+	ldx smI
+	jsr sendMoverPos
+smNext
+	inc smI
+	jmp smLoop
+
+smRefresh
+	lda nMov
+	beq smDone
+	ldx refreshIx
+	inx
+	cpx nMov
+	bcc +
+	ldx #0
++	stx refreshIx
+	jsr sendMoverPos
+smDone
+	rts
+
+; X = mover. The position is computed once into stBuf and staged again for
+; every node of the run -- see stage2 for why it is staged at all.
+sendMoverPos
+	stx spI
+	lda mvNodeC,x
+	bne +
+	rts
++	sta spCount
+
+	clc
+	lda mvBX0,x
+	adc mvOX0,x
+	sta stBuf+0
+	lda mvBX1,x
+	adc mvOX1,x
+	sta stBuf+1
+	lda mvBX2,x
+	adc mvOX2,x
+	sta stBuf+2
+	lda mvBX3,x
+	adc mvOX3,x
+	sta stBuf+3
+	clc
+	lda mvBY0,x
+	adc mvOY0,x
+	sta stBuf+4
+	lda mvBY1,x
+	adc mvOY1,x
+	sta stBuf+5
+	lda mvBY2,x
+	adc mvOY2,x
+	sta stBuf+6
+	lda mvBY3,x
+	adc mvOY3,x
+	sta stBuf+7
+	clc
+	lda mvBZ0,x
+	adc mvOZ0,x
+	sta stBuf+8
+	lda mvBZ1,x
+	adc mvOZ1,x
+	sta stBuf+9
+	lda mvBZ2,x
+	adc mvOZ2,x
+	sta stBuf+10
+	lda mvBZ3,x
+	adc mvOZ3,x
+	sta stBuf+11
+
+	lda mvNodeL,x
+	sta spNode
+	lda mvNodeH,x
+	sta spNode+1
+spNodeLoop
+	lda spNode
+	sta stId
+	sta lastNodeL
+	lda spNode+1
+	sta stId+1
+	sta lastNodeH
+	lda #OP_SET_POSITION
+	ldx #11
+	jsr stage2
+	beq +
+	lda movErr
+	cmp #255
+	beq +
+	inc movErr
++
+	inc spNode
+	bne +
+	inc spNode+1
++
+	dec spCount
+	bne spNodeLoop
+spDone
+	rts
+
+; ======================================================================
+; The health sample. Four tries, and the block has to verify itself before
+; any of it is believed -- see HB_LEN. hbBad counts the samples that never
+; did, saturating, so a row of stale numbers says so instead of looking
+; like a Pi that stopped changing.
+; ======================================================================
+doHealth
+	lda #HB_EVERY
+	sta hbWait
+
+	; Latch the program's own commit count as of this sample, so the row
+	; can print it beside the Pi's flip count. The two are the same number
+	; seen from the two ends of the same protocol, and a reader comparing
+	; them must not have to allow for the sixty-odd frames since.
+	lda okFrames
+	sta hbOkAt
+	lda okFrames+1
+	sta hbOkAt+1
+
+	ldx #4
+dhTry
+	stx hbTry
+
+	; Poison the trailer, not the body: the body is what the check bytes
+	; are computed over, and zeroing it would make a block that never
+	; arrived check out perfectly.
+	lda #0
+	sta healthBuf+HB_MAGIC
+	sta healthBuf+HB_MAGIC+1
+	sta healthBuf+HB_MAGIC+2
+	sta healthBuf+HB_MAGIC+3
+
+	#argblob 0, SPACE_C64, healthBuf, HB_LEN
+	lda #OP_GET_HEALTH
+	jsr cmdClass0
+	bne dhRetry
+	jsr hbCheck
+	beq dhDone
+dhRetry
+	ldx hbTry
+	dex
+	bne dhTry
+	lda hbBad
+	cmp #255
+	beq dhDone
+	inc hbBad
+dhDone
+	rts
+
+; A = 0 if the block arrived whole. The magic says a block arrived at all;
+; the XOR catches a wrong byte and the sum catches a transposition the XOR
+; is blind to.
+hbCheck
+	lda healthBuf+HB_MAGIC
+	cmp #$47			; 'G'
+	bne hcBad
+	lda healthBuf+HB_MAGIC+1
+	cmp #$36			; '6'
+	bne hcBad
+	lda #0
+	sta hbXor
+	sta hbSum
+	ldx #0
+hcSum
+	lda healthBuf,x
+	eor hbXor
+	sta hbXor
+	clc
+	lda hbSum
+	adc healthBuf,x
+	sta hbSum
+	inx
+	cpx #HB_MAGIC+2
+	bne hcSum
+	lda hbXor
+	cmp healthBuf+HB_MAGIC+2
+	bne hcBad
+	lda hbSum
+	cmp healthBuf+HB_MAGIC+3
+	bne hcBad
+	lda #0
+	rts
+hcBad
+	lda #$ff
+	rts
+
+; A = the core temperature in whole degrees. The block carries tenths, and
+; a reader looking at a photograph wants 62 and not 026A.
+hbTempC
+	lda healthBuf+HB_TEMP
+	sta tmpLo
+	lda healthBuf+HB_TEMP+1
+	sta tmpHi
+	ldx #0
+htLoop
+	lda tmpLo
+	sec
+	sbc #10
+	tay
+	lda tmpHi
+	sbc #0
+	bcc htDone			; less than ten tenths left
+	sty tmpLo
+	sta tmpHi
+	inx
+	cpx #255
+	bne htLoop
+htDone
+	txa
+	rts
+
+; ======================================================================
+; The millisecond clock. See CIA2_* above for why it is a CIA timer pair
+; and not the jiffy counter.
+; ======================================================================
+
+; Start timer A on a 1ms period and timer B counting its underflows. Both
+; continuous, both force-loaded from their latches by bit 4, neither
+; enabled as an interrupt source.
+clkInit
+	lda #<CLK_PERIOD
+	sta CIA2_TALO
+	lda #>CLK_PERIOD
+	sta CIA2_TAHI
+	lda #$ff
+	sta CIA2_TBLO
+	sta CIA2_TBHI
+	lda #%00010001			; force load, continuous, start
+	sta CIA2_CRA
+	lda #%01010001			; + count timer A underflows
+	sta CIA2_CRB
+	; Both marks start here, so the first frame measures from the first
+	; frame and not from whenever the counter happened to be reset.
+	jsr clkNow
+	lda msNow
+	sta msMark
+	sta msFrameMark
+	lda msNow+1
+	sta msMark+1
+	sta msFrameMark+1
+	rts
+
+; msNow = timer B, read whole. High, low, high again: the counter ticks
+; once a millisecond, so a read that straddles a borrow is rare and cheap
+; to reject, and the alternative -- accepting it -- shows up as a 256ms
+; frame that never happened.
+clkNow
+	lda CIA2_TBHI
+	sta msNow+1
+	lda CIA2_TBLO
+	sta msNow
+	lda CIA2_TBHI
+	cmp msNow+1
+	bne clkNow
+	rts
+
+; X = slot. Stores (now - msMark) in it, keeps the running maximum, and
+; moves the mark to now, so consecutive calls carve a frame into phases
+; with nothing unaccounted between them. Clamped to 255: a phase that long
+; is off the scale either way, and three digits is what fits on the row.
+clkLap
+	lda teleOn			; only the rows read the laps; clkFrame
+	bne +				; re-marks msMark each frame regardless
+	rts
++	jsr clkNow
+	lda msMark			; counts down
+	sec
+	sbc msNow
+	sta clkTmp
+	lda msMark+1
+	sbc msNow+1
+	beq +
+	lda #$ff
+	sta clkTmp
++
+	lda msNow
+	sta msMark
+	lda msNow+1
+	sta msMark+1
+	lda clkTmp
+	sta msCur,x
+	cmp msMax,x
+	bcc +
+	sta msMax,x
++
+	rts
+
+; The frame limiter: a frame never takes less than PACE_MS. The game's
+; pace no longer depends on it -- motion is scaled by dt and everything that
+; counts runs on the game tick (tickFrame) -- so this only keeps a turbo CPU
+; (the C64U's 64MHz mode, or any accelerator) from spinning faster than
+; HDMI's 60 Hz can show, and keeps dtMs above DT_MIN. The CIAs keep their
+; 1MHz clock in turbo, so this wait is in real milliseconds. At 1MHz a
+; frame is already longer and the wait falls straight through. Only the
+; main loop paces; clkFrame's other callers just re-mark.
+PACE_MS = 16
+	.cerror PACE_MS < DT_MIN, "a paced frame must measure at least DT_MIN"
+clkPace
+	jsr clkNow
+	lda msFrameMark
+	sec
+	sbc msNow
+	tax
+	lda msFrameMark+1
+	sbc msNow+1
+	bne +				; 256ms or more: long past the limit
+	cpx #PACE_MS
+	bcc clkPace
++	rts
+
+; The frame period, measured start to start, and the one reading here that
+; is not a phase: it includes whatever the loop spends outside the four
+; phases as well. Re-marks BOTH clocks, so the first phase of the new frame
+; starts where the period does.
+clkFrame
+	jsr clkNow
+	lda msFrameMark
+	sec
+	sbc msNow
+	sta clkTmp
+	lda msFrameMark+1
+	sbc msNow+1
+	beq +
+	lda #$ff
+	sta clkTmp
++
+	lda msNow
+	sta msMark
+	sta msFrameMark
+	lda msNow+1
+	sta msMark+1
+	sta msFrameMark+1
+	ldx #MS_PER
+	lda clkTmp
+	sta msCur,x
+	cmp msMax,x
+	bcc +
+	sta msMax,x
++
+	cmp msPerMin
+	bcs +
+	sta msPerMin
++
+	; fall through
+
+; The frame's motion scale, from the period just measured (clkTmp). Every
+; per-frame step the frame will take is computed here, once.
+dtFrame
+	lda clkTmp
+	cmp #DT_MIN
+	bcs +
+	lda #DT_MIN
++	cmp #DT_MAX+1
+	bcc +
+	lda #DT_MAX
++	sta dtMs
+	jsr tickFrame
+	ldx dtMs
+	lda walkT,x
+	sta walkStep
+	lda runT,x
+	sta runStep
+	stx doorStep			; DOOR_STEP * dt / DT_REF = dt
+	lda gravLoT,x
+	sta gravD
+	lda gravHiT,x
+	sta gravD+1
+	txa
+	.cerror DOOR_STEP != DT_REF || PITCH_STEP != 4 || TURN != 512, "dtFrame's shortcuts"
+	lsr a
+	lsr a
+	lsr a
+	sta pitchStep			; PITCH_STEP * dt / 32 = dt / 8
+	lda #0
+	sta turnD+1
+	txa
+	.rept 4
+	asl a				; TURN * dt / 32 = dt * 16
+	rol turnD+1
+	.endrept
+	sta turnD
+	rts
+
+; The game tick. Logic that counts FRAMES -- door waits, weapon cooldowns,
+; the AI's think cadence, actor animation, the message and flash timers,
+; the void counter -- runs only on a tick frame, once per DT_REF ms of real
+; time, and sees a dt of DT_REF (tickLogic). Everything a frame SHOWS --
+; the player's move, the camera, water, the render -- runs every frame on
+; the real dtMs. So the render rate is free (60 Hz on a fast enough turbo)
+; and the game's pace is bound to time at any clock.
+;
+; A frame of DT_REF or longer is a tick of its own length, exactly as every
+; frame was before the tick existed: at 1 MHz, and in runsim at
+; --frame-ms=32, every frame ticks and nothing changes. Shorter frames add
+; up in tickAcc until DT_REF is due.
+tickFrame
+	lda dtMs
+	cmp #DT_REF
+	bcc +
+	sta tickDt			; a slow frame: one tick, its own length
+	lda #1
+	sta tick
+	rts
++	adc tickAcc			; (C clear)
+	cmp #DT_REF
+	bcc +
+	sbc #DT_REF			; (C set)
+	sta tickAcc
+	lda #DT_REF
+	sta tickDt
+	lda #1
+	sta tick
+	rts
++	sta tickAcc
+	lda #0
+	sta tick
+	rts
+
+; On a tick frame, after the player's own move: the tick's dt replaces the
+; frame's for everything logic scales (dtMul, the doors).
+tickLogic
+	lda tickDt
+	sta dtMs
+	sta doorStep
+	rts
+
+; The per-frame steps by dtMs, rounded down as dtMul would.
+walkT	.for i = 0, i <= DT_MAX, i += 1
+	.byte WALK * i / DT_REF
+	.next
+runT	.for i = 0, i <= DT_MAX, i += 1
+	.byte WALK * 2 * i / DT_REF
+	.next
+gravLoT	.for i = 0, i <= DT_MAX, i += 1
+	.byte <( GRAV * i / DT_REF )
+	.next
+gravHiT	.for i = 0, i <= DT_MAX, i += 1
+	.byte >( GRAV * i / DT_REF )
+	.next
+
+; A = A * dtMs / DT_REF, for a step no bigger than DT_MAX lets fit a byte
+; (the run step, 136, is the largest). Preserves X.
+dtMul
+	stx dtX
+	ldy dtMs
+	jsr mul8
+	lda m8L
+	.cerror DT_REF != 32, "the five shifts below are / DT_REF"
+	.rept 5
+	lsr m8H
+	ror a
+	.endrept
+	ldx dtX
+	rts
+
+; dtR (signed 24-bit) = mA (signed 16-bit) * dtMs / DT_REF. mulTrig takes a
+; scale of at most 256, so it is given dtMs * 4 (<= 240) and the product is
+; doubled back; every value scaled here is even, so at DT_REF it is exact.
+; Destroys mA. Preserves X.
+dtMulS
+	stx dtX
+	lda dtMs
+	asl a
+	asl a
+	sta mS
+	lda #0
+	sta mS+1
+	jsr mulTrig			; mR = mA * dtMs / 64
+	lda mR+1
+	and #$80
+	beq +
+	lda #$ff
++	sta dtR+2
+	lda mR
+	asl a
+	sta dtR
+	lda mR+1
+	rol a
+	sta dtR+1
+	rol dtR+2
+	ldx dtX
+	rts
+
+; ======================================================================
+; Staging an argument block twice. Run 40 flickered the rest of E1M1 through
+; the walls about once a second, and it was not the renderer: a register
+; write the polling loop does not sample leaves the register holding the
+; PREVIOUS command's byte, and before sendCamera that is a mover's position.
+; One dropped camera byte put the eye 33 or 65 units away for a frame; one
+; dropped ID byte moved a level node onto the camera, or a door onto another
+; door's id, until a refresh put it back (runsim --bus-fault=drop:400 shows
+; all three in 1500 frames). The retained scene cannot tell those writes
+; from real ones, so the only defence is not to lose them: every byte goes
+; to its register twice, a whole block apart, so a lost write is repaired
+; by the second pass instead of being believed.
+;
+; Run 41 then showed what double-writing cannot cover: a write sampled with
+; a bit flipped is believed by the second pass just as well. runsim
+; --bus-fault=data:300 still put the camera 4, 8 or 128 units off for a
+; frame and a door 8 units off until the refresh. So the block now carries
+; its own check (GPU64_KEY_CHECKED, gpu64_api.h): ARG15 = $D0|n and ARG14 =
+; the XOR of that key, CMD_HI, CMD_LO, ID_LO, ID_HI and ARG0..n-1. The Pi
+; refuses a block that does not add up with BAD_ARGS and executes nothing,
+; and every command sent this way is absolute, so it is simply sent again.
+; A firmware older than the check ignores the key and runs it unchecked.
+;
+; The check made the second pass redundant, so the block now goes once
+; (section 75): a dropped or flipped ARG/ID byte fails the XOR, and a
+; dropped ARG15 runs the block unchecked, which strict mode refuses once
+; the first checked SCENE_COMMIT has latched it. Either way it is BAD_ARGS
+; and sent again. The second pass was over 40% of every frame's writes.
+;
+; stId and stBuf hold the block; A = the class 1 opcode, X = the last ARG
+; index, or $FF for a command with no arguments. Sends it, and returns like cmd1: ERRCODE in A, Z set on OK.
+; Destroys A, X, Y.
+; ======================================================================
+stage2
+	sta stOp
+	stx stLast
+	inx
+	txa
+	ora #KEY_CHECKED
+	sta stKey
+	eor #1				; CMD_HI: this is always class 1
+	eor stOp
+	eor stId
+	eor stId+1
+	ldx stLast
+	bmi +				; X = $FF: no arguments at all
+-	eor stBuf,x
+	dex
+	bpl -
++	sta stChk
+	lda #CHK_TRIES
+	sta stTry
+st2Send
+	ldy #1				; one pass: the check replaced the second
+st2Pass
+	lda stId
+	sta ID_LO
+	lda stId+1
+	sta ID_HI
+	ldx stLast
+	bmi +
+-	lda stBuf,x
+	sta ARG,x
+	dex
+	bpl -
++	lda stChk
+	sta ARG+14
+	lda stKey
+	sta ARG+15
+	dey
+	bne st2Pass
+	lda stOp
+	jsr cmd1
+	cmp #ERR_BAD_ARGS
+	bne st2Done
+	inc chkRetry
+	bne +
+	inc chkRetry+1
++	dec stTry
+	bne st2Send
+	lda #ERR_BAD_ARGS
+st2Done
+	cmp #0
+	rts
+
+; ======================================================================
+; One class 1 command. The ERRCODE range test and the eight retries are the
+; run 27 lesson: an unreadable answer is NOT a failed command, and a single
+; garbage byte turned into a control-flow decision cost a whole bench run.
+; ======================================================================
+;
+; cmdClass0 is the same machinery aimed at class 0, for the one class 0 opcode
+; this program sends. It shares every retry with cmd1 because the argument for
+; them is about the register window, not about the class. (Not "cmd0": that is
+; a macro in gpu64.inc, and a label shadowing it assembles into a very
+; confusing error somewhere else entirely.)
+cmdClass0
+	ldx #0
+	stx CMD_HI
+	jsr cEntry
+	; CMD_HI straight back to 1. Left at 0, every ARG byte the next class 1
+	; command stages goes out under class 0, and one of $0B that the bus
+	; turns into a CMD_LO write is a FULL_RESET: every page black, the
+	; loop stopped (2026-09-28 bench, "dark like powered off").
+	ldx #1
+	stx CMD_HI
+	cmp #0
+	rts
+cmd1
+	ldx #1
+	stx CMD_HI
+cEntry
+	sta CMD_LO
+	lda ERRCODE
+	cmp #$0d			; the valid codes run $00-$0C
+	bcc c1Done
+	ldx #7
+c1ReRead
+	lda ERRCODE
+	cmp #$0d
+	bcc c1Done
+	dex
+	bne c1ReRead
+	inc errBad
+	bne +
+	inc errBad+1
++	lda #0				; report OK: the reply was lost, not the command
+c1Done
+	; Flags from the RETURN VALUE, not from the range test. Without this the
+	; Z flag a caller branches on is whatever `cmp #$0d` left behind -- which
+	; for a perfectly good ERRCODE of 0 is Z CLEAR, so every `beq` on a
+	; successful command falls through into its own error path. Caught on a
+	; PC before the bench, which is what tools/prgsim is for.
+	cmp #0
+	rts
+
+; The same with a sequence number, which is the only detector there is for
+; a CMD_LO or SEQ write the polling loop did not sample. Leaves the answer
+; in seqErr and the verdict in seqMiss (0 = the command was seen).
+cmdSeq1
+	sta seqOp
+	inc dispCt
+	bne +
+	inc dispCt+1
+	bne +
+	inc dispCt+2
++
+	; Never 0 and never $FF: 0 would let an unwritten SEQACK read as a
+	; match, $FF would let a dropped READ of SEQACK -- which returns a
+	; floating $FF -- read as one.
+	inc seqCounter
+	lda seqCounter
+	beq csWrap
+	cmp #$ff
+	bne csSeqOk
+csWrap	lda #1
+	sta seqCounter
+csSeqOk
+	lda seqCounter
+	sta SEQ
+	lda seqOp
+	jsr cmd1
+	sta seqErr
+
+	lda SEQACK
+	cmp seqCounter
+	beq csOk
+	; Read it again. SEQACK is a plain latch and the command finished long
+	; before the first read returned, so a second read that agrees proves
+	; the READ was the failure and the firmware was right all along.
+	lda SEQACK
+	cmp seqCounter
+	beq csOk
+	inc missed
+	bne +
+	inc missed+1
++	lda #1
+	sta seqMiss
+	rts
+csOk
+	lda #0
+	sta seqMiss
+	rts
+
+; ======================================================================
+; The display. Four rows, all of them printed every frame -- run 18 froze
+; at frame 256 and returned nothing because its rows were printed only at
+; finish, and a blank row is not a zero.
+
+; ======================================================================
+; The display. Four rows, all of them printed every frame -- run 18 froze
+; at frame 256 and returned nothing because its rows were printed only at
+; finish, and a blank row is not a zero.
+; ======================================================================
+; The C64-screen telemetry in slices, one every other frame: drawn whole it
+; was ~40000 cycles in one frame, a hitch every eighth frame. showFrame still
+; draws all of it, for finish.
+; F5 or start-up: rows 2-24 blanked, and while telemetry is off a line
+; saying how to bring it back. Rows 0-1 (title, SETUP) stay.
+teleShown
+	ldx #0
+	lda #$20
+-	sta SCREEN+80,x
+	sta SCREEN+80+$100,x
+	sta SCREEN+80+$200,x
+	inx
+	bne -
+-	sta SCREEN+80+$300,x		; the last 920 - 768 = 152
+	inx
+	cpx #152
+	bne -
+	lda teleOn
+	bne +
+	lda #2
+	jsr dmRow
+	jsr dmText
+	.text "TELEMETRY OFF - F5 SHOWS IT"
+	.byte 0
++	rts
+
+showSlice
+	dec dispWait
+	bne ssRts
+	lda #DISP_EVERY
+	sta dispWait
+	ldx dispSlice
+	inx
+	cpx #SHOW_N
+	bcc +
+	ldx #0
++	stx dispSlice
+	lda showHi,x
+	pha
+	lda showLo,x
+	pha
+ssRts
+	rts				; to the slice, which returns to our caller
+
+showFrame
+	ldx #0
+-	stx dispSlice
+	lda #>( sfNext - 1 )
+	pha
+	lda #<( sfNext - 1 )
+	pha
+	lda showHi,x
+	pha
+	lda showLo,x
+	pha
+	rts
+sfNext
+	ldx dispSlice
+	inx
+	cpx #SHOW_N
+	bne -
+	rts
+
+SHOW_TAB = [showS0, showS1, showS2, showS3, showS4, showS5, showS6, showS7, showWorld, showCombat, showAi, showEnv]
+SHOW_N = len(SHOW_TAB)
+showLo	.byte <( SHOW_TAB - 1 )
+showHi	.byte >( SHOW_TAB - 1 )
+
+showS0
+	; Row 4: where this program believes the camera is. The three integer
+	; world coordinates and the top byte of the heading, which is also the
+	; sine table index the step was taken with.
+	;
+	; All three coordinates now come back from CLIP_MOVE, so Y is no longer
+	; the fixed reference an earlier version of this program could check a
+	; corrupted register write against -- row 13 and the block's own
+	; checksum are what watch the move instead. What Y still says at a
+	; glance is whether the player is standing on something: in E1M1's
+	; first room the eye sits near 0070, and a Y falling without bound is
+	; the floor trace failing. Printed as the integer part only: bench
+	; telemetry is read off a photograph of a CRT, and a reader who has to
+	; subtract two numbers to reach a verdict will not.
+	lda #4
+	jsr dmRow
+	jsr dmText
+	.text "CAM X"
+	.byte 0
+	lda cam+CAM_X+3
+	jsr dmHexA
+	lda cam+CAM_X+2
+	jsr dmHexA
+	jsr dmText
+	.text " Y"
+	.byte 0
+	lda cam+CAM_Y+3
+	jsr dmHexA
+	lda cam+CAM_Y+2
+	jsr dmHexA
+	jsr dmText
+	.text " Z"
+	.byte 0
+	lda cam+CAM_Z+3
+	jsr dmHexA
+	lda cam+CAM_Z+2
+	jsr dmHexA
+	jsr dmText
+	.text " YAW"
+	.byte 0
+	lda camYaw+1
+	jsr dmHexA
+	jsr dmText
+	.text " P"
+	.byte 0
+	lda posErr
+	jsr dmHexA
+
+	lda #5
+	jsr dmRow
+	jsr dmText
+	.text "FRAMES  "
+	.byte 0
+	lda frames+1
+	jsr dmHexA
+	lda frames
+	jsr dmHexA
+	jsr dmText
+	.text "  OK "
+	.byte 0
+	lda okFrames+1
+	jsr dmHexA
+	lda okFrames
+	jsr dmHexA
+	rts
+
+showS1
+
+	lda #6
+	jsr dmRow
+	jsr dmText
+	.text "CMT  07 "
+	.byte 0
+	lda e07+1
+	jsr dmHexA
+	lda e07
+	jsr dmHexA
+	jsr dmText
+	.text "  06 "
+	.byte 0
+	lda e06+1
+	jsr dmHexA
+	lda e06
+	jsr dmHexA
+	jsr dmText
+	.text "  XX "
+	.byte 0
+	lda eXX+1
+	jsr dmHexA
+	lda eXX
+	jsr dmHexA
+	jsr dmText
+	.text " "
+	.byte 0
+	lda xxCode
+	jsr dmHexA
+
+	lda #7
+	jsr dmRow
+	jsr dmText
+	.text "MISSED  "
+	.byte 0
+	lda missed+1
+	jsr dmHexA
+	lda missed
+	jsr dmHexA
+	jsr dmText
+	.text "  DISP "
+	.byte 0
+	lda dispCt+2
+	jsr dmHexA
+	lda dispCt+1
+	jsr dmHexA
+	lda dispCt
+	jsr dmHexA
+	rts
+
+showS2
+
+	lda #8
+	jsr dmRow
+	jsr dmText
+	.text "STALLS  "
+	.byte 0
+	lda stalls+1
+	jsr dmHexA
+	lda stalls
+	jsr dmHexA
+	jsr dmText
+	.text "  AT "
+	.byte 0
+	lda stallAt+1
+	jsr dmHexA
+	lda stallAt
+	jsr dmHexA
+	jsr dmText
+	.text "  ERRBAD "
+	.byte 0
+	lda errBad+1
+	jsr dmHexA
+	lda errBad
+	jsr dmHexA
+
+	; Rows 9 and 10: where a frame's time goes, in milliseconds off CIA2.
+	; Decimal, because the question these answer is "how many frames a
+	; second" and the reader has a photograph, not a calculator.
+	;
+	; Row 9 is the frame period: 1000/CUR is the rate the player is
+	; actually getting, and MIN against MAX is the steadiness they
+	; complained about. Row 10 splits the worst frame into its phases, so
+	; a large period names its own cause -- WAIT is core 1 rendering,
+	; CMT is core 1 rendering with the C64 halted, CAM is the command
+	; path, DISP is these two rows costing more than they are worth.
+	;
+	; The DISP figure is one frame behind by construction: it is measured
+	; after this routine returns.
+	lda #9
+	jsr dmRow
+	jsr dmText
+	.text "MS/FRAME  CUR "
+	.byte 0
+	lda msCur+MS_PER
+	jsr dmDecA
+	jsr dmText
+	.text "  MIN "
+	.byte 0
+	lda msPerMin
+	jsr dmDecA
+	jsr dmText
+	.text "  MAX "
+	.byte 0
+	lda msMax+MS_PER
+	jsr dmDecA
+	rts
+
+showS3
+
+	lda #10
+	jsr dmRow
+	jsr dmText
+	.text "MS MAX  CAM "
+	.byte 0
+	lda msMax+MS_CAM
+	jsr dmDecA
+	jsr dmText
+	.text " WAIT "
+	.byte 0
+	lda msMax+MS_WAIT
+	jsr dmDecA
+	jsr dmText
+	.text " CMT "
+	.byte 0
+	lda msMax+MS_CMT
+	jsr dmDecA
+	jsr dmText
+	.text " D "
+	.byte 0
+	lda msMax+MS_DISP
+	jsr dmDecA
+
+	; Rows 11 and 12: the Pi's own account of itself, resampled every
+	; HB_EVERY frames.
+	;
+	; PWR is the throttle word latched since this program started, in hex
+	; because it is a bit field: 0000 is the healthy reading and bit 0 or
+	; bit 16 set is a power verdict, not a hint. BAD counts health samples
+	; that failed to verify -- without it a frozen row reads as a Pi whose
+	; numbers stopped changing.
+	;
+	; FLIP is what the Pi thinks it presented and OK is what this program
+	; thinks it asked for, both as of the same sample. They are the two
+	; ends of one count, and only one of them is the picture. SLOW and DTO
+	; are the flip path's two pathologies (Source/Firmware/gpu64_flip.h);
+	; both should be 0000.
+	lda #11
+	jsr dmRow
+	jsr dmText
+	.text "PWR "
+	.byte 0
+	lda healthBuf+HB_PWR+1
+	jsr dmHexA
+	lda healthBuf+HB_PWR
+	jsr dmHexA
+	jsr dmText
+	.text "  HOT "
+	.byte 0
+	jsr hbTempC
+	jsr dmDecA
+	jsr dmText
+	.text "  HB "
+	.byte 0
+	lda msMax+MS_HB
+	jsr dmDecA
+	jsr dmText
+	.text "  BAD "
+	.byte 0
+	lda hbBad
+	jsr dmDecA
+	rts
+
+showS4
+
+	lda #12
+	jsr dmRow
+	jsr dmText
+	.text "FLIP "
+	.byte 0
+	lda healthBuf+HB_FLIPS+1
+	jsr dmHexA
+	lda healthBuf+HB_FLIPS
+	jsr dmHexA
+	jsr dmText
+	.text " OK "
+	.byte 0
+	lda hbOkAt+1
+	jsr dmHexA
+	lda hbOkAt
+	jsr dmHexA
+	jsr dmText
+	.text " SLOW "
+	.byte 0
+	lda healthBuf+HB_SLOW+1
+	jsr dmHexA
+	lda healthBuf+HB_SLOW
+	jsr dmHexA
+	jsr dmText
+	.text " DTO "
+	.byte 0
+	lda healthBuf+HB_DTO+1
+	jsr dmHexA
+	lda healthBuf+HB_DTO
+	jsr dmHexA
+
+	; Row 13: the collision answer, and then four separate ways it can go
+	; wrong. F 01 is standing on ground, which is what walking looks like;
+	; 02 means the step hit a wall and slid along it; 08 means it climbed
+	; something; 10 means the eye started inside solid and the move was
+	; refused. FR is how much of the requested step was actually covered,
+	; out of FF. E is the LAST ERRCODE, a diagnostic only -- see clipMove.
+	;
+	; The four counters are deliberately not one number. Run 37 printed a
+	; single BAD of 1072 frames in 1753 and that number could not say which
+	; direction the bytes were being lost in, which is the only thing worth
+	; knowing:
+	;   N  attempts whose ERRCODE came back non-zero. The Pi rejected the
+	;      INPUT block, so a byte we wrote never arrived.
+	;   M  attempts whose output magic was wrong. The Pi's writeback never
+	;      landed at all, or landed somewhere else.
+	;   S  attempts whose output checksum was wrong but magic was right.
+	;      The writeback landed and arrived damaged.
+	;   W  answers that passed magic AND checksum and were still refused,
+	;      because they put the player further away than the step asked
+	;      for. This is the bus getting past both channel checks, and one
+	;      of these uncaught is a permanently wrong position (run 36).
+	; N M S all retry, so they cost a frame's precision, not the frame.
+	lda #13
+	jsr dmRow
+	jsr dmText
+	.text "CLIP F"
+	.byte 0
+	lda clipFlags
+	jsr dmHexA
+	jsr dmText
+	.text " FR"
+	.byte 0
+	lda clipFrac
+	jsr dmHexA
+	jsr dmText
+	.text " E"
+	.byte 0
+	lda clipErr
+	jsr dmHexA
+	jsr dmText
+	.text " N"
+	.byte 0
+	lda clipN+1
+	jsr dmHexA
+	lda clipN
+	jsr dmHexA
+	jsr dmText
+	.text " M"
+	.byte 0
+	lda clipM+1
+	jsr dmHexA
+	lda clipM
+	jsr dmHexA
+	jsr dmText
+	.text " S"
+	.byte 0
+	lda clipS+1
+	jsr dmHexA
+	lda clipS
+	jsr dmHexA
+	jsr dmText
+	.text " W"
+	.byte 0
+	lda clipWild
+	jsr dmHexA
+	rts
+
+showS5
+
+	; Rows 14-16: the game. These are what separate this program from the
+	; level walk-through it grew out of.
+	;
+	; Row 14 is the frame's work: how many movers and trigger volumes the
+	; scan found, how many of the movers were handed to this frame's trace
+	; (SEL, never more than 16), how many are mid-animation, and what the
+	; whole of the game logic costs in milliseconds. MS is the honest
+	; answer to "can a 6502 run this": if it is small, the C64 is not the
+	; reason a frame is slow.
+	;
+	; Row 15 is causation, which is the row to read when a door will not
+	; open. OPENED counts CLOSED->OPENING transitions since start-up, so
+	; walking into a door and seeing it not move is one reading and seeing
+	; the count rise anyway is a different bug entirely. FIRED is the last
+	; targetname id put on the queue and NODE the last scene node a
+	; SET_POSITION was aimed at -- a FIRED that changes with a NODE that
+	; does not means the wiring found nothing to open.
+	;
+	; Row 16 is the scan, printed because everything above it is downstream
+	; of it: ENTS is the level's entity count as the Pi reports it, BAD the
+	; records that failed magic-and-checksum three times running, and DROP
+	; the ones that arrived fine and had nowhere to go because a table was
+	; full. A nonzero DROP on E1M1 means MAX_MOV or MAX_TRG is too small
+	; for this level, and is a different complaint from BAD.
+	lda #14
+	jsr dmRow
+	jsr dmText
+	.text "GAME  MOV "
+	.byte 0
+	lda nMov
+	jsr dmDecA
+	jsr dmText
+	.text " TRG "
+	.byte 0
+	lda nTrg
+	jsr dmDecA
+	jsr dmText
+	.text " SEL "
+	.byte 0
+	lda selCnt
+	jsr dmDecA
+	jsr dmText
+	.text " MS "
+	.byte 0
+	lda msMax+MS_GAME
+	jsr dmDecA
+
+	lda #15
+	jsr dmRow
+	jsr dmText
+	.text "OPEN "
+	.byte 0
+	lda openCt+1
+	jsr dmHexA
+	lda openCt
+	jsr dmHexA
+	jsr dmText
+	.text " ANI "
+	.byte 0
+	lda aniCt
+	jsr dmDecA
+	jsr dmText
+	.text " FIRE "
+	.byte 0
+	lda lastFireH
+	jsr dmHexA
+	lda lastFireL
+	jsr dmHexA
+	jsr dmText
+	.text " NODE "
+	.byte 0
+	lda lastNodeH
+	jsr dmHexA
+	lda lastNodeL
+	jsr dmHexA
+	rts
+
+showS6
+
+	lda #16
+	jsr dmRow
+	jsr dmText
+	.text "ENTS "
+	.byte 0
+	lda entTot+1
+	jsr dmHexA
+	lda entTot
+	jsr dmHexA
+	jsr dmText
+	.text " BAD "
+	.byte 0
+	lda entBad
+	jsr dmDecA
+	jsr dmText
+	.text " DROP "
+	.byte 0
+	lda entDrop
+	jsr dmDecA
+	jsr dmText
+	.text " PE "
+	.byte 0
+	lda movErr
+	jsr dmHexA
+	jsr dmText
+	.text " CK"
+	.byte 0
+	lda chkRetry+1
+	jsr dmHexA
+	lda chkRetry
+	jsr dmHexA
+
+	; Row 17: the view the keys have set; NODES is how long the level's
+	; node run turned out to be, FIX how many times LEVEL_NODE found one
+	; damaged and put it back.
+	lda #17
+	jsr dmRow
+	jsr dmText
+	.text "VIEW FOV "
+	.byte 0
+	ldx fovIx
+	lda fovDegTab,x
+	jsr dmDecA
+	jsr dmText
+	.text " PIT "
+	.byte 0
+	lda camPitch
+	bmi sfPitNeg
+	jsr dmText
+	.text "+"
+	.byte 0
+	lda camPitch
+	jmp sfPit
+sfPitNeg
+	jsr dmText
+	.text "-"
+	.byte 0
+	lda #0
+	sec
+	sbc camPitch
+sfPit
+	jsr dmDecA
+	jsr dmText
+	.text " NODES "
+	.byte 0
+	lda lnCount
+	jsr dmDecA
+	jsr dmText
+	.text " FIX "
+	.byte 0
+	lda lnFix
+	jsr dmDecA
+	rts
+
+showS7
+
+	; Row 18: the refresh rings. PAL is how many times LEVEL_PALETTE found
+	; the palette damaged and put it back, LAST how many entries the most
+	; recent repair touched -- a nonzero PAL is a phantom that would have
+	; been permanent before this ring existed. CAM is how many times the
+	; camera had stopped being a camera and was made one again.
+	lda #18
+	jsr dmRow
+	jsr dmText
+	.text "RING ERR "
+	.byte 0
+	lda rgErrs
+	jsr dmDecA
+	jsr dmText
+	.text " PAL "
+	.byte 0
+	lda palFixes+1
+	jsr dmHexA
+	lda palFixes
+	jsr dmHexA
+	jsr dmText
+	.text " LAST "
+	.byte 0
+	lda palLast
+	jsr dmDecA
+	jsr dmText
+	.text " CAM "
+	.byte 0
+	lda camFix
+	jsr dmDecA
+
+	; Row 19: the player's own body. STUCK is how many answers started or
+	; ended inside solid and put the player back where they last stood;
+	; VOID how many falls ran past VOID_FRAMES and did the same. Either
+	; one nonzero is a bad answer that got past the checksum AND the bound
+	; and would have been the rest of the session (run 39). JMP counts
+	; jumps, G is 1 while standing. D is DRY: frames in a row, now and at
+	; worst, in which no CLIP_MOVE answer was taken -- see cmDry.
+	lda #19
+	jsr dmRow
+	jsr dmText
+	.text "BODY JMP "
+	.byte 0
+	lda jumps
+	jsr dmDecA
+	jsr dmText
+	.text " STK "
+	.byte 0
+	lda clipStuck
+	jsr dmDecA
+	jsr dmText
+	.text " VD "
+	.byte 0
+	lda clipVoid
+	jsr dmDecA
+	jsr dmText
+	.text " G"
+	.byte 0
+	lda onGround
+	jsr dmHexA
+	jsr dmText
+	.text " D"
+	.byte 0
+	lda clipDry
+	jsr dmHexA
+	jsr dmText
+	.text "/"
+	.byte 0
+	lda clipDryMax
+	jsr dmHexA
+	rts
+
+fovDegTab
+	.for i = 0, i < FOV_N, i += 1
+	.byte FOV_DEG0 + i * FOV_STEP
+	.next
+
+; The load's verdict, which is the whole reading if the level never built.
+; Prints the ERRCODE and the item number RESULT carries -- the loader stamps
+; the failing item there, so a failure names its address and not just its
+; kind.
+showLoadErr
+	lda #2
+	jsr dmRow
+	jsr dmText
+	.text "LOAD    FAILED ERR "
+	.byte 0
+	lda loadErr
+	ora stepErr
+	jsr dmHexA
+	jsr dmText
+	.text " AT PCT "
+	.byte 0
+	lda stepPct
+	jsr dmHexA
+	jsr dmText
+	.text " ITEM "
+	.byte 0
+	lda RESULT
+	jsr dmHexA
+
+	lda #3
+	jsr dmRow
+	jsr dmText
+	.text "04 USUALLY MEANS NO RAD/LEVEL.G64LEV"
+	.byte 0
+	rts
+
+; ----------------------------------------------------------------------
+vpErr		.byte 0
+perErr		.byte 0
+resErr		.byte 0
+camErr		.byte 0
+loopErr		.byte 0
+loadErr		.byte 0
+lvSlot		.byte 0		; the Pi's level slot: n-1 for E1Mn
+stepErr		.byte 0
+stepPct		.byte 0
+stepCt		.word 0
+stopTry		.byte 0
+
+frames		.word 0
+okFrames	.word 0
+e06		.word 0
+e07		.word 0
+eXX		.word 0
+xxCode		.byte 0
+missed		.word 0
+errBad		.word 0
+dispCt		.byte 0, 0, 0
+stalls		.word 0
+stallAt		.word 0
+waitCt		.word 0
+wrMs		.byte 0
+wrPumps		.word 0
+
+; The clock's state. msCur/msMax are indexed by the MS_* slots.
+msNow		.word 0
+msMark		.word 0
+msFrameMark	.word 0
+clkTmp		.byte 0
+msCur		.fill MS_SLOTS, 0
+teleOn		.byte 0
+teleHold	.byte 0
+msMax		.fill MS_SLOTS, 0
+msPerMin	.byte $ff
+dispWait	.byte 1
+dispSlice	.byte 0
+
+hbWait		.byte 1
+hbOkAt		.word 0
+hbTry		.byte 0
+hbBad		.byte 0
+hbXor		.byte 0
+hbSum		.byte 0
+tmpLo		.byte 0
+tmpHi		.byte 0
+
+seqCounter	.byte 0
+seqOp		.byte 0
+seqErr		.byte 0
+seqMiss		.byte 0
+keyB		.byte 0
+keyC		.byte 0
+keyD		.byte 0
+stepLo		.byte 0
+bmChk		.byte 0
+dtMs		.byte DT_REF
+tick		.byte 1			; this frame is a game tick (tickFrame)
+tickAcc		.byte 0			; ms toward the next tick, < DT_REF
+tickDt		.byte DT_REF		; the tick's dt
+dtX		.byte 0
+dtR		.fill 3, 0
+walkStep	.byte WALK
+runStep		.byte WALK * 2
+doorStep	.byte DOOR_STEP
+pitchStep	.byte PITCH_STEP
+turnD		.word TURN
+gravD		.word GRAV
+
+; ----------------------------------------------------------------------
+; The camera this program owns. Twelve bytes in exactly the order
+; SET_POSITION reads them -- x, y, z as signed 16.16 world units -- so
+; sending it is a copy loop and never a rearrangement.
+; ----------------------------------------------------------------------
+cam		.fill 12, 0
+camYaw		.word 0
+
+; Where the Pi's two readbacks land: GET_HEALTH's block and the starting
+; pose GET_TRANSFORM hands back. Adjacent, and in this order, because one
+; SET_DMA_WINDOW covers both -- see DMA_LEN. A dropped ARG byte can still
+; corrupt the destination address; what it can no longer do is aim the
+; writeback at this program's code.
+healthBuf	.fill HB_LEN, 0
+camBuf		.fill CAM_BUF_LEN, 0
+clipBlk		.fill CLIP_LEN, 0
+bmStale		.byte 1
+
+; And the entity record, which is a readback too: it has to be inside the
+; same window, so it is declared here beside the others and not down with
+; the rest of the game's state.
+entBlk		.fill ENT_LEN, 0
+
+; The WORLD_TICK block (gpu64_game_world.inc): the answers are written into
+; its tail, so it is a readback and lives in the window too.
+wtBlk		.fill WT_LEN, 0
+
+; The displacement this frame asks CLIP_MOVE for: twelve bytes in the same
+; x, y, z 16.16 order as cam, because camAdd accumulates into it with the
+; same CAM_X/CAM_Y/CAM_Z offsets.
+mov		.fill 12, 0
+
+; CLIP_MOVE's last answer, kept for row 13. clipCont and clipBumps are read
+; out of the block but no longer printed: row 13 has to fit in 40 columns and
+; the four rejection counters below earned those columns off run 37.
+clipFlags	.byte 0
+clipCont	.byte 0
+clipFrac	.byte 0
+clipBumps	.byte 0
+clipErr		.byte 0
+
+; Why the answer was refused, split three ways, because the three have
+; nothing to do with each other. N is a non-zero ERRCODE: the Pi rejected
+; what we sent, or the ERRCODE read itself was garbled. M is a bad output
+; magic: the writeback never landed and the poison is still there. S is a
+; bad output checksum: the writeback landed corrupted. One lumped counter
+; said 61% of frames failed and could not say which way the bytes were
+; going.
+clipN		.word 0
+clipM		.word 0
+clipS		.word 0
+cmTry		.byte 0
+
+; clipWild counts the answers that passed magic and checksum and were still
+; refused, because they put the eye further from the start than the step
+; asked for. Distinct from N/M/S on purpose: those three are the bus being
+; caught by a channel check, clipWild is the bus getting past both of them
+; and being caught by what the answer MEANS instead.
+clipWild	.byte 0
+cbD0		.byte 0
+cbD1		.byte 0
+cbM0		.byte 0
+cbM1		.byte 0
+cbD2		.byte 0
+
+; The jump and the recovery. velY is the vertical step in 16.16's low word,
+; signed; VEL_MIN while standing. lastGood is the eye where the player last
+; stood, which a stuck or lost player is put back to. clipStuck counts
+; answers that started or ended in solid, clipVoid falls that ran out of
+; VOID_FRAMES -- both saturate, both on row 19.
+velY		.word VEL_MIN
+onGround	.byte 0
+jumping		.byte 0
+spcHold		.byte 0
+airFrames	.byte 0
+jumps		.byte 0
+clipStuck	.byte 0
+clipVoid	.byte 0
+stuckRun	.byte 0
+lastGood	.fill 12
+
+; camAdd's workspace.
+mLo		.byte 0
+mHi		.byte 0
+mult		.byte 0
+prod0		.byte 0
+prod1		.byte 0
+prod2		.byte 0
+dirNeg		.byte 0
+caNeg		.byte 0
+camOff		.byte 0
+
+; Verdicts. posErr is the per-frame camera send and belongs on row 4;
+; getErr and the fence belong to setup and are printed on row 3.
+posErr		.byte 0
+getErr		.byte 0
+getTry		.byte 0
+fenceErr	.byte 0
+fenceTry	.byte 0
+fenceEcho	.byte 0
+
+; ----------------------------------------------------------------------
+; The game's own state. Every table is a set of PARALLEL byte arrays
+; indexed by the mover or trigger number, and not an array of structures:
+; a structure of this width needs a 16-bit offset and a multiply to reach,
+; where parallel arrays are one `lda table,x` each. It is more lines of
+; source and far less code, and X addresses all of it directly.
+; ----------------------------------------------------------------------
+nMov		.byte 0
+nTrg		.byte 0
+entIdx		.word 0
+entTot		.word 0
+entBad		.byte 0
+entDrop		.byte 0
+erCount		.byte 0
+
+; What a mover IS: its model, the run of scene nodes that draw it, and the
+; two pool ids that wire it to the rest of the level.
+mvModel		.fill MAX_MOV, 0
+mvNodeL		.fill MAX_MOV, 0
+mvNodeH		.fill MAX_MOV, 0
+mvNodeC		.fill MAX_MOV, 0
+mvKind		.fill MAX_MOV, 0
+mvTnL		.fill MAX_MOV, 0
+mvTnH		.fill MAX_MOV, 0
+mvTgL		.fill MAX_MOV, 0
+mvTgH		.fill MAX_MOV, 0
+
+; What a mover is DOING: the state machine, how far along it is out of 255,
+; how many frames it stays open, and whether its nodes need re-sending.
+mvState		.fill MAX_MOV, 0
+mvFrac		.fill MAX_MOV, 0
+mvWait		.fill MAX_MOV, 0
+mvDirty		.fill MAX_MOV, 0
+
+; Where it is: base (the entity origin, 16.16), travel (the full
+; displacement when open, 16.16) and ofs (travel * frac, recomputed only on
+; the frames the fraction changes).
+mvBX0		.fill MAX_MOV, 0
+mvBX1		.fill MAX_MOV, 0
+mvBX2		.fill MAX_MOV, 0
+mvBX3		.fill MAX_MOV, 0
+mvBY0		.fill MAX_MOV, 0
+mvBY1		.fill MAX_MOV, 0
+mvBY2		.fill MAX_MOV, 0
+mvBY3		.fill MAX_MOV, 0
+mvBZ0		.fill MAX_MOV, 0
+mvBZ1		.fill MAX_MOV, 0
+mvBZ2		.fill MAX_MOV, 0
+mvBZ3		.fill MAX_MOV, 0
+mvTX1		.fill MAX_MOV, 0
+mvTX2		.fill MAX_MOV, 0
+mvTX3		.fill MAX_MOV, 0
+mvTY1		.fill MAX_MOV, 0
+mvTY2		.fill MAX_MOV, 0
+mvTY3		.fill MAX_MOV, 0
+mvTZ1		.fill MAX_MOV, 0
+mvTZ2		.fill MAX_MOV, 0
+mvTZ3		.fill MAX_MOV, 0
+mvOX0		.fill MAX_MOV, 0
+mvOX1		.fill MAX_MOV, 0
+mvOX2		.fill MAX_MOV, 0
+mvOX3		.fill MAX_MOV, 0
+mvOY0		.fill MAX_MOV, 0
+mvOY1		.fill MAX_MOV, 0
+mvOY2		.fill MAX_MOV, 0
+mvOY3		.fill MAX_MOV, 0
+mvOZ0		.fill MAX_MOV, 0
+mvOZ1		.fill MAX_MOV, 0
+mvOZ2		.fill MAX_MOV, 0
+mvOZ3		.fill MAX_MOV, 0
+
+; The closed bounding box, in fine units (1/256 world unit, signed 16-bit).
+mvMnXl		.fill MAX_MOV, 0
+mvMnXh		.fill MAX_MOV, 0
+mvMnYl		.fill MAX_MOV, 0
+mvMnYh		.fill MAX_MOV, 0
+mvMnZl		.fill MAX_MOV, 0
+mvMnZh		.fill MAX_MOV, 0
+mvMxXl		.fill MAX_MOV, 0
+mvMxXh		.fill MAX_MOV, 0
+mvMxYl		.fill MAX_MOV, 0
+mvMxYh		.fill MAX_MOV, 0
+mvMxZl		.fill MAX_MOV, 0
+mvMxZh		.fill MAX_MOV, 0
+
+; The trigger tables are past the pause menu, under BASIC (see the end).
+
+; This frame's selection, nearest first.
+selIdx		.fill SEL_MAX, 0
+selScore	.fill SEL_MAX, 0
+selCnt		.byte 0
+gsI		.byte 0
+gsScore		.byte 0
+gsHoleIx	.byte 0
+
+; buildMovers' cursors, and the running checksum clipMove now carries over
+; the mover records as well as the block.
+bldIx		.byte 0
+clipChk		.byte 0
+
+; The player, and the box under test, both in fine units.
+pfX		.word 0
+pfY		.word 0
+pfZ		.word 0
+pfXb		.byte 0
+pfZb		.byte 0
+fxR		.byte 0
+fxT		.byte 0
+bxMnX		.word 0
+bxMnY		.word 0
+bxMnZ		.word 0
+bxMxX		.word 0
+bxMxY		.word 0
+bxMxZ		.word 0
+bsSum		.word 0
+exH		.word 0
+exYlo		.word 0
+exYhi		.word 0
+biLo		.byte 0
+biHi		.byte 0
+
+; The touch pass and the fire queue.
+gtI		.byte 0
+ftI		.byte 0
+fireQL		.fill FIRE_Q, 0
+fireQH		.fill FIRE_Q, 0
+fireN		.byte 0
+fireRd		.byte 0
+fireTL		.byte 0
+fireTH		.byte 0
+fpLo		.byte 0
+fpHi		.byte 0
+lastFireL	.byte 0
+lastFireH	.byte 0
+openCt		.word 0
+
+; The animation pass and its 32x8 multiply.
+gaI		.byte 0
+aniCt		.byte 0
+moI		.byte 0
+moFrac		.byte 0
+moNeg		.byte 0
+moMul		.byte 0
+t0		.byte 0
+t1		.byte 0
+t2		.byte 0
+t3		.byte 0
+p0		.byte 0
+p1		.byte 0
+p2		.byte 0
+p3		.byte 0
+p4		.byte 0
+
+; The send pass. refreshIx is the repair ring's cursor and moves one mover
+; per frame whether anything is wrong or not.
+smI		.byte 0
+spI		.byte 0
+spCount		.byte 0
+spNode		.word 0
+stId		.word 0
+clipDry		.byte 0
+clipDryMax	.byte 0
+stBuf		.fill 12
+stLast		.byte 0
+stOp		.byte 0
+stKey		.byte 0
+stChk		.byte 0
+stTry		.byte 0
+chkRetry	.word 0		; blocks the Pi refused on the check (row 16 CK)
+refreshIx	.byte 0
+movErr		.byte 0
+lastNodeL	.byte 0
+lastNodeH	.byte 0
+
+; The view keys and the refresh rings -- see doRefresh.
+keyA		.byte 0
+keyE		.byte 0
+keyF		.byte 0
+keyG		.byte 0
+keyH		.byte 0
+port1		.byte $ff
+mouseSeen	.byte 0
+mouseProbe	.byte 0		; 0: the first frame probes
+p1Mask		.byte 0
+fireDown	.byte 0
+potX		.byte $ff
+potY		.byte $ff
+potOld		.byte $ff, $ff
+potNew		.byte 0
+mdLo		.byte 0
+mdHi		.byte 0
+mdY		.byte 0
+mouseSens	.byte MOUSE_SENS	; the controls menu's MOUSE SPEED, less one
+mlSign		.byte 0
+msMulT		.byte 0
+msRLo		.byte 0
+msRHi		.byte 0
+mgCur		.byte 0
+mgPrev		.byte 0
+mgRun		.byte 0
+maSign		.byte 0
+maTmp		.byte 0
+accX		.word 0		; mouseIrq's POT X counts since mouseLook
+accY		.byte 0		; ... and POT Y's, saturating
+potSync		.byte 0		; 1: the next sample is only the reference
+potSkip		.byte 0		; 1: the next sample may be unsettled
+rkTimer		.byte 0
+camPitch	.byte 0
+fovIx		.byte 0
+fovDirty	.byte 0
+fovHold		.byte 0
+stopHold	.byte 0
+fovErr		.byte 0
+rgIx		.byte 0
+rgErrs		.byte 0
+palErr		.byte 0
+palLast		.byte 0
+palFixes	.word 0
+lnCount		.byte 0
+lnFix		.byte 0
+camFix		.byte 0
+lnLast		.byte 0
+lnIx		.byte 0
+lnI		.byte 0
+lnK		.byte 0
+lnFlag		.fill 256, 0
+
+	.include "gpu64_game_world.inc"
+	.include "gpu64_game_combat.inc"
+	.include "gpu64_game_ai.inc"
+	.include "gpu64_game_env.inc"
+	.include "gpu64_game_title.inc"
+	.include "gpu64_game_sfx.inc"
+	.include "gpu64_game_exit.inc"
+
+
+; ----------------------------------------------------------------------
+; sin(a) as 8.8, 256 entries over a full turn: the whole reason the camera
+; can live on the C64. The index is the TOP byte of the 16-bit wire angle,
+; which makes the truncation from 65536 steps to 256 a shift and the wrap
+; free.
+;
+; The range is -256..+256 inclusive, so it does not fit in a byte and the
+; table is two. That is also why camAdd multiplies magnitudes and carries
+; the sign separately: a signed 8-bit multiply has nowhere to put sin(64).
+;
+; 64tass evaluates sin() and round() at assembly time, so this costs 512
+; bytes of PRG and no code.
+; ----------------------------------------------------------------------
+sinLo
+	.for i = 0, i < 256, i += 1
+	.byte <(round(sin(i * 2 * pi / 256) * 256))
+	.next
+sinHi
+	.for i = 0, i < 256, i += 1
+	.byte >(round(sin(i * 2 * pi / 256) * 256))
+	.next
+
+	.include "gpu64_rt.inc"
+
+; ----------------------------------------------------------------------
+; Past the code: E-Quake tune 1, relocated to $a000 by tools/sidreloc.py
+; so it sits under BASIC, and the RLE-packed HONDANI logo (tools/hondani.py).
+; The one tune plays on the title and at the intermission. The PRG loads
+; contiguously up to the logo's end; the logo unpacks into VIC bank 3
+; ($cc00 / $e000), which nothing else uses. The tune's .bin carries a
+; two-byte load address, skipped here.
+; ----------------------------------------------------------------------
+	.cerror * > $a000, "the game's code has grown into the tune at $a000"
+	* = TUNE_INIT
+	.binary "gpu64_tune.bin", 2	; E-Quake tune 1, init $a000
+	.cerror * > LOGO_RLE
+	* = LOGO_RLE
+	.binary "gpu64_hondani.bin"
+	; The controls menu and the key remap, also under BASIC -- which is
+	; banked out from `title` to `finish`, the only span that calls them.
+	.include "gpu64_game_controls.inc"
+	.include "gpu64_game_pause.inc"
+	; Moved out of the main block when MAX_TRG went 32 -> 48 for E1M4, and
+	; out of the PRG altogether for the monsters' missiles: every entry is
+	; written by the level scan before anything reads it, and nothing reads
+	; them outside the frame loop, so they live on the logo's screen, which
+	; only the title shows -- and the title is always followed by a scan.
+	; The movers' travel fractions, which only the level scan writes, live
+	; in the cassette buffer: nothing in this game touches tape.
+	.virtual $0334
+mvTX0		.fill MAX_MOV, 0
+mvTY0		.fill MAX_MOV, 0
+mvTZ0		.fill MAX_MOV, 0
+	.cerror * > $0400, "the cassette buffer's tenants outgrew it"
+	.endv
+	.virtual LOGO_SCREEN
+; A trigger volume is a box, a target and whether it has already gone off.
+trKind		.fill MAX_TRG, 0
+trDest		.fill MAX_TRG, 0	; trigger_changelevel: E1Mn as n, 0 = end of episode
+trTgL		.fill MAX_TRG, 0
+trTgH		.fill MAX_TRG, 0
+trFired		.fill MAX_TRG, 0
+trMnXl		.fill MAX_TRG, 0
+trMnXh		.fill MAX_TRG, 0
+trMnYl		.fill MAX_TRG, 0
+trMnYh		.fill MAX_TRG, 0
+trMnZl		.fill MAX_TRG, 0
+trMnZh		.fill MAX_TRG, 0
+trMxXl		.fill MAX_TRG, 0
+trMxXh		.fill MAX_TRG, 0
+trMxYl		.fill MAX_TRG, 0
+trMxYh		.fill MAX_TRG, 0
+trMxZl		.fill MAX_TRG, 0
+trMxZh		.fill MAX_TRG, 0
+; A working teleport's destination: the eye in fine units, axis by axis
+; (X, Y, Z) and then its yaw, MAX_TEL apart. trDest holds slot + 1.
+nTel		.byte 0
+tpL		.fill 4 * MAX_TEL, 0
+tpH		.fill 4 * MAX_TEL, 0
+PJ_VARS					; gpu64_game_proj.inc's state, likewise
+	.endv
+	.include "gpu64_game_monsters.inc"
+	.include "gpu64_game_proj.inc"
+	.cerror * > PM_SCR, "the logo, the controls and the pause menu run into the pause's screen save"

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Honza Slesinger. GPL-3.0-or-later (see LICENSE).
 /*
  gpu64: did the loop see the access, and did it see the right address?
 
@@ -40,7 +41,7 @@
  occupies. Read it with GET_HEALTH ($0A) bytes 48-63.
 
  The three ways to read the answer, given a C64-side program that issues a
- known number of reads and counts its own $FF answers (Source/TestPRG/
+ known number of reads and counts its own $FF answers (tests/
  gpu64_probe_bus.a does exactly this):
 
    readsBad == the C64's $FF count      -> (a). orBadAddr/andBadAddr name
@@ -82,7 +83,7 @@
 // One 64-byte cache line, written only by core 0, for the same reason as
 // gpu64HoldGap: both warm paths preload it as a unit and a struct straddling
 // two lines would only ever be half-warmed. No section() attribute -- see the
-// milestone-14 linker-orphan regression in project/progress_tracker.md.
+// milestone-14 linker-orphan regression in dev/progress_tracker.md.
 typedef struct
 {
 	u32	reads;			// gpu64-window reads the loop serviced
