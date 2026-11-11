@@ -32,3 +32,6 @@ __pycache__/
 
 # 64tass listings (-L), rebuilt with the PRG
 /Source/Demos/*.lst
+
+# Unfinished stuff
+million

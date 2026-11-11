@@ -338,10 +338,14 @@ class Machine:
             # The whole image is reuMemory on the Pi: SPACE_REU blob reads
             # and the C64's own REU controller both see these bytes.
             self.gpu.reu[:len(image)] = image[:len(self.gpu.reu)]
-            slots = pack_levels.unpack(image)
-            self.gpu.c1_level_data = slots[0][1]
-            self.gpu.c1_level_data2 = slots[1][1] if len(slots) > 1 else None
-            self.gpu.c1_level_more = [d for _, d in slots[2:]]
+            try:
+                slots = pack_levels.unpack(image)
+            except ValueError:
+                slots = []              # a game's own image (million.reu): no level pack
+            if slots:
+                self.gpu.c1_level_data = slots[0][1]
+                self.gpu.c1_level_data2 = slots[1][1] if len(slots) > 1 else None
+                self.gpu.c1_level_more = [d for _, d in slots[2:]]
         sys.path.insert(0, os.path.join(os.path.dirname(
             os.path.abspath(__file__)), '..'))
         self.c1_stream = None
